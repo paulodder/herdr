@@ -85,16 +85,24 @@ has `Chord::from_key`; it gains an explicit equivalence table and total coverage
 
 | Key | Legacy encoding | Kitty (Ghostty) | Canonical chord |
 |---|---|---|---|
-| `C-i` | byte 9 → `Tab` | `105;5u` → `C-i` | `TAB` |
-| `C-m` | byte 13 → `Enter` | `109;5u` → `C-m` | `RET` |
-| `C-[` | byte 27 → `Esc` | `91;5u` → `C-[` | `ESC` |
+| `C-i` | byte 9 — indistinguishable from TAB | `105;5u` → `C-i` | legacy: `TAB` · kitty: `C-i` |
+| `C-m` | byte 13 — indistinguishable from RET | `109;5u` → `C-m` | legacy: `RET` · kitty: `C-m` |
+| `C-[` | byte 27 — indistinguishable from ESC | `91;5u` → `C-[` | legacy: `ESC` · kitty: `C-[` |
+| `C-]` | byte 29 | `93;5u` | `C-]` (unambiguous in both) |
 | `C-SPC` | byte 0 | `32;5u` | `C-SPC` |
-| `C-h` | byte 8 → `C-h` | `104;5u` → `C-h` | `C-h` (distinct from `DEL`) |
+| `C-h` | byte 8 | `104;5u` | `C-h` (distinct from `DEL`) |
 | `DEL` | byte 127 | `127u` | `DEL` |
 
+**The fold is one-directional and lossy only where the terminal is.** A legacy byte 27
+becomes `ESC` because the terminal cannot tell us anything more. A kitty CSI-u event that
+explicitly reports `Char('[') + CTRL` stays `C-[` — we must not collapse a distinction the
+terminal *did* give us, because doing so would silently destroy any binding on `C-[`,
+`C-i`, or `C-m`. Ghostty with the kitty protocol is the supported terminal, so these three
+chords are bindable; on a legacy terminal they are physically unavailable and the layer
+says so rather than pretending otherwise.
+
 Canonicalization runs **once**, at the normalization boundary — never at lookup time and
-never in the binding table. A binding written `C-i` and a binding written `TAB` resolve to
-the same chord, so a config file cannot express a distinction the terminal cannot deliver.
+never in the binding table.
 
 **Coverage test (this is the deliverable that ends the guessing):** a table-driven test
 over all 26 `C-<letter>`, all 26 `M-<letter>`, digits, the named keys, and both encodings,
@@ -174,6 +182,28 @@ The cure for "which keys even exist?" is to be able to ask.
 `C-h` is a prefix key, which the keymap stack already supports for free once §3.1 lands.
 This is the one feature that turns the layer from "a set of keys Paul has to remember"
 into something explorable.
+
+## 3.8 New default bindings: tab navigation and tab reordering
+
+```
+C-[   previous-tab      C-]   next-tab        (move between tabs)
+M-[   move-tab-left     M-]   move-tab-right  (move tabs around)
+```
+
+Two notes that matter:
+
+- **`move-tab-left` / `move-tab-right` are new commands, not exposed actions.** herdr's
+  `tab.move` API exists but is reachable only by mouse drag (`move_tab_via_api`) — there is
+  no `NavigateAction` for it. So these are `EmacsBuiltin` commands that call the API
+  directly, clamping at the ends (no wraparound: Emacs's `C-x ^`-family commands do not
+  wrap, and a tab silently teleporting from last to first is a worse surprise than a no-op).
+- **All four require the kitty keyboard protocol.** `C-[` is byte 27 on a legacy terminal
+  (i.e. `ESC`), and `M-[` is the CSI introducer itself — both are unusable without kitty.
+  Ghostty is the supported terminal, so this is fine, but the layer must not pretend
+  otherwise: on a terminal without the protocol these bindings simply never fire, and
+  `C-h b` shows them as bound (they *are* bound — the terminal just can't deliver them).
+
+These are defaults; `[emacs.keys]` overrides them like any other binding.
 
 ## 4. Config surface
 
