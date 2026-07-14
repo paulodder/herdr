@@ -56,10 +56,10 @@ impl App {
         };
 
         // C-g always cancels an in-flight chord (and, in TEXT mode,
-        // deactivates the mark — Task 8).
+        // deactivates the mark — Task 8). Delegates to KeyboardQuit so
+        // mid-chord quit and bound quit behave identically.
         if !self.state.emacs.pending.is_empty() && chord == Chord::ctrl('g') {
-            self.state.emacs.pending.clear();
-            self.state.emacs.echo = Some("Quit".to_string());
+            self.execute_emacs_command(EmacsCommand::KeyboardQuit, None);
             return true;
         }
 
@@ -140,6 +140,9 @@ impl App {
             }
             EmacsCommand::KeyboardQuit => {
                 self.state.emacs.pending.clear();
+                if let Some(text) = self.state.emacs.text_mode.as_mut() {
+                    text.mark_active = false;
+                }
                 self.state.emacs.echo = Some("Quit".to_string());
             }
             EmacsCommand::TextMode => self.emacs_enter_text_mode(),
@@ -156,10 +159,10 @@ impl App {
             | EmacsCommand::ScrollDown
             | EmacsCommand::BeginningOfBuffer
             | EmacsCommand::EndOfBuffer => self.emacs_text_motion(cmd),
+            EmacsCommand::SetMark => self.emacs_set_mark(),
+            EmacsCommand::ExchangePointAndMark => self.emacs_exchange_point_and_mark(),
             // Implemented by later tasks of this plan:
             EmacsCommand::GotoLine
-            | EmacsCommand::SetMark
-            | EmacsCommand::ExchangePointAndMark
             | EmacsCommand::KillRingSave
             | EmacsCommand::KillRegion
             | EmacsCommand::Yank
@@ -352,6 +355,35 @@ impl App {
             .saturating_sub(new_top as usize);
         self.state
             .set_pane_scroll_offset(&self.terminal_runtimes, pane_id, offset);
+    }
+
+    /// `C-SPC` — set the mark at point and activate the region
+    /// (transient-mark). The mark-ring push lands in the next task.
+    fn emacs_set_mark(&mut self) {
+        let Some(text) = self.state.emacs.text_mode.as_mut() else {
+            return;
+        };
+        text.mark = Some(text.point);
+        text.mark_active = true;
+        self.state.emacs.echo = Some("Mark set".to_string());
+    }
+
+    /// `C-x C-x` — exchange point and mark, reactivating the region.
+    fn emacs_exchange_point_and_mark(&mut self) {
+        let pane_id = {
+            let Some(text) = self.state.emacs.text_mode.as_mut() else {
+                return;
+            };
+            let Some(mark) = text.mark else {
+                self.state.emacs.echo = Some("No mark set in this buffer".to_string());
+                return;
+            };
+            text.mark = Some(text.point);
+            text.point = mark;
+            text.mark_active = true;
+            text.pane_id
+        };
+        self.emacs_scroll_point_into_view(pane_id);
     }
 }
 
@@ -706,5 +738,56 @@ mod tests {
             overlay_cells(&draw_text_mode_overlay(&app, pane), inner).is_empty(),
             "no overlay when the point is above the viewport"
         );
+    }
+
+    #[tokio::test]
+    async fn c_spc_sets_mark_and_c_g_deactivates_it() {
+        let (mut app, _pane, _rx) = emacs_app_with_channel(FIVE_LINES);
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x1b, b'<']); // M-<
+        app.route_client_input(vec![0x00]); // C-SPC
+        {
+            let text = app.state.emacs.text_mode.as_ref().unwrap();
+            assert_eq!(text.mark.map(|m| (m.row, m.col)), Some((0, 0)));
+            assert!(text.mark_active);
+        }
+        assert_eq!(app.state.emacs.echo.as_deref(), Some("Mark set"));
+        app.route_client_input(vec![0x07]); // C-g
+        let text = app.state.emacs.text_mode.as_ref().unwrap();
+        assert!(!text.mark_active, "deactivated");
+        assert_eq!(
+            text.mark.map(|m| (m.row, m.col)),
+            Some((0, 0)),
+            "mark position survives deactivation (Emacs behavior)"
+        );
+    }
+
+    #[tokio::test]
+    async fn c_g_mid_chord_also_deactivates_the_mark() {
+        let (mut app, _pane, _rx) = emacs_app_with_channel(FIVE_LINES);
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x00]); // C-SPC
+        assert!(app.state.emacs.text_mode.as_ref().unwrap().mark_active);
+        app.route_client_input(vec![0x18, 0x07]); // C-x C-g: quit mid-chord
+        assert!(app.state.emacs.pending.is_empty(), "chord cancelled");
+        assert_eq!(app.state.emacs.echo.as_deref(), Some("Quit"));
+        assert!(
+            !app.state.emacs.text_mode.as_ref().unwrap().mark_active,
+            "keyboard-quit mid-chord deactivates the mark, like bound C-g"
+        );
+    }
+
+    #[tokio::test]
+    async fn c_x_c_x_exchanges_point_and_mark() {
+        let (mut app, _pane, _rx) = emacs_app_with_channel(FIVE_LINES);
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x1b, b'<']); // M-< : point (0,0)
+        app.route_client_input(vec![0x00]); // C-SPC : mark (0,0)
+        app.route_client_input(vec![0x0e, 0x06]); // C-n C-f : point (1,1)
+        app.route_client_input(vec![0x18, 0x18]); // C-x C-x
+        let text = app.state.emacs.text_mode.as_ref().unwrap();
+        assert_eq!((text.point.row, text.point.col), (0, 0));
+        assert_eq!(text.mark.map(|m| (m.row, m.col)), Some((1, 1)));
+        assert!(text.mark_active);
     }
 }

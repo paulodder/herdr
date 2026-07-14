@@ -37,6 +37,30 @@ pub fn render_text_mode_overlay(
     }
     let top = (metrics.max_offset_from_bottom - metrics.offset_from_bottom) as u32;
 
+    // Region: min(point, mark)..max(point, mark), end-exclusive,
+    // row-major (Pos derives Ord in that order).
+    if text.mark_active {
+        if let Some(mark) = text.mark {
+            let (start, end) = if mark <= text.point {
+                (mark, text.point)
+            } else {
+                (text.point, mark)
+            };
+            let style = Style::default().bg(app.palette.surface1);
+            for rel_y in 0..inner.height {
+                let row = top + u32::from(rel_y);
+                if row < start.row || row > end.row {
+                    continue;
+                }
+                let from = if row == start.row { start.col } else { 0 };
+                let to = if row == end.row { end.col } else { inner.width };
+                for x in from..to.min(inner.width) {
+                    frame.buffer_mut()[(inner.x + x, inner.y + rel_y)].set_style(style);
+                }
+            }
+        }
+    }
+
     // Point: reversed+bold cell (theme-agnostic, like a block cursor).
     let Some(rel_row) = text.point.row.checked_sub(top) else {
         return;
