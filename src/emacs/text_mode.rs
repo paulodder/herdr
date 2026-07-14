@@ -3,8 +3,12 @@
 //! All coordinates are absolute scrollback positions: `row` counts from the
 //! top of the scrollback (same addressing as `Selection::line_range` and
 //! ghostty's `read_text_screen`), `col` is a character index in the row.
-//! Known limitation (accepted): one char == one grid column, so wide/CJK
-//! cells drift — the same class of limitation as upstream copy-mode math.
+//! Known limitations (accepted):
+//! - one char == one grid column, so wide/CJK cells drift — the same class
+//!   of limitation as upstream copy-mode math;
+//! - `next_line`/`previous_line` clamp the column to the target line's
+//!   length and do NOT track an Emacs goal column, so moving through a
+//!   short line loses the original column.
 
 /// Absolute position in a pane's scrollback grid. Ordered row-major, so
 /// `Ord` gives region ordering for free.
@@ -80,6 +84,7 @@ pub fn backward_char(buf: &dyn TextBuffer, pos: Pos) -> Pos {
     }
 }
 
+/// Clamps to the target line's length; no Emacs goal column (accepted limitation).
 pub fn next_line(buf: &dyn TextBuffer, pos: Pos) -> Pos {
     let pos = clamp(buf, pos);
     if pos.row < last_row(buf) {
@@ -95,6 +100,7 @@ pub fn next_line(buf: &dyn TextBuffer, pos: Pos) -> Pos {
     }
 }
 
+/// Clamps to the target line's length; no Emacs goal column (accepted limitation).
 pub fn previous_line(buf: &dyn TextBuffer, pos: Pos) -> Pos {
     let pos = clamp(buf, pos);
     if pos.row > 0 {
@@ -242,8 +248,9 @@ mod tests {
         let b = buf();
         // M-f from start of "alpha one" -> end of "alpha"
         assert_eq!(forward_word(&b, p(0, 0)), p(0, 5));
-        assert_eq!(forward_word(&b, p(0, 5)), p(0, 9)); // end of "one"
-                                                        // crossing the empty line to "bravo_2" ('_' is a word char)
+        // end of "one"
+        assert_eq!(forward_word(&b, p(0, 5)), p(0, 9));
+        // crossing the empty line to "bravo_2" ('_' is a word char)
         assert_eq!(forward_word(&b, p(0, 9)), p(2, 9));
         assert_eq!(backward_word(&b, p(2, 9)), p(2, 2));
         assert_eq!(backward_word(&b, p(2, 2)), p(0, 6)); // back to start of "one"
