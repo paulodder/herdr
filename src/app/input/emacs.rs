@@ -357,14 +357,22 @@ impl App {
             .set_pane_scroll_offset(&self.terminal_runtimes, pane_id, offset);
     }
 
-    /// `C-SPC` — set the mark at point and activate the region
-    /// (transient-mark). The mark-ring push lands in the next task.
+    /// `C-SPC` — set the mark at point, activate the region, and push the
+    /// pane's mark ring.
     fn emacs_set_mark(&mut self) {
+        let max = self.state.emacs.mark_ring_max;
         let Some(text) = self.state.emacs.text_mode.as_mut() else {
             return;
         };
         text.mark = Some(text.point);
         text.mark_active = true;
+        let (pane_id, point) = (text.pane_id, text.point);
+        self.state
+            .emacs
+            .mark_rings
+            .entry(pane_id)
+            .or_insert_with(|| crate::emacs::rings::MarkRing::new(max))
+            .push((point.row, point.col));
         self.state.emacs.echo = Some("Mark set".to_string());
     }
 
@@ -789,5 +797,18 @@ mod tests {
         assert_eq!((text.point.row, text.point.col), (0, 0));
         assert_eq!(text.mark.map(|m| (m.row, m.col)), Some((1, 1)));
         assert!(text.mark_active);
+    }
+
+    #[tokio::test]
+    async fn every_mark_set_pushes_the_pane_mark_ring() {
+        let (mut app, pane, _rx) = emacs_app_with_channel(FIVE_LINES);
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x00]); // C-SPC
+        app.route_client_input(vec![0x0e]); // C-n
+        app.route_client_input(vec![0x00]); // C-SPC
+        assert_eq!(
+            app.state.emacs.mark_rings.get(&pane).map(|r| r.len()),
+            Some(2)
+        );
     }
 }

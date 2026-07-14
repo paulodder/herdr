@@ -12,6 +12,7 @@
 pub mod commands;
 pub mod keymap;
 pub mod render;
+pub mod rings;
 pub mod text_mode;
 
 use crate::config::EmacsConfig;
@@ -36,6 +37,10 @@ pub struct EmacsState {
     /// Active TEXT-mode session, if any (`C-x [`). `mode` stays
     /// `Mode::Terminal`; the interception hook owns all keys while `Some`.
     pub text_mode: Option<text_mode::TextModeState>,
+    /// The kill ring (shared across panes, like Emacs).
+    pub kill_ring: rings::KillRing,
+    /// Per-pane mark rings (spec: per-pane, depth `mark_ring_max`).
+    pub mark_rings: std::collections::HashMap<crate::layout::PaneId, rings::MarkRing>,
 }
 
 impl EmacsState {
@@ -54,6 +59,8 @@ impl EmacsState {
             quoted_insert: false,
             echo: None,
             text_mode: None,
+            kill_ring: rings::KillRing::new(config.kill_ring_max.max(1)),
+            mark_rings: std::collections::HashMap::new(),
         }
     }
 
@@ -68,6 +75,7 @@ impl EmacsState {
         self.clipboard_sync = config.clipboard_sync;
         self.kill_ring_max = config.kill_ring_max.max(1);
         self.mark_ring_max = config.mark_ring_max.max(1);
+        self.kill_ring.set_max(config.kill_ring_max.max(1));
         self.keymaps = keymaps;
         if !self.enabled {
             self.pending.clear();
