@@ -49,6 +49,16 @@ impl App {
             return true;
         }
 
+        if self
+            .state
+            .emacs
+            .text_mode
+            .as_ref()
+            .is_some_and(|text| text.goto_line.is_some())
+        {
+            return self.emacs_goto_line_key(key);
+        }
+
         let text_active = self.state.emacs.text_mode.is_some();
 
         let Some(chord) = Chord::from_key(&key) else {
@@ -183,8 +193,11 @@ impl App {
                     self.emacs_yank_pop_live();
                 }
             }
-            // Implemented by later tasks of this plan:
-            EmacsCommand::GotoLine => {}
+            EmacsCommand::GotoLine => {
+                if let Some(text) = self.state.emacs.text_mode.as_mut() {
+                    text.goto_line = Some(String::new());
+                }
+            }
         }
     }
 
@@ -331,6 +344,71 @@ impl App {
                 EmacsCommand::EndOfBuffer => text_mode::buffer_end(&buf),
                 _ => point,
             }
+        };
+        if let Some(text) = self.state.emacs.text_mode.as_mut() {
+            text.point = new_point;
+        }
+        self.emacs_scroll_point_into_view(pane_id);
+    }
+
+    /// Key handling while the `M-g g` digit prompt is open.
+    fn emacs_goto_line_key(&mut self, key: TerminalKey) -> bool {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut jump: Option<(crate::layout::PaneId, u32)> = None;
+        {
+            let Some(text) = self.state.emacs.text_mode.as_mut() else {
+                return false;
+            };
+            let Some(input) = text.goto_line.as_mut() else {
+                return false;
+            };
+            let plain = !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT);
+            match key.code {
+                KeyCode::Char(c @ '0'..='9') if plain => input.push(c),
+                KeyCode::Backspace if plain => {
+                    input.pop();
+                }
+                KeyCode::Enter => {
+                    let line = input.parse::<u32>().ok().filter(|line| *line > 0);
+                    text.goto_line = None;
+                    if let Some(line) = line {
+                        jump = Some((text.pane_id, line));
+                    }
+                }
+                KeyCode::Esc => text.goto_line = None,
+                KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    text.goto_line = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some((pane_id, line)) = jump {
+            self.emacs_goto_line(pane_id, line);
+        }
+        true
+    }
+
+    /// Move point to the start of a 1-based line and follow with the view.
+    fn emacs_goto_line(&mut self, pane_id: crate::layout::PaneId, line: u32) {
+        let Some((ws_idx, _)) = self.emacs_focused_pane() else {
+            return;
+        };
+        let new_point = {
+            let Some(rt) =
+                self.state
+                    .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
+            else {
+                return;
+            };
+            let buf = RuntimeBuffer { rt };
+            text_mode::clamp(
+                &buf,
+                Pos {
+                    row: line - 1,
+                    col: 0,
+                },
+            )
         };
         if let Some(text) = self.state.emacs.text_mode.as_mut() {
             text.point = new_point;
@@ -1136,5 +1214,53 @@ mod tests {
         app.route_client_input(vec![0x1b, b'y']); // M-y
         assert_eq!(app.state.emacs.echo.as_deref(), Some("Buffer is read-only"));
         assert!(sent_bytes(&mut rx).is_empty(), "nothing typed into the PTY");
+    }
+
+    #[tokio::test]
+    async fn m_g_g_prompts_and_jumps_to_the_line() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(FIVE_LINES);
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x1b, b'g', b'g']); // M-g g
+        assert_eq!(
+            app.state
+                .emacs
+                .text_mode
+                .as_ref()
+                .unwrap()
+                .goto_line
+                .as_deref(),
+            Some("")
+        );
+        app.route_client_input(b"13".to_vec()); // prompt: "13"
+        app.route_client_input(vec![0x7f]); // DEL -> "1"
+        app.route_client_input(vec![0x7f]); // DEL -> ""
+        app.route_client_input(b"3".to_vec()); // prompt: "3"
+        assert_eq!(
+            app.state
+                .emacs
+                .text_mode
+                .as_ref()
+                .unwrap()
+                .goto_line
+                .as_deref(),
+            Some("3")
+        );
+        app.route_client_input(vec![0x0d]); // RET
+        let text = app.state.emacs.text_mode.as_ref().unwrap();
+        assert_eq!(text.goto_line, None);
+        assert_eq!((text.point.row, text.point.col), (2, 0), "line 3, 1-based");
+        assert!(sent_bytes(&mut rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn c_g_cancels_the_goto_prompt() {
+        let (mut app, _pane, _rx) = emacs_app_with_channel(FIVE_LINES);
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x1b, b'g', b'g']);
+        let before = app.state.emacs.text_mode.as_ref().unwrap().point;
+        app.route_client_input(vec![b'9', 0x07]); // digit, then C-g
+        let text = app.state.emacs.text_mode.as_ref().unwrap();
+        assert_eq!(text.goto_line, None);
+        assert_eq!(text.point, before, "point untouched");
     }
 }

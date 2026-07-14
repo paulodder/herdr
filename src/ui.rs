@@ -425,6 +425,9 @@ pub fn render_with_runtime_registry(
     // Ambient notifications sit above panes, but below interactive overlays.
     render_notifications(app, frame, terminal_area);
 
+    // Emacs layer seam (fork).
+    crate::emacs::render::render_echo_area(app, frame, terminal_area);
+
     match app.mode {
         Mode::Onboarding => render_onboarding_overlay(app, frame, frame.area()),
         Mode::ReleaseNotes => render_release_notes_overlay(app, frame, frame.area()),
