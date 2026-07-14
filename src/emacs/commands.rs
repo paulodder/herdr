@@ -107,10 +107,13 @@ impl EmacsCommand {
 
     /// TEXT-mode-only commands live in the text keymap; everything else in
     /// the global (live-mode) keymap. Yank/YankPop exist in both worlds.
+    /// KeyboardQuit is text-side: its only default binding (C-g) lives in
+    /// the text keymap, so overrides must land there too.
     fn is_text_command(self) -> bool {
         matches!(
             self,
-            Self::ExitTextMode
+            Self::KeyboardQuit
+                | Self::ExitTextMode
                 | Self::ForwardChar
                 | Self::BackwardChar
                 | Self::NextLine
@@ -331,6 +334,22 @@ mod tests {
             Lookup::Bound(EmacsCommand::OtherWindow)
         );
         assert_eq!(warnings.len(), 2, "{warnings:?}");
+    }
+
+    #[test]
+    fn keyboard_quit_override_lands_in_text_keymap() {
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert("C-]".to_string(), "keyboard-quit".to_string());
+        let (keymaps, warnings) = build_keymaps(&overrides);
+        assert!(warnings.is_empty());
+        assert_eq!(
+            keymaps.text.lookup(&parse_key_seq("C-]").unwrap()),
+            Lookup::Bound(EmacsCommand::KeyboardQuit)
+        );
+        assert_eq!(
+            keymaps.global.lookup(&parse_key_seq("C-]").unwrap()),
+            Lookup::Unbound
+        );
     }
 
     #[test]
