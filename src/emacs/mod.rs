@@ -76,6 +76,9 @@ impl EmacsState {
         self.kill_ring_max = config.kill_ring_max.max(1);
         self.mark_ring_max = config.mark_ring_max.max(1);
         self.kill_ring.set_max(config.kill_ring_max.max(1));
+        for ring in self.mark_rings.values_mut() {
+            ring.set_max(self.mark_ring_max);
+        }
         self.keymaps = keymaps;
         if !self.enabled {
             self.pending.clear();
@@ -91,5 +94,40 @@ impl EmacsState {
         self.text_mode
             .as_ref()
             .is_some_and(|text| text.pane_id == pane_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_config_trims_existing_pane_mark_rings() {
+        let mut state = EmacsState::from_config(&EmacsConfig {
+            enabled: true,
+            mark_ring_max: 10,
+            ..Default::default()
+        });
+        let pane_id = crate::layout::PaneId::alloc();
+        let ring = state
+            .mark_rings
+            .entry(pane_id)
+            .or_insert_with(|| rings::MarkRing::new(10));
+        for i in 0..5 {
+            ring.push((i, 0));
+        }
+        assert_eq!(state.mark_rings[&pane_id].len(), 5);
+
+        state.apply_config(&EmacsConfig {
+            enabled: true,
+            mark_ring_max: 2,
+            ..Default::default()
+        });
+
+        assert_eq!(
+            state.mark_rings[&pane_id].len(),
+            2,
+            "existing pane mark ring shrinks on live reload"
+        );
     }
 }

@@ -161,12 +161,17 @@ impl App {
             | EmacsCommand::EndOfBuffer => self.emacs_text_motion(cmd),
             EmacsCommand::SetMark => self.emacs_set_mark(),
             EmacsCommand::ExchangePointAndMark => self.emacs_exchange_point_and_mark(),
+            // In a read-only buffer C-w cannot delete, so kill-region
+            // degrades to kill-ring-save (spec §Phase 1).
+            EmacsCommand::KillRingSave | EmacsCommand::KillRegion => self.emacs_kill_ring_save(),
+            EmacsCommand::Yank | EmacsCommand::YankPop => {
+                if self.state.emacs.text_mode.is_some() {
+                    self.state.emacs.echo = Some("Buffer is read-only".to_string());
+                }
+                // Live-mode yank lands in the next task of this plan.
+            }
             // Implemented by later tasks of this plan:
-            EmacsCommand::GotoLine
-            | EmacsCommand::KillRingSave
-            | EmacsCommand::KillRegion
-            | EmacsCommand::Yank
-            | EmacsCommand::YankPop => {}
+            EmacsCommand::GotoLine => {}
         }
     }
 
@@ -392,6 +397,73 @@ impl App {
             text.pane_id
         };
         self.emacs_scroll_point_into_view(pane_id);
+    }
+
+    /// `M-w` / `C-w` — push the region onto the kill ring, sync the
+    /// system clipboard, deactivate the mark.
+    fn emacs_kill_ring_save(&mut self) {
+        let Some((ws_idx, _)) = self.emacs_focused_pane() else {
+            return;
+        };
+        let Some(text) = self.state.emacs.text_mode.as_ref() else {
+            return;
+        };
+        if !text.mark_active {
+            self.state.emacs.echo = Some("The mark is not active now".to_string());
+            return;
+        }
+        let Some(mark) = text.mark else {
+            return;
+        };
+        let (pane_id, point) = (text.pane_id, text.point);
+        let (start, end) = if mark <= point {
+            (mark, point)
+        } else {
+            (point, mark)
+        };
+        let Some(content) = self.emacs_region_text(ws_idx, pane_id, start, end) else {
+            self.state.emacs.echo = Some("Empty region".to_string());
+            return;
+        };
+        self.state.emacs.kill_ring.push(content.clone());
+        if self.state.emacs.clipboard_sync {
+            if self
+                .event_tx
+                .try_send(crate::events::AppEvent::ClipboardWrite {
+                    content: content.into_bytes(),
+                })
+                .is_err()
+            {
+                tracing::warn!("failed to queue emacs clipboard write event");
+            }
+        }
+        if let Some(text) = self.state.emacs.text_mode.as_mut() {
+            text.mark_active = false;
+        }
+    }
+
+    /// Region text for `[start, end)` (end-exclusive, Emacs semantics),
+    /// converted to ghostty's inclusive-endpoint `(col, row)` read.
+    fn emacs_region_text(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        start: Pos,
+        end: Pos,
+    ) -> Option<String> {
+        if start >= end {
+            return None;
+        }
+        let rt =
+            self.state
+                .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)?;
+        let (_, cols) = rt.text_dims()?;
+        let end_inclusive = if end.col > 0 {
+            (end.col - 1, end.row)
+        } else {
+            (cols.saturating_sub(1), end.row.checked_sub(1)?)
+        };
+        rt.read_text_range((start.col, start.row), end_inclusive)
     }
 }
 
@@ -810,5 +882,66 @@ mod tests {
             app.state.emacs.mark_rings.get(&pane).map(|r| r.len()),
             Some(2)
         );
+    }
+
+    /// M-< C-SPC C-n C-e : region covers "alpha\nbravo six".
+    fn select_first_two_lines(app: &mut App) {
+        enter_text_mode(app);
+        app.route_client_input(vec![0x1b, b'<']); // M-<
+        app.route_client_input(vec![0x00]); // C-SPC
+        app.route_client_input(vec![0x0e, 0x05]); // C-n C-e
+    }
+
+    fn clipboard_event_text(app: &mut App) -> String {
+        match app.event_rx.try_recv().expect("clipboard event") {
+            crate::events::AppEvent::ClipboardWrite { content } => {
+                String::from_utf8(content).expect("utf8 clipboard")
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn m_w_saves_region_to_kill_ring_and_clipboard() {
+        let (mut app, _pane, _rx) = emacs_app_with_channel(FIVE_LINES);
+        app.state.emacs.clipboard_sync = true; // event only; no shelling out
+        select_first_two_lines(&mut app);
+        app.route_client_input(vec![0x1b, b'w']); // M-w
+        assert_eq!(app.state.emacs.kill_ring.head(), Some("alpha\nbravo six"));
+        assert_eq!(clipboard_event_text(&mut app), "alpha\nbravo six");
+        let text = app.state.emacs.text_mode.as_ref().unwrap();
+        assert!(!text.mark_active, "region deactivates after save");
+        assert!(app.state.emacs.text_mode.is_some(), "still in TEXT mode");
+    }
+
+    #[tokio::test]
+    async fn c_w_in_read_only_buffer_saves_like_m_w() {
+        let (mut app, _pane, _rx) = emacs_app_with_channel(FIVE_LINES);
+        select_first_two_lines(&mut app);
+        app.route_client_input(vec![0x17]); // C-w
+        assert_eq!(app.state.emacs.kill_ring.head(), Some("alpha\nbravo six"));
+        assert!(!app.state.emacs.text_mode.as_ref().unwrap().mark_active);
+    }
+
+    #[tokio::test]
+    async fn m_w_without_active_mark_complains() {
+        let (mut app, _pane, _rx) = emacs_app_with_channel(FIVE_LINES);
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x1b, b'w']); // M-w, no mark
+        assert!(app.state.emacs.kill_ring.is_empty());
+        assert_eq!(
+            app.state.emacs.echo.as_deref(),
+            Some("The mark is not active now")
+        );
+    }
+
+    #[tokio::test]
+    async fn c_y_in_text_mode_reports_read_only() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(FIVE_LINES);
+        app.state.emacs.kill_ring.push("something".into());
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x19]); // C-y
+        assert_eq!(app.state.emacs.echo.as_deref(), Some("Buffer is read-only"));
+        assert!(sent_bytes(&mut rx).is_empty(), "nothing typed into the PTY");
     }
 }

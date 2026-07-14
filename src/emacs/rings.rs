@@ -103,6 +103,11 @@ impl MarkRing {
         self.entries.truncate(self.max);
     }
 
+    pub fn set_max(&mut self, max: usize) {
+        self.max = max.max(1);
+        self.entries.truncate(self.max);
+    }
+
     /// `C-u C-SPC` primitive (wired in Phase 4): pop the most recent mark
     /// and rotate it to the back.
     pub fn pop_rotate(&mut self) -> Option<(u32, u16)> {
@@ -183,5 +188,16 @@ mod tests {
         assert_eq!(ring.pop_rotate(), Some((2, 3)));
         assert_eq!(ring.pop_rotate(), Some((5, 1)), "rotates, Emacs-style");
         assert!(MarkRing::new(4).pop_rotate().is_none());
+    }
+
+    #[test]
+    fn mark_ring_set_max_shrinks_and_keeps_newest() {
+        let mut ring = MarkRing::new(10);
+        for i in 0..5 {
+            ring.push((i, 0));
+        }
+        ring.set_max(2);
+        assert_eq!(ring.len(), 2);
+        assert_eq!(ring.pop_rotate(), Some((4, 0)), "newest entries kept");
     }
 }
