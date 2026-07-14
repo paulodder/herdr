@@ -1604,8 +1604,19 @@ impl App {
                     }
                 }
                 crate::raw_input::RawInputEvent::Paste(text) => {
+                    // Emacs layer seam (fork): TEXT mode is a read-only view
+                    // over a hidden live pane — a host-terminal paste must be
+                    // swallowed like any other key, not typed into the PTY.
+                    let emacs_text_mode_active = self.state.emacs.enabled
+                        && self
+                            .state
+                            .active
+                            .and_then(|ws_idx| self.state.workspaces.get(ws_idx)?.focused_pane_id())
+                            .is_some_and(|focused| self.state.emacs.owns_pane_cursor(focused));
                     if self.state.mode != Mode::Terminal {
                         self.paste_into_active_text_input(&text);
+                    } else if emacs_text_mode_active {
+                        self.state.emacs.echo = Some("Buffer is read-only".to_string());
                     } else {
                         if let Some(ws_idx) = self.state.active {
                             if let Some(ws) = self.state.workspaces.get(ws_idx) {
@@ -4699,6 +4710,71 @@ last_pane = "prefix+tab"
         assert_eq!(
             app.state.settings.section,
             state::SettingsSection::Integrations
+        );
+    }
+
+    /// Finding 2: a host-terminal paste must not bypass the TEXT-mode
+    /// read-only invariant and type straight into the hidden live PTY.
+    #[tokio::test]
+    async fn route_client_input_paste_is_swallowed_in_emacs_text_mode() {
+        let mut app = test_app();
+        app.state.emacs = crate::emacs::EmacsState::from_config(&crate::config::EmacsConfig {
+            enabled: true,
+            clipboard_sync: false,
+            ..Default::default()
+        });
+        let mut workspace = Workspace::test_new("test");
+        let pane_id = workspace.focused_pane_id().unwrap();
+        let pane_infos = workspace.tabs[0]
+            .layout
+            .panes(ratatui::layout::Rect::new(0, 0, 40, 10));
+        let info = pane_infos[0].clone();
+        let (runtime, mut rx) = TerminalRuntime::test_with_channel_and_scrollback_bytes(
+            info.inner_rect.width,
+            info.inner_rect.height,
+            16 * 1024,
+            b"alpha\r\n",
+            8,
+        );
+        workspace.tabs[0].runtimes.insert(pane_id, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+
+        app.route_client_input(vec![0x18, b'[']); // C-x [: enter TEXT mode
+        assert!(app.state.emacs.text_mode.is_some(), "TEXT mode entered");
+
+        app.route_client_input(b"\x1b[200~pasted text\x1b[201~".to_vec());
+
+        assert_eq!(app.state.emacs.echo.as_deref(), Some("Buffer is read-only"));
+        assert!(
+            rx.try_recv().is_err(),
+            "paste must not reach the hidden live PTY under TEXT mode"
+        );
+    }
+
+    /// Finding 2, guard rail: with the Emacs layer disabled, paste behavior
+    /// must stay bit-for-bit unchanged (protects the stock guarantee).
+    #[tokio::test]
+    async fn route_client_input_paste_passes_through_when_emacs_layer_disabled() {
+        let mut app = test_app();
+        assert!(!app.state.emacs.enabled, "fixture default: layer disabled");
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let (runtime, mut rx) = TerminalRuntime::test_with_channel(80, 24);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        app.route_client_input(b"\x1b[200~hello\x1b[201~".to_vec());
+
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            bytes::Bytes::from_static(b"hello")
         );
     }
 

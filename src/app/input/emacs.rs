@@ -43,6 +43,26 @@ impl App {
 
         self.state.emacs.echo = None;
 
+        // Emacs layer seam (fork): TEXT mode freezes the cursor on the pane
+        // that was focused at `C-x [` time. If focus moved to another pane
+        // (or that pane no longer resolves to a live runtime) since then,
+        // auto-exit TEXT mode — running the entry_offset_from_bottom
+        // scroll-restore — and fall through to normal live-mode handling of
+        // this key instead of swallowing keystrokes typed at a pane the
+        // user can no longer see a cursor in.
+        if let Some(text_pane_id) = self.state.emacs.text_mode.as_ref().map(|text| text.pane_id) {
+            let focused_and_live = self.emacs_focused_pane().is_some_and(|(ws_idx, pane_id)| {
+                pane_id == text_pane_id
+                    && self
+                        .state
+                        .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
+                        .is_some()
+            });
+            if !focused_and_live {
+                self.emacs_exit_text_mode();
+            }
+        }
+
         if self.state.emacs.quoted_insert {
             self.state.emacs.quoted_insert = false;
             self.emacs_send_key_to_focused_pane(key);
@@ -708,6 +728,50 @@ mod tests {
         out
     }
 
+    /// Like `emacs_app_with_channel`, but with a second real pane (B) split
+    /// into the same tab, focus left on the first pane (A). Lets tests move
+    /// focus away from a TEXT-mode pane via the real `focus_pane_in_workspace`
+    /// path (Finding 1: TEXT mode must not survive a focus change).
+    fn emacs_app_with_two_panes(
+        bytes: &[u8],
+    ) -> (
+        App,
+        crate::layout::PaneId,
+        crate::layout::PaneId,
+        tokio::sync::mpsc::Receiver<bytes::Bytes>,
+        tokio::sync::mpsc::Receiver<bytes::Bytes>,
+    ) {
+        let (mut app, pane_a, rx_a) = emacs_app_with_channel(bytes);
+        let pane_b = crate::layout::PaneId::alloc();
+        let terminal_b = crate::terminal::TerminalId::alloc();
+        let (rt_b, rx_b) = crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+            20,
+            10,
+            16 * 1024,
+            b"",
+            8,
+        );
+        let ws = &mut app.state.workspaces[0];
+        ws.tabs[0]
+            .panes
+            .insert(pane_b, crate::pane::PaneState::new(terminal_b));
+        ws.tabs[0].runtimes.insert(pane_b, rt_b);
+        // insert_pane_near focuses the moved pane (B); reset focus to A so
+        // callers can enter TEXT mode there first, as in real usage.
+        ws.tabs[0].layout.insert_pane_near(
+            pane_a,
+            pane_b,
+            ratatui::layout::Direction::Horizontal,
+            0.5,
+        );
+        ws.tabs[0].layout.focus_pane(pane_a);
+        let pane_infos = ws.tabs[0]
+            .layout
+            .panes(ratatui::layout::Rect::new(0, 0, 40, 10));
+        app.state.view.pane_infos = pane_infos;
+        (app, pane_a, pane_b, rx_a, rx_b)
+    }
+
     #[tokio::test]
     async fn c_x_b_opens_the_navigator() {
         let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
@@ -862,6 +926,71 @@ mod tests {
             .pane_scroll_metrics(&app.terminal_runtimes, pane)
             .expect("metrics");
         assert_eq!(metrics.offset_from_bottom, entry_offset, "scroll restored");
+    }
+
+    /// Finding 1: TEXT mode must not survive the user focusing a different
+    /// pane. Enter TEXT mode on A, scroll its frozen view, then focus B (the
+    /// same way a mouse click or `C-x o` would) and send a plain key: TEXT
+    /// mode should auto-exit, A's scroll should restore to the entry offset,
+    /// and the key should reach B's PTY as an ordinary live-mode keystroke.
+    #[tokio::test]
+    async fn focus_change_auto_exits_text_mode_and_routes_the_key_live() {
+        let (mut app, pane_a, pane_b, _rx_a, mut rx_b) = emacs_app_with_two_panes(&fifty_lines());
+        let entry_offset = app
+            .state
+            .pane_scroll_metrics(&app.terminal_runtimes, pane_a)
+            .expect("metrics")
+            .offset_from_bottom;
+        enter_text_mode(&mut app);
+        assert_eq!(app.state.emacs.text_mode.as_ref().unwrap().pane_id, pane_a);
+        app.route_client_input(vec![0x1b, b'<']); // M-<: scroll to the top
+        let scrolled = app
+            .state
+            .pane_scroll_metrics(&app.terminal_runtimes, pane_a)
+            .expect("metrics")
+            .offset_from_bottom;
+        assert_ne!(scrolled, entry_offset, "TEXT mode moved A's viewport");
+
+        // The user focuses pane B (mouse click / C-x o) while TEXT mode is
+        // still nominally active on A.
+        assert!(app.state.focus_pane_in_workspace(0, pane_b));
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(pane_b));
+
+        app.route_client_input(b"x".to_vec());
+
+        assert!(
+            app.state.emacs.text_mode.is_none(),
+            "stale TEXT mode auto-exits on focus mismatch"
+        );
+        let restored = app
+            .state
+            .pane_scroll_metrics(&app.terminal_runtimes, pane_a)
+            .expect("metrics")
+            .offset_from_bottom;
+        assert_eq!(restored, entry_offset, "exit restored A's scroll offset");
+        assert_eq!(
+            sent_bytes(&mut rx_b),
+            b"x".to_vec(),
+            "key reached B's PTY as a normal live-mode keystroke"
+        );
+    }
+
+    /// Finding 1, second path: the TEXT-mode pane can also go stale by no
+    /// longer resolving to a live runtime (closed/replaced) even while it's
+    /// still nominally focused. That must auto-exit TEXT mode too.
+    #[tokio::test]
+    async fn text_mode_auto_exits_when_its_pane_runtime_is_gone() {
+        let (mut app, pane, _rx) = emacs_app_with_channel(FIVE_LINES);
+        enter_text_mode(&mut app);
+        assert!(app.state.emacs.text_mode.is_some());
+        app.state.workspaces[0].tabs[0].runtimes.remove(&pane);
+
+        app.route_client_input(vec![b'x']);
+
+        assert!(
+            app.state.emacs.text_mode.is_none(),
+            "TEXT mode exits when its pane no longer resolves to a live runtime"
+        );
     }
 
     #[tokio::test]
