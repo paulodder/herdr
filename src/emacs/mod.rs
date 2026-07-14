@@ -19,6 +19,14 @@ use crate::config::EmacsConfig;
 use commands::KeymapSet;
 use keymap::Chord;
 
+/// Bookkeeping for `M-y`: what the immediately preceding live-mode `C-y`
+/// typed, and where.
+#[derive(Debug, Clone)]
+pub struct LastYank {
+    pub pane_id: crate::layout::PaneId,
+    pub chars: usize,
+}
+
 /// All Emacs-layer state. Lives on `AppState` (pure data, no channels —
 /// matching AppState's own contract).
 #[derive(Debug)]
@@ -41,6 +49,9 @@ pub struct EmacsState {
     pub kill_ring: rings::KillRing,
     /// Per-pane mark rings (spec: per-pane, depth `mark_ring_max`).
     pub mark_rings: std::collections::HashMap<crate::layout::PaneId, rings::MarkRing>,
+    /// Set by a live-mode yank; cleared by any other key. `M-y` only
+    /// chains while this is `Some` (Emacs: "immediately after a yank").
+    pub last_yank: Option<LastYank>,
 }
 
 impl EmacsState {
@@ -61,6 +72,7 @@ impl EmacsState {
             text_mode: None,
             kill_ring: rings::KillRing::new(config.kill_ring_max.max(1)),
             mark_rings: std::collections::HashMap::new(),
+            last_yank: None,
         }
     }
 
@@ -85,6 +97,7 @@ impl EmacsState {
             self.quoted_insert = false;
             self.echo = None;
             self.text_mode = None;
+            self.last_yank = None;
         }
     }
 

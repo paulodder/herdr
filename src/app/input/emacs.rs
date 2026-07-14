@@ -93,6 +93,7 @@ impl App {
                     true
                 } else if seq.len() == 1 {
                     // Plain unbound key in live mode: flows to the pane.
+                    self.state.emacs.last_yank = None;
                     false
                 } else {
                     self.state.emacs.echo = Some(format!("{} is undefined", format_seq(&seq)));
@@ -122,6 +123,9 @@ impl App {
     /// convention from day one (spec: "the command table is the spine").
     pub(crate) fn execute_emacs_command(&mut self, cmd: EmacsCommand, prefix: Option<i64>) {
         let _ = prefix; // consumed by motions and C-u C-SPC in Phase 4
+        if !matches!(cmd, EmacsCommand::Yank | EmacsCommand::YankPop) {
+            self.state.emacs.last_yank = None;
+        }
         match cmd {
             EmacsCommand::SplitWindowBelow => self.emacs_navigate(NavigateAction::SplitHorizontal),
             EmacsCommand::SplitWindowRight => self.emacs_navigate(NavigateAction::SplitVertical),
@@ -164,11 +168,19 @@ impl App {
             // In a read-only buffer C-w cannot delete, so kill-region
             // degrades to kill-ring-save (spec §Phase 1).
             EmacsCommand::KillRingSave | EmacsCommand::KillRegion => self.emacs_kill_ring_save(),
-            EmacsCommand::Yank | EmacsCommand::YankPop => {
+            EmacsCommand::Yank => {
                 if self.state.emacs.text_mode.is_some() {
                     self.state.emacs.echo = Some("Buffer is read-only".to_string());
+                } else {
+                    self.emacs_yank_live();
                 }
-                // Live-mode yank lands in the next task of this plan.
+            }
+            EmacsCommand::YankPop => {
+                if self.state.emacs.text_mode.is_some() {
+                    self.state.emacs.echo = Some("Buffer is read-only".to_string());
+                } else {
+                    self.emacs_yank_pop_live();
+                }
             }
             // Implemented by later tasks of this plan:
             EmacsCommand::GotoLine => {}
@@ -464,6 +476,88 @@ impl App {
             (cols.saturating_sub(1), end.row.checked_sub(1)?)
         };
         rt.read_text_range((start.col, start.row), end_inclusive)
+    }
+
+    /// Live-mode `C-y`: type the kill-ring head into the focused pane —
+    /// the way scrollback text is handed to an agent. Syncs from the
+    /// system clipboard first when `clipboard_sync` is on.
+    fn emacs_yank_live(&mut self) {
+        if self.state.emacs.clipboard_sync {
+            self.state
+                .emacs
+                .kill_ring
+                .sync_from_system(crate::platform::read_clipboard_text());
+        }
+        let Some(content) = self.state.emacs.kill_ring.yank() else {
+            self.state.emacs.echo = Some("Kill ring is empty".to_string());
+            return;
+        };
+        let Some((ws_idx, pane_id)) = self.emacs_focused_pane() else {
+            return;
+        };
+        if self.emacs_send_text_to_pane(ws_idx, pane_id, &content, 0) {
+            self.state.emacs.last_yank = Some(crate::emacs::LastYank {
+                pane_id,
+                chars: content.chars().count(),
+            });
+        }
+    }
+
+    /// Live-mode `M-y` immediately after a yank: erase the previous yank
+    /// with backspaces and type the next-older kill. Known limitation
+    /// (accepted): unreliable for multi-line yanks into line editors.
+    fn emacs_yank_pop_live(&mut self) {
+        let Some(last) = self.state.emacs.last_yank.take() else {
+            self.state.emacs.echo = Some("Previous command was not a yank".to_string());
+            return;
+        };
+        let Some((ws_idx, pane_id)) = self.emacs_focused_pane() else {
+            return;
+        };
+        if pane_id != last.pane_id {
+            self.state.emacs.echo = Some("Previous command was not a yank".to_string());
+            return;
+        }
+        let Some(content) = self.state.emacs.kill_ring.yank_pop() else {
+            return;
+        };
+        if self.emacs_send_text_to_pane(ws_idx, pane_id, &content, last.chars) {
+            self.state.emacs.last_yank = Some(crate::emacs::LastYank {
+                pane_id,
+                chars: content.chars().count(),
+            });
+        }
+    }
+
+    /// Type text into a pane's PTY, preceded by `erase` DEL bytes.
+    /// Bracketed-paste framing mirrors the `RawInputEvent::Paste` arm of
+    /// `route_client_events`.
+    fn emacs_send_text_to_pane(
+        &mut self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        text: &str,
+        erase: usize,
+    ) -> bool {
+        let Some(rt) =
+            self.state
+                .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
+        else {
+            return false;
+        };
+        let mut bytes = vec![0x7f; erase];
+        let bracketed = rt
+            .input_state()
+            .map(|state| state.bracketed_paste)
+            .unwrap_or(false);
+        if bracketed {
+            bytes.extend_from_slice(b"\x1b[200~");
+            bytes.extend_from_slice(text.as_bytes());
+            bytes.extend_from_slice(b"\x1b[201~");
+        } else {
+            bytes.extend_from_slice(text.as_bytes());
+        }
+        rt.try_send_bytes(bytes::Bytes::from(bytes)).is_ok()
     }
 }
 
@@ -943,5 +1037,77 @@ mod tests {
         app.route_client_input(vec![0x19]); // C-y
         assert_eq!(app.state.emacs.echo.as_deref(), Some("Buffer is read-only"));
         assert!(sent_bytes(&mut rx).is_empty(), "nothing typed into the PTY");
+    }
+
+    #[tokio::test]
+    async fn m_w_with_clipboard_sync_off_emits_no_clipboard_event() {
+        let (mut app, _pane, _rx) = emacs_app_with_channel(FIVE_LINES);
+        assert!(!app.state.emacs.clipboard_sync, "fixture default is off");
+        select_first_two_lines(&mut app);
+        app.route_client_input(vec![0x1b, b'w']); // M-w
+        assert_eq!(app.state.emacs.kill_ring.head(), Some("alpha\nbravo six"));
+        assert!(
+            app.event_rx.try_recv().is_err(),
+            "no ClipboardWrite when clipboard_sync is off"
+        );
+    }
+
+    #[tokio::test]
+    async fn c_y_types_kill_ring_head_into_the_pty() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
+        app.state.emacs.kill_ring.push("hello".into());
+        app.route_client_input(vec![0x19]); // C-y in live mode
+                                            // test runtime has bracketed paste off -> raw text
+        assert_eq!(sent_bytes(&mut rx), b"hello".to_vec());
+        let last = app.state.emacs.last_yank.as_ref().expect("yank recorded");
+        assert_eq!(last.chars, 5);
+    }
+
+    #[tokio::test]
+    async fn m_y_replaces_the_previous_yank_with_the_older_kill() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
+        app.state.emacs.kill_ring.push("older".into());
+        app.state.emacs.kill_ring.push("newest".into());
+        app.route_client_input(vec![0x19]); // C-y -> "newest"
+        assert_eq!(sent_bytes(&mut rx), b"newest".to_vec());
+        app.route_client_input(vec![0x1b, b'y']); // M-y
+        let mut expected = vec![0x7f; 6]; // erase "newest"
+        expected.extend_from_slice(b"older");
+        assert_eq!(sent_bytes(&mut rx), expected);
+    }
+
+    #[tokio::test]
+    async fn m_y_without_a_preceding_yank_complains() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
+        app.state.emacs.kill_ring.push("x".into());
+        app.route_client_input(vec![0x1b, b'y']); // M-y cold
+        assert_eq!(
+            app.state.emacs.echo.as_deref(),
+            Some("Previous command was not a yank")
+        );
+        assert!(sent_bytes(&mut rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn typing_between_yanks_breaks_the_yank_chain() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
+        app.state.emacs.kill_ring.push("x".into());
+        app.route_client_input(vec![0x19]); // C-y
+        app.route_client_input(b"a".to_vec()); // plain key passes through
+        let _ = sent_bytes(&mut rx);
+        app.route_client_input(vec![0x1b, b'y']); // M-y no longer chains
+        assert_eq!(
+            app.state.emacs.echo.as_deref(),
+            Some("Previous command was not a yank")
+        );
+        assert!(sent_bytes(&mut rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn empty_kill_ring_yank_reports_and_sends_nothing() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
+        app.route_client_input(vec![0x19]);
+        assert_eq!(app.state.emacs.echo.as_deref(), Some("Kill ring is empty"));
+        assert!(sent_bytes(&mut rx).is_empty());
     }
 }
