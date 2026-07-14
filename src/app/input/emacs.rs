@@ -1254,7 +1254,7 @@ mod tests {
 
     #[tokio::test]
     async fn c_g_cancels_the_goto_prompt() {
-        let (mut app, _pane, _rx) = emacs_app_with_channel(FIVE_LINES);
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(FIVE_LINES);
         enter_text_mode(&mut app);
         app.route_client_input(vec![0x1b, b'g', b'g']);
         let before = app.state.emacs.text_mode.as_ref().unwrap().point;
@@ -1262,5 +1262,31 @@ mod tests {
         let text = app.state.emacs.text_mode.as_ref().unwrap();
         assert_eq!(text.goto_line, None);
         assert_eq!(text.point, before, "point untouched");
+        assert!(
+            sent_bytes(&mut rx).is_empty(),
+            "prompt keys never reach the PTY"
+        );
+    }
+
+    #[tokio::test]
+    async fn goto_line_clamps_out_of_range_lines_into_the_buffer() {
+        let (mut app, _pane, _rx) = emacs_app_with_channel(FIVE_LINES);
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x1b, b'>']); // M-> : learn the last row
+        let last_row = app.state.emacs.text_mode.as_ref().unwrap().point.row;
+        app.route_client_input(vec![0x1b, b'g', b'g']);
+        app.route_client_input(b"1".to_vec());
+        app.route_client_input(vec![0x0d]); // RET
+        let point = app.state.emacs.text_mode.as_ref().unwrap().point;
+        assert_eq!((point.row, point.col), (0, 0), "line 1 is the first row");
+        app.route_client_input(vec![0x1b, b'g', b'g']);
+        app.route_client_input(b"9999".to_vec());
+        app.route_client_input(vec![0x0d]); // RET
+        let point = app.state.emacs.text_mode.as_ref().unwrap().point;
+        assert_eq!(
+            (point.row, point.col),
+            (last_row, 0),
+            "out-of-range line clamps to the last row"
+        );
     }
 }

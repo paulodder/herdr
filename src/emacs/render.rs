@@ -156,4 +156,21 @@ mod tests {
         let pending = bottom_row_text(&state, Rect::new(0, 0, 20, 5));
         assert!(pending.starts_with("C-x-"), "{pending:?}");
     }
+
+    #[test]
+    fn echo_area_shows_goto_line_prompt() {
+        let mut state = crate::app::AppState::test_new();
+        state.emacs.text_mode = Some(crate::emacs::text_mode::TextModeState {
+            pane_id: crate::layout::PaneId::alloc(),
+            point: crate::emacs::text_mode::Pos { row: 0, col: 0 },
+            mark: None,
+            mark_active: false,
+            entry_offset_from_bottom: 0,
+            goto_line: Some("12".to_string()),
+        });
+        // The prompt outranks a stale echo message.
+        state.emacs.echo = Some("Mark set".to_string());
+        let text = bottom_row_text(&state, Rect::new(0, 0, 20, 5));
+        assert!(text.starts_with("Goto line: 12"), "{text:?}");
+    }
 }
