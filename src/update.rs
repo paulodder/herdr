@@ -1944,6 +1944,15 @@ fn homebrew_cellar_keg_root(path: &Path) -> Option<PathBuf> {
 
 /// Manual self-update command (`herdr update`).
 pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
+    // Fork guard (emacs branch): never overwrite this binary. The
+    // `cfg!(test)` escape keeps upstream's own self-update unit tests
+    // exercising the real logic.
+    if !cfg!(test) {
+        return Err(
+            "self-update is disabled in this fork; rebase the emacs branch onto upstream/master instead"
+                .into(),
+        );
+    }
     let channel = UpdateChannel::configured();
     #[cfg(windows)]
     if channel == UpdateChannel::Stable {

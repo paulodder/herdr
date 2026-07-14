@@ -201,8 +201,11 @@ fn repeat_key_identity(
     (key.code, key.modifiers)
 }
 
-fn auto_updates_enabled(no_session: bool) -> bool {
-    !no_session && !cfg!(debug_assertions)
+fn auto_updates_enabled(_no_session: bool) -> bool {
+    // Fork guard (emacs branch): this build must never replace itself or
+    // run background version/manifest checks; updates come from rebasing
+    // onto upstream. Upstream logic: `!no_session && !cfg!(debug_assertions)`.
+    false
 }
 
 fn background_update_check_enabled(no_session: bool, check_enabled: bool) -> bool {
@@ -1759,6 +1762,15 @@ mod tests {
             scroll: 0,
             preview: true,
         }
+    }
+
+    #[test]
+    fn fork_guard_disables_background_update_checks() {
+        // Fork guard: this build must never self-update or phone home.
+        // (Debug builds were already off; this pins the invariant for all
+        // profiles — run with --release to prove the release path.)
+        assert!(!background_update_check_enabled(false, true));
+        assert!(!background_update_check_enabled(true, true));
     }
 
     fn test_app() -> App {
