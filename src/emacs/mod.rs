@@ -9,4 +9,5 @@
 //! layer consumes no keys and the fork behaves as stock herdr.
 #![allow(dead_code)] // remove when Phase 2 (isearch/occur) fills in the remaining commands
 
+pub mod commands;
 pub mod keymap;

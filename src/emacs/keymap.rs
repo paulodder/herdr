@@ -80,13 +80,13 @@ pub fn parse_chord(s: &str) -> Option<Chord> {
     let mut rest = s;
     loop {
         if let Some(r) = rest.strip_prefix("C-") {
-            if r.is_empty() {
+            if r.is_empty() || ctrl {
                 return None;
             }
             ctrl = true;
             rest = r;
         } else if let Some(r) = rest.strip_prefix("M-") {
-            if r.is_empty() {
+            if r.is_empty() || meta {
                 return None;
             }
             meta = true;
@@ -245,6 +245,34 @@ mod tests {
         assert_eq!(parse_chord(""), None);
         assert_eq!(parse_chord("C-"), None);
         assert_eq!(parse_chord("xy"), None);
+        // repeated modifiers must be rejected
+        assert_eq!(parse_chord("C-C-x"), None);
+        assert_eq!(parse_chord("M-M-x"), None);
+        // named keys
+        assert_eq!(
+            parse_chord("TAB"),
+            Some(Chord {
+                ctrl: false,
+                meta: false,
+                code: KeyCode::Tab
+            })
+        );
+        assert_eq!(
+            parse_chord("ESC"),
+            Some(Chord {
+                ctrl: false,
+                meta: false,
+                code: KeyCode::Esc
+            })
+        );
+        assert_eq!(
+            parse_chord("DEL"),
+            Some(Chord {
+                ctrl: false,
+                meta: false,
+                code: KeyCode::Backspace
+            })
+        );
     }
 
     #[test]
