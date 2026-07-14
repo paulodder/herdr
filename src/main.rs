@@ -64,6 +64,7 @@ mod cli;
 mod client;
 mod config;
 mod detect;
+mod emacs; // Emacs layer seam (fork):
 mod events;
 mod ghostty;
 mod handoff_runtime;
