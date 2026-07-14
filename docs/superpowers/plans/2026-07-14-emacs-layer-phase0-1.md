@@ -62,7 +62,7 @@ Modified upstream files (the whole rebase surface of Phase 0+1):
 | `src/config/io.rs` | `"emacs"` in `KNOWN_TOP_LEVEL_CONFIG_KEYS` + `load_live_section` call |
 | `src/config.rs` | re-export `EmacsConfig` |
 | `src/app/state.rs` | `emacs` field on `AppState` + init in `test_new()` |
-| `src/app/mod.rs` | init in `App::new`, hook in `route_client_events`, `apply_live_config` branch, `auto_updates_enabled` guard |
+| `src/app/mod.rs` | init in `App::new`, hook in `route_client_events`, `apply_live_config` branch, `auto_updates_enabled` guard, Paste-arm read-only guard (added post-review, commit 3d1a5ac) |
 | `src/app/input/mod.rs` | `mod emacs;` |
 | `src/update.rs` | early-return fork guard in `self_update` |
 | `src/ui.rs` | 1 call: echo area |
