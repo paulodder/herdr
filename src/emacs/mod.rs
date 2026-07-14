@@ -11,6 +11,7 @@
 
 pub mod commands;
 pub mod keymap;
+pub mod text_mode;
 
 use crate::config::EmacsConfig;
 use commands::KeymapSet;

@@ -2490,6 +2490,18 @@ impl PaneRuntime {
         self.terminal.extract_selection(selection)
     }
 
+    pub fn text_dims(&self) -> Option<(usize, u16)> {
+        self.terminal.text_dims()
+    }
+
+    pub fn text_row(&self, row: u32) -> Option<String> {
+        self.terminal.text_row(row)
+    }
+
+    pub fn read_text_range(&self, start: (u16, u32), end: (u16, u32)) -> Option<String> {
+        self.terminal.read_text_range(start, end)
+    }
+
     pub fn render(&self, frame: &mut Frame, area: Rect, show_cursor: bool) {
         self.terminal.render(frame, area, show_cursor);
     }

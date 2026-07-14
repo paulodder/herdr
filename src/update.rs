@@ -1944,7 +1944,7 @@ fn homebrew_cellar_keg_root(path: &Path) -> Option<PathBuf> {
 
 /// Manual self-update command (`herdr update`).
 pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
-    // Fork guard (emacs branch): never overwrite this binary. The
+    // Emacs layer seam (fork): never overwrite this binary. The
     // `cfg!(test)` escape keeps upstream's own self-update unit tests
     // exercising the real logic.
     if !cfg!(test) {

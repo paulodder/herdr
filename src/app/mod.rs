@@ -202,7 +202,7 @@ fn repeat_key_identity(
 }
 
 fn auto_updates_enabled(_no_session: bool) -> bool {
-    // Fork guard (emacs branch): this build must never replace itself or
+    // Emacs layer seam (fork): this build must never replace itself or
     // run background version/manifest checks; updates come from rebasing
     // onto upstream. Upstream logic: `!no_session && !cfg!(debug_assertions)`.
     false

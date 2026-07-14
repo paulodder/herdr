@@ -343,6 +343,18 @@ impl TerminalRuntime {
         self.0.extract_selection(selection)
     }
 
+    pub fn text_dims(&self) -> Option<(usize, u16)> {
+        self.0.text_dims()
+    }
+
+    pub fn text_row(&self, row: u32) -> Option<String> {
+        self.0.text_row(row)
+    }
+
+    pub fn read_text_range(&self, start: (u16, u32), end: (u16, u32)) -> Option<String> {
+        self.0.read_text_range(start, end)
+    }
+
     pub fn render(&self, frame: &mut Frame, area: Rect, show_cursor: bool) {
         self.0.render(frame, area, show_cursor);
     }
@@ -507,5 +519,31 @@ impl TerminalRuntime {
             channel_capacity,
         );
         (Self(runtime), rx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn emacs_text_accessors_read_scrollback() {
+        let rt = TerminalRuntime::test_with_scrollback_bytes(
+            10,
+            3,
+            16 * 1024,
+            b"alpha\r\nbravo six\r\ncharlie\r\ndelta\r\n",
+        );
+        let (total, cols) = rt.text_dims().expect("dims");
+        assert_eq!(cols, 10);
+        assert!(total >= 4, "screen + scrollback rows, got {total}");
+        assert_eq!(rt.text_row(0).as_deref(), Some("alpha"));
+        assert_eq!(rt.text_row(1).as_deref(), Some("bravo six"));
+        assert_eq!(rt.text_row(u32::MAX), None);
+        // Inclusive endpoints, (col, row) coordinates:
+        assert_eq!(rt.read_text_range((0, 0), (4, 0)).as_deref(), Some("alpha"));
+        let two_lines = rt.read_text_range((2, 0), (2, 1)).expect("range");
+        assert!(two_lines.contains("pha"), "{two_lines:?}");
+        assert!(two_lines.contains("bra"), "{two_lines:?}");
     }
 }

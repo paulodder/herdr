@@ -405,6 +405,18 @@ impl PaneTerminal {
         self.ghostty.extract_selection(selection)
     }
 
+    pub fn text_dims(&self) -> Option<(usize, u16)> {
+        self.ghostty.text_dims()
+    }
+
+    pub fn text_row(&self, row: u32) -> Option<String> {
+        self.ghostty.text_row(row)
+    }
+
+    pub fn read_text_range(&self, start: (u16, u32), end: (u16, u32)) -> Option<String> {
+        self.ghostty.read_text_range(start, end)
+    }
+
     pub fn render(&self, frame: &mut Frame, area: Rect, show_cursor: bool) {
         self.ghostty.render(frame, area, show_cursor);
     }
@@ -1710,6 +1722,40 @@ impl GhosttyPaneTerminal {
             .lock()
             .ok()
             .and_then(|mut core| ghostty_extract_selection(&mut core, selection).ok())
+    }
+
+    /// Emacs layer seam (fork): read-side scrollback access.
+    /// (total rows including scrollback, grid columns).
+    pub fn text_dims(&self) -> Option<(usize, u16)> {
+        self.core.lock().ok().and_then(|core| {
+            let total = core.terminal.total_rows().ok()?;
+            let cols = core.terminal.cols().ok()?;
+            Some((total, cols))
+        })
+    }
+
+    /// Emacs layer seam (fork): one absolute row as plain text, trailing
+    /// whitespace trimmed. `None` when the row is out of range.
+    pub fn text_row(&self, row: u32) -> Option<String> {
+        self.core.lock().ok().and_then(|core| {
+            let total = core.terminal.total_rows().ok()?;
+            if u64::from(row) >= total as u64 {
+                return None;
+            }
+            let cols = core.terminal.cols().ok()?;
+            ghostty_screen_row(&core.terminal, cols, row)
+                .ok()
+                .map(|line| line.trim_end().to_string())
+        })
+    }
+
+    /// Emacs layer seam (fork): plain text between two inclusive
+    /// `(col, row)` endpoints (absolute scrollback rows).
+    pub fn read_text_range(&self, start: (u16, u32), end: (u16, u32)) -> Option<String> {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|core| core.terminal.read_text_screen(start, end, false).ok())
     }
 
     pub fn visible_hyperlinks(&self, area: Rect) -> Vec<((u16, u16), String, String)> {
