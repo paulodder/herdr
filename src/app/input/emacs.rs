@@ -96,6 +96,7 @@ impl App {
                     self.state.emacs.last_yank = None;
                     false
                 } else {
+                    self.state.emacs.last_yank = None;
                     self.state.emacs.echo = Some(format!("{} is undefined", format_seq(&seq)));
                     true
                 }
@@ -1056,8 +1057,8 @@ mod tests {
     async fn c_y_types_kill_ring_head_into_the_pty() {
         let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
         app.state.emacs.kill_ring.push("hello".into());
-        app.route_client_input(vec![0x19]); // C-y in live mode
-                                            // test runtime has bracketed paste off -> raw text
+        // C-y in live mode; test runtime has bracketed paste off -> raw text
+        app.route_client_input(vec![0x19]);
         assert_eq!(sent_bytes(&mut rx), b"hello".to_vec());
         let last = app.state.emacs.last_yank.as_ref().expect("yank recorded");
         assert_eq!(last.chars, 5);
@@ -1109,5 +1110,31 @@ mod tests {
         app.route_client_input(vec![0x19]);
         assert_eq!(app.state.emacs.echo.as_deref(), Some("Kill ring is empty"));
         assert!(sent_bytes(&mut rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn unbound_multi_chord_between_yanks_breaks_the_yank_chain() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
+        app.state.emacs.kill_ring.push("x".into());
+        app.route_client_input(vec![0x19]); // C-y
+        app.route_client_input(vec![0x18, b'z']); // C-x z: unbound, swallowed
+        assert_eq!(app.state.emacs.echo.as_deref(), Some("C-x z is undefined"));
+        let _ = sent_bytes(&mut rx);
+        app.route_client_input(vec![0x1b, b'y']); // M-y no longer chains
+        assert_eq!(
+            app.state.emacs.echo.as_deref(),
+            Some("Previous command was not a yank")
+        );
+        assert!(sent_bytes(&mut rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn m_y_in_text_mode_reports_read_only() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(FIVE_LINES);
+        app.state.emacs.kill_ring.push("something".into());
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x1b, b'y']); // M-y
+        assert_eq!(app.state.emacs.echo.as_deref(), Some("Buffer is read-only"));
+        assert!(sent_bytes(&mut rx).is_empty(), "nothing typed into the PTY");
     }
 }
