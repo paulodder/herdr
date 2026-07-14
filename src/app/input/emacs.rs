@@ -588,4 +588,123 @@ mod tests {
         assert!(sent_bytes(&mut rx).is_empty());
         assert!(app.state.emacs.text_mode.is_some(), "still in TEXT mode");
     }
+
+    #[tokio::test]
+    async fn owns_pane_cursor_only_for_the_text_mode_pane() {
+        let (mut app, pane, _rx) = emacs_app_with_channel(FIVE_LINES);
+        assert!(!app.state.emacs.owns_pane_cursor(pane), "off before entry");
+        enter_text_mode(&mut app);
+        assert!(app.state.emacs.owns_pane_cursor(pane));
+        assert!(
+            !app.state
+                .emacs
+                .owns_pane_cursor(crate::layout::PaneId::alloc()),
+            "other panes keep their host cursor"
+        );
+        app.route_client_input(vec![b'q']);
+        assert!(!app.state.emacs.owns_pane_cursor(pane), "off after exit");
+    }
+
+    /// Renders only the TEXT-mode overlay for the app's single pane into a
+    /// TestBackend buffer (same shape as the `src/ui/panes.rs` render tests).
+    fn draw_text_mode_overlay(app: &App, pane: crate::layout::PaneId) -> ratatui::buffer::Buffer {
+        let info = app.state.pane_info_by_id(pane).expect("pane info").clone();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 10)).unwrap();
+        terminal
+            .draw(|frame| {
+                let rt = app
+                    .state
+                    .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane)
+                    .expect("runtime");
+                crate::emacs::render::render_text_mode_overlay(&app.state, frame, &info, rt);
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    /// Cells inside `inner` carrying the overlay's REVERSED modifier.
+    fn overlay_cells(
+        buffer: &ratatui::buffer::Buffer,
+        inner: ratatui::layout::Rect,
+    ) -> Vec<(u16, u16)> {
+        let mut cells = Vec::new();
+        for y in inner.y..inner.y + inner.height {
+            for x in inner.x..inner.x + inner.width {
+                if buffer[(x, y)]
+                    .style()
+                    .add_modifier
+                    .contains(ratatui::style::Modifier::REVERSED)
+                {
+                    cells.push((x, y));
+                }
+            }
+        }
+        cells
+    }
+
+    #[tokio::test]
+    async fn overlay_draws_reversed_bold_point_at_the_point_cell() {
+        let (mut app, pane, _rx) = emacs_app_with_channel(FIVE_LINES);
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x1b, b'<']); // M-< -> (0, 0)
+        app.route_client_input(vec![0x06, 0x06]); // C-f C-f -> (0, 2)
+        let inner = app.state.pane_info_by_id(pane).unwrap().inner_rect;
+        let metrics = app
+            .state
+            .pane_scroll_metrics(&app.terminal_runtimes, pane)
+            .expect("metrics");
+        assert_eq!(
+            metrics.offset_from_bottom, metrics.max_offset_from_bottom,
+            "viewport top is scrollback row 0"
+        );
+        let buffer = draw_text_mode_overlay(&app, pane);
+        let style = buffer[(inner.x + 2, inner.y)].style();
+        assert!(
+            style
+                .add_modifier
+                .contains(ratatui::style::Modifier::REVERSED | ratatui::style::Modifier::BOLD),
+            "point cell is reversed+bold, got {style:?}"
+        );
+        assert_eq!(
+            overlay_cells(&buffer, inner),
+            vec![(inner.x + 2, inner.y)],
+            "exactly one overlay cell, at (inner.x + col, inner.y + rel_row)"
+        );
+    }
+
+    #[tokio::test]
+    async fn overlay_draws_nothing_when_point_is_off_screen() {
+        let (mut app, pane, _rx) = emacs_app_with_channel(&fifty_lines());
+        enter_text_mode(&mut app);
+        let inner = app.state.pane_info_by_id(pane).unwrap().inner_rect;
+        let metrics = app
+            .state
+            .pane_scroll_metrics(&app.terminal_runtimes, pane)
+            .expect("metrics");
+        assert!(metrics.max_offset_from_bottom > 0, "fixture has scrollback");
+        // Below the viewport: point stays at the bottom, view scrolled to top.
+        app.state.set_pane_scroll_offset(
+            &app.terminal_runtimes,
+            pane,
+            metrics.max_offset_from_bottom,
+        );
+        assert!(
+            app.state.emacs.text_mode.as_ref().unwrap().point.row >= u32::from(inner.height),
+            "point sits below the visible rows"
+        );
+        assert!(
+            overlay_cells(&draw_text_mode_overlay(&app, pane), inner).is_empty(),
+            "no overlay when the point is below the viewport"
+        );
+        // Above the viewport: point on row 0, view scrolled back to the bottom.
+        app.state
+            .set_pane_scroll_offset(&app.terminal_runtimes, pane, 0);
+        app.state.emacs.text_mode.as_mut().unwrap().point =
+            crate::emacs::text_mode::Pos { row: 0, col: 0 };
+        assert!(
+            overlay_cells(&draw_text_mode_overlay(&app, pane), inner).is_empty(),
+            "no overlay when the point is above the viewport"
+        );
+    }
 }

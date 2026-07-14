@@ -16,6 +16,10 @@ pub fn render_text_mode_overlay(
     info: &PaneInfo,
     rt: &TerminalRuntime,
 ) {
+    // Decision: gate on pane_id only, NOT focus. If focus moves to another
+    // pane while TEXT mode is active, the TEXT pane keeps its point and the
+    // focused pane shows its live cursor — one cursor per window, like Emacs.
+    // (Emacs distinguishes them with filled-vs-hollow; possible later polish.)
     let Some(text) = app
         .emacs
         .text_mode
