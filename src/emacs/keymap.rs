@@ -193,6 +193,40 @@ impl<T: Copy> Keymap<T> {
             Lookup::Unbound
         }
     }
+
+    /// All bindings in insertion order. Used by `describe-bindings`.
+    pub fn bindings(&self) -> &[(Vec<Chord>, T)] {
+        &self.bindings
+    }
+}
+
+/// Look a sequence up across an ordered stack of keymaps, with Emacs's
+/// semantics (spec §3.1):
+///
+/// - the **first exact `Bound`** in priority order wins — an earlier map
+///   shadows a later one;
+/// - if nothing binds the sequence but **any** map reports `Prefix`, the
+///   result is `Prefix` (prefix-ness is a union: `C-x` must stay a live
+///   prefix in TEXT mode because the *global* map binds `C-x 3`, even
+///   though the text map only binds `C-x C-x`);
+/// - otherwise `Unbound`.
+pub fn stack_lookup<'a, T: Copy + 'a>(
+    maps: impl Iterator<Item = &'a Keymap<T>>,
+    seq: &[Chord],
+) -> Lookup<T> {
+    let mut is_prefix = false;
+    for map in maps {
+        match map.lookup(seq) {
+            Lookup::Bound(value) => return Lookup::Bound(value),
+            Lookup::Prefix => is_prefix = true,
+            Lookup::Unbound => {}
+        }
+    }
+    if is_prefix {
+        Lookup::Prefix
+    } else {
+        Lookup::Unbound
+    }
 }
 
 #[cfg(test)]
@@ -330,5 +364,75 @@ mod tests {
             map.lookup(&parse_key_seq("C-x 2").unwrap()),
             Lookup::Bound(9)
         );
+    }
+
+    #[test]
+    fn stack_lookup_prefers_the_first_map_and_unions_prefixes() {
+        // `local` shadows `global` for C-x C-x, but C-x 3 only exists in
+        // `global` — the exact case that was broken in TEXT mode.
+        let mut local: Keymap<u8> = Keymap::default();
+        local.bind(parse_key_seq("C-x C-x").unwrap(), 1);
+        local.bind(parse_key_seq("C-f").unwrap(), 2);
+
+        let mut global: Keymap<u8> = Keymap::default();
+        global.bind(parse_key_seq("C-x 3").unwrap(), 3);
+        global.bind(parse_key_seq("C-f").unwrap(), 4);
+
+        let stack = || [&local, &global].into_iter();
+
+        // First exact Bound wins: local shadows global on C-f.
+        assert_eq!(
+            stack_lookup(stack(), &parse_key_seq("C-f").unwrap()),
+            Lookup::Bound(2)
+        );
+        // Fallthrough: C-x 3 is only in global.
+        assert_eq!(
+            stack_lookup(stack(), &parse_key_seq("C-x 3").unwrap()),
+            Lookup::Bound(3)
+        );
+        assert_eq!(
+            stack_lookup(stack(), &parse_key_seq("C-x C-x").unwrap()),
+            Lookup::Bound(1)
+        );
+        // Prefix is a UNION across the stack: C-x stays live even though the
+        // local map alone would also report Prefix — and it must stay live
+        // when only the global map has a longer binding.
+        assert_eq!(
+            stack_lookup([&local].into_iter(), &parse_key_seq("C-x").unwrap()),
+            Lookup::Prefix
+        );
+        assert_eq!(
+            stack_lookup([&global].into_iter(), &parse_key_seq("C-x").unwrap()),
+            Lookup::Prefix
+        );
+        assert_eq!(
+            stack_lookup(stack(), &parse_key_seq("C-x").unwrap()),
+            Lookup::Prefix
+        );
+        // Nothing anywhere.
+        assert_eq!(
+            stack_lookup(stack(), &parse_key_seq("C-z").unwrap()),
+            Lookup::Unbound
+        );
+        // A Bound in an earlier map beats a Prefix in a later one.
+        let mut shadow: Keymap<u8> = Keymap::default();
+        shadow.bind(parse_key_seq("C-x").unwrap(), 9);
+        assert_eq!(
+            stack_lookup(
+                [&shadow, &global].into_iter(),
+                &parse_key_seq("C-x").unwrap()
+            ),
+            Lookup::Bound(9)
+        );
+    }
+
+    #[test]
+    fn keymap_exposes_its_bindings_for_describe_bindings() {
+        let mut map: Keymap<u8> = Keymap::default();
+        map.bind(parse_key_seq("C-x 3").unwrap(), 7);
+        let bindings = map.bindings();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].0, parse_key_seq("C-x 3").unwrap());
+        assert_eq!(bindings[0].1, 7);
     }
 }

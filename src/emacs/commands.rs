@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use super::keymap::{parse_key_seq, Keymap};
+use super::keymap::{parse_key_seq, stack_lookup, Chord, Keymap, Lookup};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmacsCommand {
@@ -135,12 +135,72 @@ impl EmacsCommand {
     }
 }
 
+/// Which keymaps are active. Derived from `EmacsState` (see
+/// `EmacsState::map_context`), never stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapContext {
+    /// Pane focused, TEXT mode off: the pane owns every key we do not steal.
+    Live,
+    /// TEXT mode: an ordinary read-only Emacs buffer — the full stack applies.
+    Text,
+    /// A minibuffer prompt is open.
+    Minibuffer,
+}
+
+/// One entry of the active keymap stack: a display name (for
+/// `describe-bindings`) and the map itself.
+#[derive(Debug, Clone, Copy)]
+pub struct ActiveMap<'a> {
+    pub name: &'static str,
+    pub map: &'a Keymap<EmacsCommand>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct KeymapSet {
-    /// Consulted in live mode (pane focused, TEXT mode off).
+    /// Always active. In TEXT mode and in the minibuffer it is the
+    /// fallthrough map, exactly like Emacs's `global-map`.
     pub global: Keymap<EmacsCommand>,
-    /// Consulted while TEXT mode is active.
+    /// Active while TEXT mode is on (shadows `global`).
     pub text: Keymap<EmacsCommand>,
+    /// Active while a minibuffer prompt is open (shadows `global`).
+    pub minibuffer: Keymap<EmacsCommand>,
+}
+
+impl KeymapSet {
+    /// The active keymap stack, highest priority first (spec §3.1).
+    /// Emacs's minibuffer does not inherit the previous buffer's local map,
+    /// so `Minibuffer` is `[minibuffer, global]`, not `[minibuffer, text, global]`.
+    pub fn active_maps(&self, ctx: MapContext) -> Vec<ActiveMap<'_>> {
+        let global = ActiveMap {
+            name: "global",
+            map: &self.global,
+        };
+        match ctx {
+            MapContext::Live => vec![global],
+            MapContext::Text => vec![
+                ActiveMap {
+                    name: "text",
+                    map: &self.text,
+                },
+                global,
+            ],
+            MapContext::Minibuffer => vec![
+                ActiveMap {
+                    name: "minibuffer",
+                    map: &self.minibuffer,
+                },
+                global,
+            ],
+        }
+    }
+
+    /// Look `seq` up across the active stack.
+    pub fn lookup(&self, ctx: MapContext, seq: &[Chord]) -> Lookup<EmacsCommand> {
+        stack_lookup(
+            self.active_maps(ctx).into_iter().map(|active| active.map),
+            seq,
+        )
+    }
 }
 
 const DEFAULT_GLOBAL_BINDINGS: &[(&str, EmacsCommand)] = &[
@@ -364,6 +424,46 @@ mod tests {
         );
         assert_eq!(
             keymaps.global.lookup(&parse_key_seq("C-j").unwrap()),
+            Lookup::Unbound
+        );
+    }
+
+    #[test]
+    fn active_maps_stack_by_context() {
+        let (keymaps, _) = build_keymaps(&Default::default());
+        let names = |ctx| {
+            keymaps
+                .active_maps(ctx)
+                .into_iter()
+                .map(|active| active.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(MapContext::Live), vec!["global"]);
+        assert_eq!(names(MapContext::Text), vec!["text", "global"]);
+        assert_eq!(names(MapContext::Minibuffer), vec!["minibuffer", "global"]);
+    }
+
+    #[test]
+    fn global_bindings_fall_through_in_text_mode() {
+        let (keymaps, _) = build_keymaps(&Default::default());
+        // THE regression: C-x 3 must dispatch from inside TEXT mode.
+        assert_eq!(
+            keymaps.lookup(MapContext::Text, &parse_key_seq("C-x 3").unwrap()),
+            Lookup::Bound(EmacsCommand::SplitWindowRight)
+        );
+        // ...while the text map still shadows on C-x C-x.
+        assert_eq!(
+            keymaps.lookup(MapContext::Text, &parse_key_seq("C-x C-x").unwrap()),
+            Lookup::Bound(EmacsCommand::ExchangePointAndMark)
+        );
+        // C-x stays a live prefix in TEXT mode (union prefix).
+        assert_eq!(
+            keymaps.lookup(MapContext::Text, &parse_key_seq("C-x").unwrap()),
+            Lookup::Prefix
+        );
+        // Text-only motions are not reachable in live mode.
+        assert_eq!(
+            keymaps.lookup(MapContext::Live, &parse_key_seq("C-f").unwrap()),
             Lookup::Unbound
         );
     }

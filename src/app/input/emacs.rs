@@ -11,6 +11,7 @@ use super::navigate::{ActionContext, NavigateAction};
 use crate::app::state::Mode;
 use crate::app::App;
 use crate::emacs::commands::EmacsCommand;
+use crate::emacs::commands::MapContext;
 use crate::emacs::keymap::{format_seq, Chord, Lookup};
 use crate::emacs::text_mode::{self, Pos, TextBuffer, TextModeState};
 use crate::input::TerminalKey;
@@ -79,15 +80,16 @@ impl App {
             return self.emacs_goto_line_key(key);
         }
 
-        let text_active = self.state.emacs.text_mode.is_some();
+        let ctx = self.state.emacs.map_context();
+        let text_active = ctx == MapContext::Text;
 
         let Some(chord) = Chord::from_key(&key) else {
             return text_active;
         };
 
         // C-g always cancels an in-flight chord (and, in TEXT mode,
-        // deactivates the mark — Task 8). Delegates to KeyboardQuit so
-        // mid-chord quit and bound quit behave identically.
+        // deactivates the mark). Delegates to KeyboardQuit so mid-chord quit
+        // and bound quit behave identically.
         if !self.state.emacs.pending.is_empty() && chord == Chord::ctrl('g') {
             self.execute_emacs_command(EmacsCommand::KeyboardQuit, None);
             return true;
@@ -95,12 +97,10 @@ impl App {
 
         let mut seq = self.state.emacs.pending.clone();
         seq.push(chord);
-        let lookup = if text_active {
-            self.state.emacs.keymaps.text.lookup(&seq)
-        } else {
-            self.state.emacs.keymaps.global.lookup(&seq)
-        };
-        match lookup {
+        // Emacs layer seam (fork): the ordered keymap stack, not an
+        // either/or choice — a sequence unbound in the local map falls
+        // through to global. This is what makes C-x 3 work in TEXT mode.
+        match self.state.emacs.keymaps.lookup(ctx, &seq) {
             Lookup::Bound(cmd) => {
                 self.state.emacs.pending.clear();
                 self.execute_emacs_command(cmd, None);
@@ -144,7 +144,10 @@ impl App {
             return true;
         }
         match Chord::from_key(&key) {
-            Some(chord) => !matches!(emacs.keymaps.global.lookup(&[chord]), Lookup::Unbound),
+            Some(chord) => !matches!(
+                emacs.keymaps.lookup(emacs.map_context(), &[chord]),
+                Lookup::Unbound
+            ),
             None => false,
         }
     }
@@ -170,8 +173,12 @@ impl App {
             EmacsCommand::KillTab => self.emacs_navigate(NavigateAction::CloseTab),
             EmacsCommand::WorkspacePicker => self.emacs_navigate(NavigateAction::WorkspacePicker),
             EmacsCommand::QuotedInsert => {
-                self.state.emacs.quoted_insert = true;
-                self.state.emacs.echo = Some("C-q-".to_string());
+                if self.state.emacs.text_mode.is_some() {
+                    self.state.emacs.echo = Some("Buffer is read-only".to_string());
+                } else {
+                    self.state.emacs.quoted_insert = true;
+                    self.state.emacs.echo = Some("C-q-".to_string());
+                }
             }
             EmacsCommand::KeyboardQuit => {
                 self.state.emacs.pending.clear();
@@ -180,7 +187,11 @@ impl App {
                 }
                 self.state.emacs.echo = Some("Quit".to_string());
             }
-            EmacsCommand::TextMode => self.emacs_enter_text_mode(),
+            EmacsCommand::TextMode => {
+                if self.state.emacs.text_mode.is_none() {
+                    self.emacs_enter_text_mode();
+                }
+            }
             EmacsCommand::ExitTextMode => self.emacs_exit_text_mode(),
             EmacsCommand::ForwardChar
             | EmacsCommand::BackwardChar
@@ -1417,5 +1428,81 @@ mod tests {
             (last_row, 0),
             "out-of-range line clamps to the last row"
         );
+    }
+
+    /// THE regression from the spec (§7.1): C-x [ then C-x 3 must split the
+    /// window from inside TEXT mode. Before the keymap stack, TEXT mode
+    /// consulted only the text keymap, so every global command was dead.
+    #[tokio::test]
+    async fn c_x_3_splits_the_window_from_inside_text_mode() {
+        let (mut app, _pane, _rx) = emacs_app_with_channel(FIVE_LINES);
+        assert_eq!(app.state.workspaces[0].tabs[0].panes.len(), 1);
+        enter_text_mode(&mut app);
+        assert!(app.state.emacs.text_mode.is_some());
+
+        app.route_client_input(vec![0x18, b'3']); // C-x 3
+
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].panes.len(),
+            2,
+            "global split-window-right fell through from the text keymap"
+        );
+        assert_ne!(
+            app.state.emacs.echo.as_deref(),
+            Some("C-x 3 is undefined"),
+            "the sequence must not be reported undefined"
+        );
+    }
+
+    /// Fallthrough for a pure-state action (no PTY spawn): C-x b in TEXT
+    /// mode opens the navigator, the same way it does in live mode.
+    #[tokio::test]
+    async fn c_x_b_opens_the_navigator_from_text_mode() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(FIVE_LINES);
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x18, b'b']); // C-x b
+        assert_eq!(app.state.mode, Mode::Navigator);
+        assert!(sent_bytes(&mut rx).is_empty());
+    }
+
+    /// The text map still shadows the global one on the same sequence.
+    #[tokio::test]
+    async fn text_map_shadows_global_on_c_x_c_x() {
+        let (mut app, _pane, _rx) = emacs_app_with_channel(FIVE_LINES);
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x1b, b'<']); // M-<
+        app.route_client_input(vec![0x00]); // C-SPC
+        app.route_client_input(vec![0x0e]); // C-n
+        app.route_client_input(vec![0x18, 0x18]); // C-x C-x
+        let text = app.state.emacs.text_mode.as_ref().expect("still in TEXT");
+        assert_eq!((text.point.row, text.point.col), (0, 0), "point <-> mark");
+    }
+
+    /// C-q is a global command, so the stack now reaches it in TEXT mode.
+    /// A read-only buffer cannot quote-insert: say so instead of pushing a
+    /// literal byte into the PTY behind the frozen view.
+    #[tokio::test]
+    async fn quoted_insert_in_text_mode_is_read_only() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(FIVE_LINES);
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x11]); // C-q
+        assert!(!app.state.emacs.quoted_insert);
+        assert_eq!(app.state.emacs.echo.as_deref(), Some("Buffer is read-only"));
+        app.route_client_input(vec![0x18]); // C-x: still a prefix, not a literal
+        assert_eq!(app.state.emacs.pending.len(), 1);
+        assert!(sent_bytes(&mut rx).is_empty());
+    }
+
+    /// C-x [ while TEXT mode is already on must not re-seed the session
+    /// (it would clobber entry_offset_from_bottom and lose the point).
+    #[tokio::test]
+    async fn re_entering_text_mode_is_a_no_op() {
+        let (mut app, _pane, _rx) = emacs_app_with_channel(&fifty_lines());
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x1b, b'<']); // M-<: point to row 0
+        let before = app.state.emacs.text_mode.as_ref().unwrap().clone_for_test();
+        app.route_client_input(vec![0x18, b'[']); // C-x [ again
+        let after = app.state.emacs.text_mode.as_ref().unwrap().clone_for_test();
+        assert_eq!(after, before, "TEXT mode session untouched");
     }
 }

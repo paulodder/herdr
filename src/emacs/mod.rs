@@ -16,7 +16,7 @@ pub mod rings;
 pub mod text_mode;
 
 use crate::config::EmacsConfig;
-use commands::KeymapSet;
+use commands::{KeymapSet, MapContext};
 use keymap::Chord;
 
 /// Bookkeeping for `M-y`: what the immediately preceding live-mode `C-y`
@@ -98,6 +98,15 @@ impl EmacsState {
             self.echo = None;
             self.text_mode = None;
             self.last_yank = None;
+        }
+    }
+
+    /// Which keymap stack is active right now (spec §3.1).
+    pub fn map_context(&self) -> MapContext {
+        if self.text_mode.is_some() {
+            MapContext::Text
+        } else {
+            MapContext::Live
         }
     }
 

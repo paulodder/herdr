@@ -200,6 +200,20 @@ pub struct TextModeState {
     pub goto_line: Option<String>,
 }
 
+impl TextModeState {
+    /// Test helper: a comparable snapshot of the session identity.
+    #[cfg(test)]
+    pub fn clone_for_test(&self) -> (crate::layout::PaneId, Pos, Option<Pos>, bool, usize) {
+        (
+            self.pane_id,
+            self.point,
+            self.mark,
+            self.mark_active,
+            self.entry_offset_from_bottom,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
