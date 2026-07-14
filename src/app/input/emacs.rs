@@ -12,6 +12,7 @@ use crate::app::state::Mode;
 use crate::app::App;
 use crate::emacs::commands::EmacsCommand;
 use crate::emacs::keymap::{format_seq, Chord, Lookup};
+use crate::emacs::text_mode::{self, Pos, TextBuffer, TextModeState};
 use crate::input::TerminalKey;
 
 impl App {
@@ -29,9 +30,13 @@ impl App {
         }
         match key.kind {
             KeyEventKind::Press => {}
-            // Mirror the press decision for kitty repeat/release reports so
-            // events for layer-owned keys never leak into the pane.
-            KeyEventKind::Repeat | KeyEventKind::Release => {
+            KeyEventKind::Repeat => {
+                if self.state.emacs.text_mode.is_none() {
+                    return self.emacs_would_consume(key);
+                }
+                // fall through: repeats behave like presses in TEXT mode
+            }
+            KeyEventKind::Release => {
                 return self.emacs_would_consume(key);
             }
         }
@@ -44,11 +49,14 @@ impl App {
             return true;
         }
 
+        let text_active = self.state.emacs.text_mode.is_some();
+
         let Some(chord) = Chord::from_key(&key) else {
-            return false;
+            return text_active;
         };
 
-        // C-g always cancels an in-flight chord.
+        // C-g always cancels an in-flight chord (and, in TEXT mode,
+        // deactivates the mark — Task 8).
         if !self.state.emacs.pending.is_empty() && chord == Chord::ctrl('g') {
             self.state.emacs.pending.clear();
             self.state.emacs.echo = Some("Quit".to_string());
@@ -57,7 +65,12 @@ impl App {
 
         let mut seq = self.state.emacs.pending.clone();
         seq.push(chord);
-        match self.state.emacs.keymaps.global.lookup(&seq) {
+        let lookup = if text_active {
+            self.state.emacs.keymaps.text.lookup(&seq)
+        } else {
+            self.state.emacs.keymaps.global.lookup(&seq)
+        };
+        match lookup {
             Lookup::Bound(cmd) => {
                 self.state.emacs.pending.clear();
                 self.execute_emacs_command(cmd, None);
@@ -69,11 +82,19 @@ impl App {
                 true
             }
             Lookup::Unbound => {
-                if self.state.emacs.pending.is_empty() {
-                    // Plain unbound key: flows to the pane untouched.
+                self.state.emacs.pending.clear();
+                if text_active {
+                    // Read-only buffer: swallow everything, explain like Emacs.
+                    self.state.emacs.echo = if seq.len() > 1 {
+                        Some(format!("{} is undefined", format_seq(&seq)))
+                    } else {
+                        Some("Buffer is read-only".to_string())
+                    };
+                    true
+                } else if seq.len() == 1 {
+                    // Plain unbound key in live mode: flows to the pane.
                     false
                 } else {
-                    self.state.emacs.pending.clear();
                     self.state.emacs.echo = Some(format!("{} is undefined", format_seq(&seq)));
                     true
                 }
@@ -83,6 +104,9 @@ impl App {
 
     /// Press-equivalent consume decision, used for repeat/release events.
     fn emacs_would_consume(&self, key: TerminalKey) -> bool {
+        if self.state.emacs.text_mode.is_some() {
+            return true;
+        }
         let emacs = &self.state.emacs;
         if emacs.quoted_insert || !emacs.pending.is_empty() {
             return true;
@@ -118,10 +142,9 @@ impl App {
                 self.state.emacs.pending.clear();
                 self.state.emacs.echo = Some("Quit".to_string());
             }
-            // Implemented by later tasks of this plan (TEXT mode, rings):
-            EmacsCommand::TextMode
-            | EmacsCommand::ExitTextMode
-            | EmacsCommand::ForwardChar
+            EmacsCommand::TextMode => self.emacs_enter_text_mode(),
+            EmacsCommand::ExitTextMode => self.emacs_exit_text_mode(),
+            EmacsCommand::ForwardChar
             | EmacsCommand::BackwardChar
             | EmacsCommand::NextLine
             | EmacsCommand::PreviousLine
@@ -132,8 +155,9 @@ impl App {
             | EmacsCommand::ScrollUp
             | EmacsCommand::ScrollDown
             | EmacsCommand::BeginningOfBuffer
-            | EmacsCommand::EndOfBuffer
-            | EmacsCommand::GotoLine
+            | EmacsCommand::EndOfBuffer => self.emacs_text_motion(cmd),
+            // Implemented by later tasks of this plan:
+            EmacsCommand::GotoLine
             | EmacsCommand::SetMark
             | EmacsCommand::ExchangePointAndMark
             | EmacsCommand::KillRingSave
@@ -167,6 +191,183 @@ impl App {
         let ws_idx = self.state.active?;
         let pane_id = self.state.workspaces.get(ws_idx)?.focused_pane_id()?;
         Some((ws_idx, pane_id))
+    }
+
+    /// `C-x [` — freeze the focused pane into TEXT mode. Mirrors
+    /// `AppState::enter_copy_mode` (src/app/input/copy_mode.rs:38): the
+    /// point seeds from the visible host cursor, else the viewport's
+    /// bottom-left.
+    fn emacs_enter_text_mode(&mut self) {
+        let Some((ws_idx, pane_id)) = self.emacs_focused_pane() else {
+            return;
+        };
+        let Some(info) = self.state.pane_info_by_id(pane_id).cloned() else {
+            return;
+        };
+        if info.inner_rect.width == 0 || info.inner_rect.height == 0 {
+            return;
+        }
+        let Some(metrics) = self
+            .state
+            .pane_scroll_metrics(&self.terminal_runtimes, pane_id)
+        else {
+            return;
+        };
+        let viewport_top = (metrics.max_offset_from_bottom - metrics.offset_from_bottom) as u32;
+        let point = {
+            let Some(rt) =
+                self.state
+                    .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
+            else {
+                return;
+            };
+            let (row_in_view, col) = rt
+                .cursor_state(info.inner_rect, true)
+                .filter(|cursor| cursor.visible)
+                .map(|cursor| {
+                    (
+                        cursor.y.saturating_sub(info.inner_rect.y),
+                        cursor.x.saturating_sub(info.inner_rect.x),
+                    )
+                })
+                .unwrap_or((info.inner_rect.height.saturating_sub(1), 0));
+            let buf = RuntimeBuffer { rt };
+            text_mode::clamp(
+                &buf,
+                Pos {
+                    row: viewport_top + u32::from(row_in_view),
+                    col,
+                },
+            )
+        };
+        self.state.emacs.text_mode = Some(TextModeState {
+            pane_id,
+            point,
+            mark: None,
+            mark_active: false,
+            entry_offset_from_bottom: metrics.offset_from_bottom,
+            goto_line: None,
+        });
+    }
+
+    /// `q` / `ESC` — back to the live cursor; restore the entry scroll.
+    fn emacs_exit_text_mode(&mut self) {
+        let Some(text) = self.state.emacs.text_mode.take() else {
+            return;
+        };
+        self.state.set_pane_scroll_offset(
+            &self.terminal_runtimes,
+            text.pane_id,
+            text.entry_offset_from_bottom,
+        );
+    }
+
+    /// Run one motion command against the frozen buffer, then keep the
+    /// point visible.
+    fn emacs_text_motion(&mut self, cmd: EmacsCommand) {
+        let Some(text) = self.state.emacs.text_mode.as_ref() else {
+            return;
+        };
+        let (pane_id, point) = (text.pane_id, text.point);
+        let Some((ws_idx, _)) = self.emacs_focused_pane() else {
+            return;
+        };
+        let page = self.state.pane_info_by_id(pane_id).map_or(1, |info| {
+            u32::from(info.inner_rect.height.saturating_sub(2).max(1))
+        });
+        let new_point = {
+            let Some(rt) =
+                self.state
+                    .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
+            else {
+                return;
+            };
+            let buf = RuntimeBuffer { rt };
+            match cmd {
+                EmacsCommand::ForwardChar => text_mode::forward_char(&buf, point),
+                EmacsCommand::BackwardChar => text_mode::backward_char(&buf, point),
+                EmacsCommand::NextLine => text_mode::next_line(&buf, point),
+                EmacsCommand::PreviousLine => text_mode::previous_line(&buf, point),
+                EmacsCommand::ForwardWord => text_mode::forward_word(&buf, point),
+                EmacsCommand::BackwardWord => text_mode::backward_word(&buf, point),
+                EmacsCommand::MoveBeginningOfLine => text_mode::line_beginning(point),
+                EmacsCommand::MoveEndOfLine => text_mode::line_end(&buf, point),
+                EmacsCommand::ScrollUp => text_mode::clamp(
+                    &buf,
+                    Pos {
+                        row: point.row.saturating_add(page),
+                        col: point.col,
+                    },
+                ),
+                EmacsCommand::ScrollDown => text_mode::clamp(
+                    &buf,
+                    Pos {
+                        row: point.row.saturating_sub(page),
+                        col: point.col,
+                    },
+                ),
+                EmacsCommand::BeginningOfBuffer => text_mode::buffer_beginning(),
+                EmacsCommand::EndOfBuffer => text_mode::buffer_end(&buf),
+                _ => point,
+            }
+        };
+        if let Some(text) = self.state.emacs.text_mode.as_mut() {
+            text.point = new_point;
+        }
+        self.emacs_scroll_point_into_view(pane_id);
+    }
+
+    /// Scroll the pane so the point is inside the viewport.
+    fn emacs_scroll_point_into_view(&mut self, pane_id: crate::layout::PaneId) {
+        let Some(point) = self
+            .state
+            .emacs
+            .text_mode
+            .as_ref()
+            .filter(|text| text.pane_id == pane_id)
+            .map(|text| text.point)
+        else {
+            return;
+        };
+        let Some(info) = self.state.pane_info_by_id(pane_id) else {
+            return;
+        };
+        let view_rows = u32::from(info.inner_rect.height.max(1));
+        let Some(metrics) = self
+            .state
+            .pane_scroll_metrics(&self.terminal_runtimes, pane_id)
+        else {
+            return;
+        };
+        let top = (metrics.max_offset_from_bottom - metrics.offset_from_bottom) as u32;
+        let new_top = if point.row < top {
+            point.row
+        } else if point.row >= top + view_rows {
+            point.row + 1 - view_rows
+        } else {
+            return;
+        };
+        let offset = metrics
+            .max_offset_from_bottom
+            .saturating_sub(new_top as usize);
+        self.state
+            .set_pane_scroll_offset(&self.terminal_runtimes, pane_id, offset);
+    }
+}
+
+/// `TextBuffer` over a live pane runtime.
+struct RuntimeBuffer<'a> {
+    rt: &'a crate::terminal::TerminalRuntime,
+}
+
+impl TextBuffer for RuntimeBuffer<'_> {
+    fn total_rows(&self) -> u32 {
+        self.rt
+            .text_dims()
+            .map_or(0, |(rows, _)| rows.min(u32::MAX as usize) as u32)
+    }
+    fn line(&self, row: u32) -> String {
+        self.rt.text_row(row).unwrap_or_default()
     }
 }
 
@@ -291,5 +492,100 @@ mod tests {
         app.state.mode = Mode::Navigate;
         app.route_client_input(vec![0x18]);
         assert!(app.state.emacs.pending.is_empty(), "no chord started");
+    }
+
+    const FIVE_LINES: &[u8] = b"alpha\r\nbravo six\r\ncharlie\r\ndelta\r\necho\r\n";
+
+    fn enter_text_mode(app: &mut App) {
+        app.route_client_input(vec![0x18, b'[']); // C-x [
+    }
+
+    #[tokio::test]
+    async fn c_x_bracket_enters_text_mode_and_q_exits() {
+        let (mut app, pane, mut rx) = emacs_app_with_channel(FIVE_LINES);
+        enter_text_mode(&mut app);
+        let text = app.state.emacs.text_mode.as_ref().expect("text mode on");
+        assert_eq!(text.pane_id, pane);
+        assert!(app.state.emacs.owns_pane_cursor(pane));
+        app.route_client_input(vec![b'q']);
+        assert!(app.state.emacs.text_mode.is_none());
+        assert!(
+            sent_bytes(&mut rx).is_empty(),
+            "TEXT mode keys never reach the pane"
+        );
+    }
+
+    #[tokio::test]
+    async fn motions_move_point_over_scrollback() {
+        let (mut app, _pane, _rx) = emacs_app_with_channel(FIVE_LINES);
+        enter_text_mode(&mut app);
+        // M-< : beginning of buffer
+        app.route_client_input(vec![0x1b, b'<']);
+        let point = app.state.emacs.text_mode.as_ref().unwrap().point;
+        assert_eq!((point.row, point.col), (0, 0));
+        // C-f C-f -> col 2
+        app.route_client_input(vec![0x06, 0x06]);
+        let point = app.state.emacs.text_mode.as_ref().unwrap().point;
+        assert_eq!((point.row, point.col), (0, 2));
+        // C-n -> row 1 (col clamps within "bravo six")
+        app.route_client_input(vec![0x0e]);
+        let point = app.state.emacs.text_mode.as_ref().unwrap().point;
+        assert_eq!((point.row, point.col), (1, 2));
+        // C-e -> end of "bravo six"
+        app.route_client_input(vec![0x05]);
+        let point = app.state.emacs.text_mode.as_ref().unwrap().point;
+        assert_eq!((point.row, point.col), (1, 9));
+        // M-b -> start of "six"
+        app.route_client_input(vec![0x1b, b'b']);
+        let point = app.state.emacs.text_mode.as_ref().unwrap().point;
+        assert_eq!((point.row, point.col), (1, 6));
+    }
+
+    /// Enough content to guarantee real scrollback in the test viewport.
+    fn fifty_lines() -> Vec<u8> {
+        (1..=50)
+            .flat_map(|i| format!("line {i}\r\n").into_bytes())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn beginning_of_buffer_scrolls_viewport_and_exit_restores_it() {
+        let (mut app, pane, _rx) = emacs_app_with_channel(&fifty_lines());
+        let entry_offset = app
+            .state
+            .pane_scroll_metrics(&app.terminal_runtimes, pane)
+            .expect("metrics")
+            .offset_from_bottom;
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x1b, b'<']); // M-<
+        let metrics = app
+            .state
+            .pane_scroll_metrics(&app.terminal_runtimes, pane)
+            .expect("metrics");
+        assert!(
+            metrics.max_offset_from_bottom > 0,
+            "fixture must actually have scrollback"
+        );
+        assert_eq!(
+            metrics.offset_from_bottom, metrics.max_offset_from_bottom,
+            "viewport followed point to the top"
+        );
+        app.route_client_input(vec![0x1b]); // ESC exits
+        assert!(app.state.emacs.text_mode.is_none());
+        let metrics = app
+            .state
+            .pane_scroll_metrics(&app.terminal_runtimes, pane)
+            .expect("metrics");
+        assert_eq!(metrics.offset_from_bottom, entry_offset, "scroll restored");
+    }
+
+    #[tokio::test]
+    async fn unbound_printable_keys_report_read_only() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(FIVE_LINES);
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![b'x']);
+        assert_eq!(app.state.emacs.echo.as_deref(), Some("Buffer is read-only"));
+        assert!(sent_bytes(&mut rx).is_empty());
+        assert!(app.state.emacs.text_mode.is_some(), "still in TEXT mode");
     }
 }

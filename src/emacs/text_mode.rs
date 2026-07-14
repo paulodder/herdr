@@ -185,6 +185,21 @@ pub fn backward_word(buf: &dyn TextBuffer, pos: Pos) -> Pos {
     pos
 }
 
+/// State of an active TEXT-mode session over one pane.
+#[derive(Debug)]
+pub struct TextModeState {
+    pub pane_id: crate::layout::PaneId,
+    pub point: Pos,
+    /// Last mark set in this session (survives deactivation, like Emacs).
+    pub mark: Option<Pos>,
+    /// Transient-mark: whether the region is currently active.
+    pub mark_active: bool,
+    /// Scroll offset when entering; restored on exit.
+    pub entry_offset_from_bottom: usize,
+    /// Digits typed after `M-g g` (goto-line prompt; wired in Task 12).
+    pub goto_line: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -11,6 +11,7 @@
 
 pub mod commands;
 pub mod keymap;
+pub mod render;
 pub mod text_mode;
 
 use crate::config::EmacsConfig;
@@ -32,6 +33,9 @@ pub struct EmacsState {
     pub quoted_insert: bool,
     /// Echo-area message; cleared at the start of the next handled key.
     pub echo: Option<String>,
+    /// Active TEXT-mode session, if any (`C-x [`). `mode` stays
+    /// `Mode::Terminal`; the interception hook owns all keys while `Some`.
+    pub text_mode: Option<text_mode::TextModeState>,
 }
 
 impl EmacsState {
@@ -49,6 +53,7 @@ impl EmacsState {
             pending: Vec::new(),
             quoted_insert: false,
             echo: None,
+            text_mode: None,
         }
     }
 
@@ -68,6 +73,15 @@ impl EmacsState {
             self.pending.clear();
             self.quoted_insert = false;
             self.echo = None;
+            self.text_mode = None;
         }
+    }
+
+    /// True when TEXT mode owns the cursor for this pane (suppresses the
+    /// host cursor in the pane renderer).
+    pub fn owns_pane_cursor(&self, pane_id: crate::layout::PaneId) -> bool {
+        self.text_mode
+            .as_ref()
+            .is_some_and(|text| text.pane_id == pane_id)
     }
 }

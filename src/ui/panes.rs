@@ -315,6 +315,7 @@ pub(super) fn render_panes(
             let show_cursor = info.is_focused
                 && terminal_active
                 && !pane_is_scrolled_back(rt)
+                && !app.emacs.owns_pane_cursor(info.id) // Emacs layer seam (fork)
                 && app.pane_exposes_host_cursor(ws_idx, info.id);
             rt.render(frame, info.inner_rect, show_cursor);
             render_pane_scrollbar(app, frame, info, rt);
@@ -361,6 +362,8 @@ pub(super) fn render_panes(
                 true,
             );
             render_copy_mode_cursor(app, frame, info);
+            // Emacs layer seam (fork).
+            crate::emacs::render::render_text_mode_overlay(app, frame, info, rt);
         }
     }
 
