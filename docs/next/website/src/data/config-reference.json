@@ -1092,6 +1092,42 @@
           "description": "While prefix mode is active, temporarily switch the macOS host input source to an ASCII-capable keyboard layout so prefix commands are read as ASCII even when a CJK IME is active, then restore the previous input source when prefix mode exits. macOS only; a no-op elsewhere and a best-effort no-op if the switch fails."
         }
       ]
+    },
+    {
+     "id": "emacs",
+     "title": "Emacs layer",
+     "keys": [
+      {
+       "key": "emacs.enabled",
+       "type": "boolean",
+       "default": "false",
+       "description": "Enable the Emacs keyboard layer (fork feature): C-x management chords and TEXT mode over pane scrollback."
+      },
+      {
+       "key": "emacs.clipboard_sync",
+       "type": "boolean",
+       "default": "true",
+       "description": "Sync the kill-ring head with the system clipboard."
+      },
+      {
+       "key": "emacs.kill_ring_max",
+       "type": "integer",
+       "default": "60",
+       "description": "Maximum number of kill ring entries."
+      },
+      {
+       "key": "emacs.mark_ring_max",
+       "type": "integer",
+       "default": "16",
+       "description": "Maximum number of mark ring entries per pane."
+      },
+      {
+       "key": "emacs.keys",
+       "type": "table",
+       "default": "{}",
+       "description": "Override default Emacs bindings: chord sequence (e.g. \"C-x c\") to command name (e.g. \"new-tab\")."
+      }
+     ]
     }
   ]
 }

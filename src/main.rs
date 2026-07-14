@@ -400,6 +400,19 @@ pane_history = false
 # Maximum scrollback buffer size in bytes retained per pane terminal.
 # Matches Ghostty's default scrollback-limit behavior.
 # scrollback_limit_bytes = 10000000
+
+[emacs]
+# Emacs keyboard layer (fork feature): C-x chords for tab/pane/workspace
+# management and a read-only TEXT mode over pane scrollback.
+# When disabled, this build behaves exactly like stock herdr.
+# enabled = false
+# Sync the kill-ring head with the system clipboard.
+# clipboard_sync = true
+# kill_ring_max = 60
+# mark_ring_max = 16
+# Override default bindings with Emacs key syntax under [emacs.keys]:
+# [emacs.keys]
+# "C-x c" = "new-tab"
 "##;
 
 fn should_block_nested(config: &config::Config) -> bool {

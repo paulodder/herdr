@@ -6,6 +6,7 @@ use super::{model::LoadedConfig, Config, CONFIG_PATH_ENV_VAR};
 
 const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "advanced",
+    "emacs",
     "experimental",
     "keys",
     "onboarding",
@@ -323,6 +324,15 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         &mut diagnostics,
         &mut invalid_sections,
         |section| config.remote = section,
+    );
+    // Emacs layer seam (fork):
+    load_live_section(
+        table,
+        "emacs",
+        "emacs config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.emacs = section,
     );
 
     Ok(LoadedConfig {
@@ -702,6 +712,21 @@ resume_agents_on_restore = true
         .unwrap();
 
         assert!(loaded.config.session.resume_agents_on_restore);
+        assert!(loaded.diagnostics.is_empty());
+        assert!(loaded.invalid_sections.is_empty());
+    }
+
+    #[test]
+    fn load_live_config_parses_emacs_section() {
+        let loaded = load_live_config_from_str(
+            r#"
+[emacs]
+enabled = true
+"#,
+        )
+        .unwrap();
+
+        assert!(loaded.config.emacs.enabled);
         assert!(loaded.diagnostics.is_empty());
         assert!(loaded.invalid_sections.is_empty());
     }

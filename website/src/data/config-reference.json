@@ -588,6 +588,12 @@
           "description": "Capture mouse input for Herdr's mouse UI."
         },
         {
+          "key": "ui.copy_on_select",
+          "type": "boolean",
+          "default": "true",
+          "description": "Copy text selected with the mouse."
+        },
+        {
           "key": "ui.host_cursor",
           "type": "enum",
           "default": "auto",
@@ -661,6 +667,24 @@
             "spaces",
             "priority"
           ]
+        },
+        {
+          "key": "ui.sidebar.agents.rows",
+          "type": "list of token rows",
+          "default": "[[\"state_icon\", \"workspace\", \"tab\"], [\"agent\"]]",
+          "description": "Default expanded Agent sidebar layout. Supports built-in tokens and $name metadata tokens; at most 16 rows and 16 tokens per row."
+        },
+        {
+          "key": "ui.sidebar.agents.rows_by_agent",
+          "type": "table of token rows",
+          "default": "{}",
+          "description": "Complete Agent-row overrides keyed by strict canonical agent id. Agents without an override use ui.sidebar.agents.rows."
+        },
+        {
+          "key": "ui.sidebar.spaces.rows",
+          "type": "list of token rows",
+          "default": "[[\"state_icon\", \"workspace\"], [\"branch\", \"git_status\"]]",
+          "description": "Expanded Space sidebar layout. Supports built-in tokens and $name metadata tokens; at most 16 rows and 16 tokens per row."
         },
         {
           "key": "ui.accent",
@@ -951,6 +975,17 @@
             "on",
             "off"
           ]
+        },
+        {
+          "key": "ui.sound.agents.maki",
+          "type": "enum",
+          "default": "\"default\"",
+          "description": "Sound override for detected MastraCode agents.",
+          "values": [
+            "default",
+            "on",
+            "off"
+          ]
         }
       ]
     },
@@ -1034,7 +1069,7 @@
           "key": "experimental.cjk_ime_agents",
           "type": "list of strings",
           "default": "[]",
-          "description": "Restrict `reveal_hidden_cursor_for_cjk_ime` to focused panes whose detected agent matches one of these names (case-insensitive). Empty list means apply to any focused pane. Unknown agent names are ignored; if the list contains no valid names, the reveal does not apply. Accepted names: pi, claude, codex, gemini, cursor, devin, cline, opencode, copilot, kimi, kiro, droid, amp, grok, hermes, kilo, qodercli, qoder."
+          "description": "Restrict `reveal_hidden_cursor_for_cjk_ime` to focused panes whose detected agent matches one of these names (case-insensitive). Empty list means apply to any focused pane. Unknown agent names are ignored; if the list contains no valid names, the reveal does not apply. Accepted names: pi, claude, codex, gemini, cursor, devin, cline, opencode, copilot, kimi, kiro, droid, amp, grok, hermes, kilo, qodercli, qoder, maki."
         },
         {
           "key": "experimental.cjk_ime_cursor_shape",
@@ -1057,6 +1092,42 @@
           "description": "While prefix mode is active, temporarily switch the macOS host input source to an ASCII-capable keyboard layout so prefix commands are read as ASCII even when a CJK IME is active, then restore the previous input source when prefix mode exits. macOS only; a no-op elsewhere and a best-effort no-op if the switch fails."
         }
       ]
+    },
+    {
+     "id": "emacs",
+     "title": "Emacs layer",
+     "keys": [
+      {
+       "key": "emacs.enabled",
+       "type": "boolean",
+       "default": "false",
+       "description": "Enable the Emacs keyboard layer (fork feature): C-x management chords and TEXT mode over pane scrollback."
+      },
+      {
+       "key": "emacs.clipboard_sync",
+       "type": "boolean",
+       "default": "true",
+       "description": "Sync the kill-ring head with the system clipboard."
+      },
+      {
+       "key": "emacs.kill_ring_max",
+       "type": "integer",
+       "default": "60",
+       "description": "Maximum number of kill ring entries."
+      },
+      {
+       "key": "emacs.mark_ring_max",
+       "type": "integer",
+       "default": "16",
+       "description": "Maximum number of mark ring entries per pane."
+      },
+      {
+       "key": "emacs.keys",
+       "type": "table",
+       "default": "{}",
+       "description": "Override default Emacs bindings: chord sequence (e.g. \"C-x c\") to command name (e.g. \"new-tab\")."
+      }
+     ]
     }
   ]
 }

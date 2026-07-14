@@ -54,6 +54,33 @@ fn default_update_channel() -> UpdateChannelConfig {
     }
 }
 
+/// Emacs keyboard layer (fork feature): C-x management chords and TEXT mode
+/// over pane scrollback. Off by default; with `enabled = false` the fork
+/// behaves exactly like stock herdr.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct EmacsConfig {
+    pub enabled: bool,
+    pub clipboard_sync: bool,
+    pub kill_ring_max: usize,
+    pub mark_ring_max: usize,
+    /// Binding overrides: Emacs chord sequence -> command name,
+    /// e.g. `"C-x c" = "new-tab"`.
+    pub keys: std::collections::HashMap<String, String>,
+}
+
+impl Default for EmacsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            clipboard_sync: true,
+            kill_ring_max: 60,
+            mark_ring_max: 16,
+            keys: std::collections::HashMap::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ToastDelivery {
@@ -298,6 +325,8 @@ pub struct Config {
     pub advanced: AdvancedConfig,
     pub experimental: ExperimentalConfig,
     pub remote: RemoteConfig,
+    // Emacs layer seam (fork):
+    pub emacs: EmacsConfig,
 }
 
 #[derive(Debug)]
@@ -1705,5 +1734,37 @@ scrollback_lines = 12345
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.advanced.scrollback_limit_bytes, 12345);
+    }
+
+    #[test]
+    fn emacs_config_defaults_and_parses() {
+        let config = Config::default();
+        assert!(!config.emacs.enabled);
+        assert!(config.emacs.clipboard_sync);
+        assert_eq!(config.emacs.kill_ring_max, 60);
+        assert_eq!(config.emacs.mark_ring_max, 16);
+        assert!(config.emacs.keys.is_empty());
+
+        let parsed: Config = toml::from_str(
+            r#"
+[emacs]
+enabled = true
+clipboard_sync = false
+kill_ring_max = 10
+mark_ring_max = 4
+
+[emacs.keys]
+"C-x c" = "new-tab"
+"#,
+        )
+        .expect("emacs config parses");
+        assert!(parsed.emacs.enabled);
+        assert!(!parsed.emacs.clipboard_sync);
+        assert_eq!(parsed.emacs.kill_ring_max, 10);
+        assert_eq!(parsed.emacs.mark_ring_max, 4);
+        assert_eq!(
+            parsed.emacs.keys.get("C-x c").map(String::as_str),
+            Some("new-tab")
+        );
     }
 }
