@@ -1482,6 +1482,8 @@ pub struct AppState {
     pub host_terminal_theme: TerminalTheme,
     /// Set when a persisted session snapshot would change.
     pub session_dirty: bool,
+    /// Emacs layer seam (fork): all Emacs-layer state.
+    pub emacs: crate::emacs::EmacsState,
     /// Terminal runtimes that should be shut down by the app/runtime layer
     /// after state has detached their terminal metadata.
     pub(crate) terminal_runtime_shutdowns: Vec<crate::terminal::TerminalId>,
@@ -1832,6 +1834,7 @@ impl AppState {
             global_menu: MenuListState::new(0),
             host_terminal_theme: TerminalTheme::default(),
             session_dirty: false,
+            emacs: crate::emacs::EmacsState::from_config(&crate::config::EmacsConfig::default()),
             terminal_runtime_shutdowns: Vec::new(),
         }
     }

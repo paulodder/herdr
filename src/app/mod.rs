@@ -657,6 +657,7 @@ impl App {
             global_menu: state::MenuListState::new(0),
             host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
             session_dirty: false,
+            emacs: crate::emacs::EmacsState::from_config(&config.emacs),
             terminal_runtime_shutdowns: Vec::new(),
         };
 
@@ -1347,6 +1348,11 @@ impl App {
             }
         }
 
+        // Emacs layer seam (fork).
+        if !invalid_section("emacs") {
+            self.state.emacs.apply_config(&config.emacs);
+        }
+
         if !invalid_section("ui") {
             // Validate sidebar bounds before they reach any `u16::clamp` call.
             // On `min > max`, treat the entire `[ui]` section as invalid: keep
@@ -1555,6 +1561,12 @@ impl App {
             let previous_mode = self.state.mode;
             match event {
                 crate::raw_input::RawInputEvent::Key(key) => {
+                    // Emacs layer seam (fork): the layer may consume the key
+                    // before any herdr mode dispatch or keybind matching.
+                    if self.emacs_intercept_key(key) {
+                        self.sync_prefix_input_source(previous_mode);
+                        continue;
+                    }
                     let key_id = repeat_key_identity(&key);
                     match key.kind {
                         crossterm::event::KeyEventKind::Press => {

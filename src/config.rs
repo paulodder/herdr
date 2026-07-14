@@ -18,11 +18,13 @@ pub use self::{
         BindingConfig, CommandKeybindConfig, CustomCommandAction, CustomCommandKeybind,
         IndexedKeybind, Keybinds, LiveKeybindConfig,
     },
+    // Emacs layer seam (fork): `EmacsConfig` is re-exported here so the
+    // Emacs layer (src/emacs/mod.rs) can name the type.
     model::{
         validated_sidebar_bounds, AgentPanelSortConfig, Config, ConfigReloadReport,
-        ConfigReloadStatus, HostCursorModeConfig, NewTerminalCwdConfig, ShellModeConfig,
-        SidebarCollapsedModeConfig, ToastClipboardPosition, ToastConfig, ToastDelivery,
-        ToastHerdrPosition, UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
+        ConfigReloadStatus, EmacsConfig, HostCursorModeConfig, NewTerminalCwdConfig,
+        ShellModeConfig, SidebarCollapsedModeConfig, ToastClipboardPosition, ToastConfig,
+        ToastDelivery, ToastHerdrPosition, UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
     },
     sidebar::{
         AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SpaceSidebarToken,
