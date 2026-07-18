@@ -821,6 +821,41 @@ mod tests {
     const KITTY_M_LBRACKET: &[u8] = b"\x1b[91;3u";
     const KITTY_M_RBRACKET: &[u8] = b"\x1b[93;3u";
 
+    /// C-[ = CSI 91;5u, C-] = CSI 93;5u (kitty). Distinct from legacy ESC (0x1b).
+    const KITTY_C_LBRACKET: &[u8] = b"\x1b[91;5u";
+    const KITTY_C_RBRACKET: &[u8] = b"\x1b[93;5u";
+
+    #[tokio::test]
+    async fn c_bracket_moves_between_tabs() {
+        let (mut app, mut rx) = emacs_app_with_three_tabs();
+        assert_eq!(app.state.workspaces[0].active_tab, 1);
+        app.route_client_input(KITTY_C_LBRACKET.to_vec()); // C-[ : previous-tab
+        assert_eq!(app.state.workspaces[0].active_tab, 0);
+        app.route_client_input(KITTY_C_RBRACKET.to_vec()); // C-] : next-tab
+        assert_eq!(app.state.workspaces[0].active_tab, 1);
+        app.route_client_input(KITTY_C_RBRACKET.to_vec());
+        assert_eq!(app.state.workspaces[0].active_tab, 2);
+        assert!(sent_bytes(&mut rx).is_empty(), "chords never reach the pane");
+    }
+
+    #[tokio::test]
+    async fn m_bracket_reorders_tabs_and_the_moved_tab_stays_focused() {
+        let (mut app, mut rx) = emacs_app_with_three_tabs();
+        assert_eq!(tab_names(&app), vec!["a", "b", "c"]);
+
+        app.route_client_input(KITTY_M_LBRACKET.to_vec()); // M-[ : move-tab-left
+        assert_eq!(tab_names(&app), vec!["b", "a", "c"]);
+        assert_eq!(
+            app.state.workspaces[0].active_tab, 0,
+            "the moved tab keeps focus"
+        );
+
+        app.route_client_input(KITTY_M_RBRACKET.to_vec()); // M-] : move-tab-right
+        assert_eq!(tab_names(&app), vec!["a", "b", "c"]);
+        assert_eq!(app.state.workspaces[0].active_tab, 1);
+        assert!(sent_bytes(&mut rx).is_empty());
+    }
+
     /// Spec §3.8: clamp at the ends, no wraparound.
     #[tokio::test]
     async fn move_tab_clamps_at_both_ends_without_wrapping() {
@@ -834,6 +869,32 @@ mod tests {
         app.route_client_input(KITTY_M_RBRACKET.to_vec()); // M-] at the right edge
         assert_eq!(tab_names(&app), vec!["a", "b", "c"], "no wraparound");
         assert_eq!(app.state.workspaces[0].active_tab, 2);
+    }
+
+    /// All four work from TEXT mode, by fallthrough to the global map.
+    #[tokio::test]
+    async fn tab_bindings_work_from_text_mode() {
+        let (mut app, _rx) = emacs_app_with_three_tabs();
+        // TEXT mode needs the focused pane's runtime, which lives in tab 0.
+        app.state.workspaces[0].active_tab = 0;
+        enter_text_mode(&mut app);
+        assert!(app.state.emacs.text_mode.is_some());
+        app.route_client_input(KITTY_M_RBRACKET.to_vec()); // M-]
+        assert_eq!(tab_names(&app), vec!["b", "a", "c"]);
+    }
+
+    /// ESC is still exit-text-mode — a legacy byte 27 must NOT be read as C-[.
+    #[tokio::test]
+    async fn legacy_esc_still_exits_text_mode_and_does_not_switch_tabs() {
+        let (mut app, _rx) = emacs_app_with_three_tabs();
+        app.state.workspaces[0].active_tab = 0;
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x1b]); // legacy ESC
+        assert!(app.state.emacs.text_mode.is_none(), "ESC exited TEXT mode");
+        assert_eq!(
+            app.state.workspaces[0].active_tab, 0,
+            "ESC is not C-[ : no tab switch"
+        );
     }
 
     /// Like `emacs_app_with_channel`, but with a second real pane (B) split
