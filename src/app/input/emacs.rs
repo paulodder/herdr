@@ -225,6 +225,8 @@ impl App {
                     text.goto_line = Some(String::new());
                 }
             }
+            EmacsBuiltin::MoveTabLeft => self.emacs_move_tab(-1),
+            EmacsBuiltin::MoveTabRight => self.emacs_move_tab(1),
             // Wired in later tasks; named and reachable from M-x now.
             EmacsBuiltin::UniversalArgument
             | EmacsBuiltin::ExecuteExtendedCommand
@@ -259,6 +261,37 @@ impl App {
             action
         };
         self.execute_tui_navigate_action(action, ActionContext::Prefix);
+    }
+
+    /// `M-[` / `M-]` — reorder the active tab. herdr exposes tab.move only
+    /// through mouse drag (`move_tab_via_api`), so this is a builtin rather
+    /// than a `NavigateAction` (spec §3.8).
+    ///
+    /// `Workspace::move_tab(source, insert)` takes a PRE-removal slot:
+    /// `target = if source < insert { insert - 1 } else { insert }`. So
+    /// left is `source - 1` and right is `source + 2`. Clamped at both ends
+    /// — no wraparound.
+    fn emacs_move_tab(&mut self, delta: i64) {
+        let Some(ws_idx) = self.state.active else {
+            return;
+        };
+        let Some(ws) = self.state.workspaces.get(ws_idx) else {
+            return;
+        };
+        let source = ws.active_tab;
+        let last = ws.tabs.len().saturating_sub(1);
+        let insert_idx = if delta < 0 {
+            if source == 0 {
+                return; // already leftmost: no-op, no wraparound
+            }
+            source - 1
+        } else {
+            if source >= last {
+                return; // already rightmost: no-op, no wraparound
+            }
+            source + 2
+        };
+        self.move_tab_via_api(ws_idx, source, insert_idx);
     }
 
     fn emacs_send_key_to_focused_pane(&mut self, key: TerminalKey) {
@@ -763,6 +796,44 @@ mod tests {
             out.extend_from_slice(&chunk);
         }
         out
+    }
+
+    /// Three tabs (no PTYs), the middle one focused.
+    fn emacs_app_with_three_tabs() -> (App, tokio::sync::mpsc::Receiver<bytes::Bytes>) {
+        let (mut app, _pane, rx) = emacs_app_with_channel(b"");
+        let ws = &mut app.state.workspaces[0];
+        ws.test_add_tab(Some("b"));
+        ws.test_add_tab(Some("c"));
+        assert_eq!(ws.tabs.len(), 3);
+        ws.active_tab = 1;
+        (app, rx)
+    }
+
+    fn tab_names(app: &App) -> Vec<String> {
+        app.state.workspaces[0]
+            .tabs
+            .iter()
+            .map(|tab| tab.custom_name.clone().unwrap_or_else(|| "a".to_string()))
+            .collect()
+    }
+
+    /// M-[ = CSI 91;3u, M-] = CSI 93;3u.
+    const KITTY_M_LBRACKET: &[u8] = b"\x1b[91;3u";
+    const KITTY_M_RBRACKET: &[u8] = b"\x1b[93;3u";
+
+    /// Spec §3.8: clamp at the ends, no wraparound.
+    #[tokio::test]
+    async fn move_tab_clamps_at_both_ends_without_wrapping() {
+        let (mut app, _rx) = emacs_app_with_three_tabs();
+        app.state.workspaces[0].active_tab = 0;
+        app.route_client_input(KITTY_M_LBRACKET.to_vec()); // M-[ at the left edge
+        assert_eq!(tab_names(&app), vec!["a", "b", "c"], "no wraparound");
+        assert_eq!(app.state.workspaces[0].active_tab, 0);
+
+        app.state.workspaces[0].active_tab = 2;
+        app.route_client_input(KITTY_M_RBRACKET.to_vec()); // M-] at the right edge
+        assert_eq!(tab_names(&app), vec!["a", "b", "c"], "no wraparound");
+        assert_eq!(app.state.workspaces[0].active_tab, 2);
     }
 
     /// Like `emacs_app_with_channel`, but with a second real pane (B) split

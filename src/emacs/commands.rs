@@ -116,6 +116,10 @@ pub enum EmacsBuiltin {
     ExecuteExtendedCommand,
     KeyboardQuit,
     QuotedInsert,
+    // Tab reordering (spec §3.8): herdr has a tab.move API but no
+    // NavigateAction for it, so these are builtins.
+    MoveTabLeft,
+    MoveTabRight,
     // TEXT mode
     TextMode,
     ExitTextMode,
@@ -178,6 +182,8 @@ pub const BUILTIN_NAMES: &[(EmacsBuiltin, &str)] = &[
     (EmacsBuiltin::KillRegion, "kill-region"),
     (EmacsBuiltin::KillRingSave, "kill-ring-save"),
     (EmacsBuiltin::MinibufferComplete, "minibuffer-complete"),
+    (EmacsBuiltin::MoveTabLeft, "move-tab-left"),
+    (EmacsBuiltin::MoveTabRight, "move-tab-right"),
     (EmacsBuiltin::MoveBeginningOfLine, "move-beginning-of-line"),
     (EmacsBuiltin::MoveEndOfLine, "move-end-of-line"),
     (EmacsBuiltin::NextLine, "next-line"),
@@ -221,6 +227,8 @@ impl EmacsBuiltin {
             | Self::ExecuteExtendedCommand
             | Self::KeyboardQuit
             | Self::QuotedInsert
+            | Self::MoveTabLeft
+            | Self::MoveTabRight
             | Self::TextMode => MapSlot::Global,
             Self::ExitTextMode
             | Self::ForwardChar
@@ -387,6 +395,12 @@ const DEFAULT_GLOBAL_BINDINGS: &[(&str, EmacsCommand)] = &[
         "C-x w",
         EmacsCommand::Herdr(NavigateAction::WorkspacePicker),
     ),
+    // Spec §3.8. Kitty-protocol only: on a legacy terminal C-[ is byte 27
+    // (ESC) and M-[ is the CSI introducer, so these never fire there.
+    ("C-[", EmacsCommand::Herdr(NavigateAction::PreviousTab)),
+    ("C-]", EmacsCommand::Herdr(NavigateAction::NextTab)),
+    ("M-[", EmacsCommand::Builtin(EmacsBuiltin::MoveTabLeft)),
+    ("M-]", EmacsCommand::Builtin(EmacsBuiltin::MoveTabRight)),
     ("C-x [", EmacsCommand::Builtin(EmacsBuiltin::TextMode)),
     ("C-q", EmacsCommand::Builtin(EmacsBuiltin::QuotedInsert)),
     ("C-g", EmacsCommand::Builtin(EmacsBuiltin::KeyboardQuit)),
@@ -732,5 +746,49 @@ mod tests {
             Lookup::Unbound,
             "a motion must not steal C-j from the agent in live mode"
         );
+    }
+
+    #[test]
+    fn tab_navigation_and_reordering_are_bound_by_default() {
+        let (keymaps, _) = build_keymaps(&Default::default());
+        let cases = [
+            ("C-[", herdr(NavigateAction::PreviousTab)),
+            ("C-]", herdr(NavigateAction::NextTab)),
+            ("M-[", builtin(EmacsBuiltin::MoveTabLeft)),
+            ("M-]", builtin(EmacsBuiltin::MoveTabRight)),
+        ];
+        for (seq, cmd) in cases {
+            assert_eq!(
+                keymaps.global.lookup(&parse_key_seq(seq).unwrap()),
+                Lookup::Bound(cmd),
+                "global {seq}"
+            );
+            // ...and reachable from TEXT mode by fallthrough (spec §3.1).
+            assert_eq!(
+                keymaps.lookup(MapContext::Text, &parse_key_seq(seq).unwrap()),
+                Lookup::Bound(cmd),
+                "text fallthrough {seq}"
+            );
+        }
+        // C-[ must NOT shadow ESC (which still exits TEXT mode) — they are
+        // different chords (spec §3.2, one-directional fold).
+        assert_eq!(
+            keymaps.lookup(MapContext::Text, &parse_key_seq("ESC").unwrap()),
+            Lookup::Bound(builtin(EmacsBuiltin::ExitTextMode))
+        );
+    }
+
+    #[test]
+    fn the_move_tab_commands_are_named_and_global() {
+        assert_eq!(
+            EmacsCommand::from_name("move-tab-left"),
+            Some(builtin(EmacsBuiltin::MoveTabLeft))
+        );
+        assert_eq!(
+            EmacsCommand::from_name("move-tab-right"),
+            Some(builtin(EmacsBuiltin::MoveTabRight))
+        );
+        assert_eq!(EmacsBuiltin::MoveTabLeft.default_map(), MapSlot::Global);
+        assert_eq!(EmacsBuiltin::MoveTabRight.default_map(), MapSlot::Global);
     }
 }
