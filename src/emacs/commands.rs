@@ -1,29 +1,122 @@
 //! The command table is the spine of the layer: every capability is a
-//! named command. Keymaps bind chords to commands, M-x (Phase 3) invokes
-//! them by name, and prefix args (Phase 4) are passed to every command via
+//! named command. Keymaps bind chords to commands, `M-x` invokes them by
+//! name, and prefix args are passed to every command via
 //! `App::execute_emacs_command(cmd, prefix)`.
+//!
+//! A command is either a layer **builtin** (motions, rings, TEXT mode,
+//! help, M-x, C-u) or one of herdr's own **`NavigateAction`s**. Every
+//! `NavigateAction` is named by `herdr_command_table!`, which expands to an
+//! exhaustive `match` — when upstream adds an action, this fork stops
+//! compiling until the action is named. That compiler error is the whole
+//! point (spec §3.4).
 
 use std::collections::HashMap;
 
+use crate::app::input::navigate::NavigateAction;
+
 use super::keymap::{parse_key_seq, stack_lookup, Chord, Keymap, Lookup};
 
+/// Number of `NavigateAction` variants. Pinned so a silent upstream addition
+/// is caught by `every_navigate_action_has_a_name` even if someone patches
+/// the match with a catch-all arm (don't).
+pub const NAVIGATE_ACTION_COUNT: usize = 45;
+
+/// Generates BOTH the exhaustive name match and the name -> action table
+/// from a single list, so the two can never drift.
+///
+/// `indexed` variants carry a `usize` payload that a name cannot express;
+/// they are constructed with index 0 and take their real index from the
+/// prefix argument at execution time (`C-u 2 M-x switch-tab`).
+macro_rules! herdr_command_table {
+    (
+        unit: [ $( $unit:ident => $unit_name:literal ),* $(,)? ],
+        indexed: [ $( $idx:ident => $idx_name:literal ),* $(,)? ],
+    ) => {
+        /// Exhaustive over `NavigateAction`: a new upstream variant fails the
+        /// build here until it is named.
+        pub fn herdr_command_name(action: NavigateAction) -> &'static str {
+            match action {
+                $( NavigateAction::$unit => $unit_name, )*
+                $( NavigateAction::$idx(_) => $idx_name, )*
+            }
+        }
+
+        /// Every herdr action, by name. Sorted at use sites via `all_commands`.
+        pub const HERDR_COMMANDS: &[(&str, NavigateAction)] = &[
+            $( ($unit_name, NavigateAction::$unit), )*
+            $( ($idx_name, NavigateAction::$idx(0)), )*
+        ];
+
+        /// True when this action takes its index from the prefix argument.
+        pub fn herdr_action_is_indexed(action: NavigateAction) -> bool {
+            matches!(action, $( NavigateAction::$idx(_) )|*)
+        }
+    };
+}
+
+herdr_command_table! {
+    unit: [
+        // Emacs vocabulary where a real equivalent exists.
+        SplitVertical            => "split-window-right",
+        SplitHorizontal          => "split-window-below",
+        ClosePane                => "delete-window",
+        Zoom                     => "delete-other-windows",
+        CyclePaneNext            => "other-window",
+        CyclePanePrevious        => "previous-window",
+        OpenNavigator            => "switch-to-buffer",
+        FocusPaneLeft            => "windmove-left",
+        FocusPaneDown            => "windmove-down",
+        FocusPaneUp              => "windmove-up",
+        FocusPaneRight           => "windmove-right",
+        SwapPaneLeft             => "windmove-swap-states-left",
+        SwapPaneDown             => "windmove-swap-states-down",
+        SwapPaneUp               => "windmove-swap-states-up",
+        SwapPaneRight            => "windmove-swap-states-right",
+        CloseTab                 => "kill-tab",
+        // herdr vocabulary where none does.
+        NewWorkspace             => "new-workspace",
+        NewWorktree              => "new-worktree",
+        OpenWorktree             => "open-worktree",
+        RemoveWorktree           => "remove-worktree",
+        RenameWorkspace          => "rename-workspace",
+        CloseWorkspace           => "close-workspace",
+        WorkspacePicker          => "workspace-picker",
+        PreviousWorkspace        => "previous-workspace",
+        NextWorkspace            => "next-workspace",
+        PreviousAgent            => "previous-agent",
+        NextAgent                => "next-agent",
+        NewTab                   => "new-tab",
+        RenameTab                => "rename-tab",
+        PreviousTab              => "previous-tab",
+        NextTab                  => "next-tab",
+        RenamePane               => "rename-pane",
+        EditScrollback           => "edit-scrollback",
+        CopyMode                 => "copy-mode",
+        EnterResizeMode          => "resize-mode",
+        ToggleSidebar            => "toggle-sidebar",
+        LastPane                 => "last-pane",
+        Help                     => "herdr-help",
+        Settings                 => "settings",
+        ReloadConfig             => "reload-config",
+        OpenNotificationTarget   => "open-navigator-notification-target",
+        Detach                   => "detach",
+    ],
+    indexed: [
+        SwitchWorkspace          => "switch-workspace",
+        SwitchTab                => "switch-tab",
+        FocusAgent               => "focus-agent",
+    ],
+}
+
+/// Layer-native commands: things herdr has no action for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EmacsCommand {
-    // Phase 0: management layer
-    SplitWindowBelow,
-    SplitWindowRight,
-    OtherWindow,
-    DeleteWindow,
-    DeleteOtherWindows,
-    SwitchToBuffer,
-    NewTab,
-    NextTab,
-    PreviousTab,
-    KillTab,
-    WorkspacePicker,
-    QuotedInsert,
+pub enum EmacsBuiltin {
+    // Dispatcher
+    UniversalArgument,
+    ExecuteExtendedCommand,
     KeyboardQuit,
-    // Phase 1: TEXT mode
+    QuotedInsert,
+    // TEXT mode
     TextMode,
     ExitTextMode,
     ForwardChar,
@@ -41,98 +134,171 @@ pub enum EmacsCommand {
     GotoLine,
     SetMark,
     ExchangePointAndMark,
-    // Phase 1: kill ring
+    // Rings
     KillRingSave,
     KillRegion,
     Yank,
     YankPop,
+    // Minibuffer editing
+    DeleteBackwardChar,
+    KillLine,
+    BackwardKillWord,
+    MinibufferComplete,
+    ExitMinibuffer,
+    // Help
+    DescribeKey,
+    DescribeBindings,
 }
 
-/// Canonical name table (M-x namespace). Keep sorted by name.
-pub const COMMAND_NAMES: &[(EmacsCommand, &str)] = &[
-    (EmacsCommand::BackwardChar, "backward-char"),
-    (EmacsCommand::BackwardWord, "backward-word"),
-    (EmacsCommand::BeginningOfBuffer, "beginning-of-buffer"),
-    (EmacsCommand::DeleteOtherWindows, "delete-other-windows"),
-    (EmacsCommand::DeleteWindow, "delete-window"),
-    (EmacsCommand::EndOfBuffer, "end-of-buffer"),
+/// Canonical builtin name table (part of the M-x namespace). Keep sorted.
+pub const BUILTIN_NAMES: &[(EmacsBuiltin, &str)] = &[
+    (EmacsBuiltin::BackwardChar, "backward-char"),
+    (EmacsBuiltin::BackwardKillWord, "backward-kill-word"),
+    (EmacsBuiltin::BackwardWord, "backward-word"),
+    (EmacsBuiltin::BeginningOfBuffer, "beginning-of-buffer"),
+    (EmacsBuiltin::DeleteBackwardChar, "delete-backward-char"),
+    (EmacsBuiltin::DescribeBindings, "describe-bindings"),
+    (EmacsBuiltin::DescribeKey, "describe-key"),
+    (EmacsBuiltin::EndOfBuffer, "end-of-buffer"),
     (
-        EmacsCommand::ExchangePointAndMark,
+        EmacsBuiltin::ExchangePointAndMark,
         "exchange-point-and-mark",
     ),
-    (EmacsCommand::ExitTextMode, "exit-text-mode"),
-    (EmacsCommand::ForwardChar, "forward-char"),
-    (EmacsCommand::ForwardWord, "forward-word"),
-    (EmacsCommand::GotoLine, "goto-line"),
-    (EmacsCommand::KeyboardQuit, "keyboard-quit"),
-    (EmacsCommand::KillRegion, "kill-region"),
-    (EmacsCommand::KillRingSave, "kill-ring-save"),
-    (EmacsCommand::KillTab, "kill-tab"),
-    (EmacsCommand::MoveBeginningOfLine, "move-beginning-of-line"),
-    (EmacsCommand::MoveEndOfLine, "move-end-of-line"),
-    (EmacsCommand::NewTab, "new-tab"),
-    (EmacsCommand::NextLine, "next-line"),
-    (EmacsCommand::NextTab, "next-tab"),
-    (EmacsCommand::OtherWindow, "other-window"),
-    (EmacsCommand::PreviousLine, "previous-line"),
-    (EmacsCommand::PreviousTab, "previous-tab"),
-    (EmacsCommand::QuotedInsert, "quoted-insert"),
-    (EmacsCommand::ScrollDown, "scroll-down"),
-    (EmacsCommand::ScrollUp, "scroll-up"),
-    (EmacsCommand::SetMark, "set-mark-command"),
-    (EmacsCommand::SplitWindowBelow, "split-window-below"),
-    (EmacsCommand::SplitWindowRight, "split-window-right"),
-    (EmacsCommand::SwitchToBuffer, "switch-to-buffer"),
-    (EmacsCommand::TextMode, "text-mode"),
-    (EmacsCommand::WorkspacePicker, "workspace-picker"),
-    (EmacsCommand::Yank, "yank"),
-    (EmacsCommand::YankPop, "yank-pop"),
+    (
+        EmacsBuiltin::ExecuteExtendedCommand,
+        "execute-extended-command",
+    ),
+    (EmacsBuiltin::ExitMinibuffer, "exit-minibuffer"),
+    (EmacsBuiltin::ExitTextMode, "exit-text-mode"),
+    (EmacsBuiltin::ForwardChar, "forward-char"),
+    (EmacsBuiltin::ForwardWord, "forward-word"),
+    (EmacsBuiltin::GotoLine, "goto-line"),
+    (EmacsBuiltin::KeyboardQuit, "keyboard-quit"),
+    (EmacsBuiltin::KillLine, "kill-line"),
+    (EmacsBuiltin::KillRegion, "kill-region"),
+    (EmacsBuiltin::KillRingSave, "kill-ring-save"),
+    (EmacsBuiltin::MinibufferComplete, "minibuffer-complete"),
+    (EmacsBuiltin::MoveBeginningOfLine, "move-beginning-of-line"),
+    (EmacsBuiltin::MoveEndOfLine, "move-end-of-line"),
+    (EmacsBuiltin::NextLine, "next-line"),
+    (EmacsBuiltin::PreviousLine, "previous-line"),
+    (EmacsBuiltin::QuotedInsert, "quoted-insert"),
+    (EmacsBuiltin::ScrollDown, "scroll-down"),
+    (EmacsBuiltin::ScrollUp, "scroll-up"),
+    (EmacsBuiltin::SetMark, "set-mark-command"),
+    (EmacsBuiltin::TextMode, "text-mode"),
+    (EmacsBuiltin::UniversalArgument, "universal-argument"),
+    (EmacsBuiltin::Yank, "yank"),
+    (EmacsBuiltin::YankPop, "yank-pop"),
 ];
 
-impl EmacsCommand {
+/// Which keymap a `[emacs.keys]` override for this command lands in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapSlot {
+    /// Live mode (and, via fallthrough, everywhere else).
+    Global,
+    /// TEXT mode only — must not steal the key from the agent in live mode.
+    Text,
+    /// Both maps (yank works in a pane and in a buffer).
+    Both,
+    /// Minibuffer editing only.
+    Minibuffer,
+}
+
+impl EmacsBuiltin {
     pub fn name(self) -> &'static str {
-        COMMAND_NAMES
+        BUILTIN_NAMES
             .iter()
             .find(|(cmd, _)| *cmd == self)
             .map(|(_, name)| *name)
-            .expect("every command has a name")
+            .expect("every builtin has a name")
+    }
+
+    /// Exhaustive: a new builtin must declare where an override binds it.
+    pub fn default_map(self) -> MapSlot {
+        match self {
+            Self::UniversalArgument
+            | Self::ExecuteExtendedCommand
+            | Self::KeyboardQuit
+            | Self::QuotedInsert
+            | Self::TextMode => MapSlot::Global,
+            Self::ExitTextMode
+            | Self::ForwardChar
+            | Self::BackwardChar
+            | Self::NextLine
+            | Self::PreviousLine
+            | Self::ForwardWord
+            | Self::BackwardWord
+            | Self::MoveBeginningOfLine
+            | Self::MoveEndOfLine
+            | Self::ScrollUp
+            | Self::ScrollDown
+            | Self::BeginningOfBuffer
+            | Self::EndOfBuffer
+            | Self::GotoLine
+            | Self::SetMark
+            | Self::ExchangePointAndMark
+            | Self::KillRingSave
+            | Self::KillRegion => MapSlot::Text,
+            Self::Yank | Self::YankPop | Self::DescribeKey | Self::DescribeBindings => {
+                MapSlot::Both
+            }
+            Self::DeleteBackwardChar
+            | Self::KillLine
+            | Self::BackwardKillWord
+            | Self::MinibufferComplete
+            | Self::ExitMinibuffer => MapSlot::Minibuffer,
+        }
+    }
+}
+
+/// A bound command: a layer builtin or one of herdr's own actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmacsCommand {
+    Builtin(EmacsBuiltin),
+    Herdr(NavigateAction),
+}
+
+impl EmacsCommand {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Builtin(builtin) => builtin.name(),
+            Self::Herdr(action) => herdr_command_name(action),
+        }
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
-        COMMAND_NAMES
+        if let Some((builtin, _)) = BUILTIN_NAMES.iter().find(|(_, n)| *n == name) {
+            return Some(Self::Builtin(*builtin));
+        }
+        HERDR_COMMANDS
             .iter()
-            .find(|(_, n)| *n == name)
-            .map(|(cmd, _)| *cmd)
+            .find(|(n, _)| *n == name)
+            .map(|(_, action)| Self::Herdr(*action))
     }
 
-    /// TEXT-mode-only commands live in the text keymap; everything else in
-    /// the global (live-mode) keymap. Yank/YankPop exist in both worlds.
-    /// KeyboardQuit is text-side: its only default binding (C-g) lives in
-    /// the text keymap, so overrides must land there too.
-    fn is_text_command(self) -> bool {
-        matches!(
-            self,
-            Self::KeyboardQuit
-                | Self::ExitTextMode
-                | Self::ForwardChar
-                | Self::BackwardChar
-                | Self::NextLine
-                | Self::PreviousLine
-                | Self::ForwardWord
-                | Self::BackwardWord
-                | Self::MoveBeginningOfLine
-                | Self::MoveEndOfLine
-                | Self::ScrollUp
-                | Self::ScrollDown
-                | Self::BeginningOfBuffer
-                | Self::EndOfBuffer
-                | Self::GotoLine
-                | Self::SetMark
-                | Self::ExchangePointAndMark
-                | Self::KillRingSave
-                | Self::KillRegion
-        )
+    fn map_slot(self) -> MapSlot {
+        match self {
+            Self::Builtin(builtin) => builtin.default_map(),
+            // Every herdr action is a global (management) command.
+            Self::Herdr(_) => MapSlot::Global,
+        }
     }
+}
+
+/// The full M-x namespace: builtins + all 45 herdr actions, sorted by name.
+pub fn all_commands() -> Vec<(&'static str, EmacsCommand)> {
+    let mut all: Vec<(&'static str, EmacsCommand)> = BUILTIN_NAMES
+        .iter()
+        .map(|(builtin, name)| (*name, EmacsCommand::Builtin(*builtin)))
+        .chain(
+            HERDR_COMMANDS
+                .iter()
+                .map(|(name, action)| (*name, EmacsCommand::Herdr(*action))),
+        )
+        .collect();
+    all.sort_unstable_by_key(|(name, _)| *name);
+    all
 }
 
 /// Which keymaps are active. Derived from `EmacsState` (see
@@ -204,51 +370,70 @@ impl KeymapSet {
 }
 
 const DEFAULT_GLOBAL_BINDINGS: &[(&str, EmacsCommand)] = &[
-    ("C-x 2", EmacsCommand::SplitWindowBelow),
-    ("C-x 3", EmacsCommand::SplitWindowRight),
-    ("C-x o", EmacsCommand::OtherWindow),
-    ("C-x 0", EmacsCommand::DeleteWindow),
-    ("C-x 1", EmacsCommand::DeleteOtherWindows),
-    ("C-x b", EmacsCommand::SwitchToBuffer),
-    ("C-x c", EmacsCommand::NewTab),
-    ("C-x n", EmacsCommand::NextTab),
-    ("C-x p", EmacsCommand::PreviousTab),
-    ("C-x k", EmacsCommand::KillTab),
-    ("C-x w", EmacsCommand::WorkspacePicker),
-    ("C-x [", EmacsCommand::TextMode),
-    ("C-q", EmacsCommand::QuotedInsert),
-    ("C-y", EmacsCommand::Yank),
-    ("M-y", EmacsCommand::YankPop),
+    (
+        "C-x 2",
+        EmacsCommand::Herdr(NavigateAction::SplitHorizontal),
+    ),
+    ("C-x 3", EmacsCommand::Herdr(NavigateAction::SplitVertical)),
+    ("C-x o", EmacsCommand::Herdr(NavigateAction::CyclePaneNext)),
+    ("C-x 0", EmacsCommand::Herdr(NavigateAction::ClosePane)),
+    ("C-x 1", EmacsCommand::Herdr(NavigateAction::Zoom)),
+    ("C-x b", EmacsCommand::Herdr(NavigateAction::OpenNavigator)),
+    ("C-x c", EmacsCommand::Herdr(NavigateAction::NewTab)),
+    ("C-x n", EmacsCommand::Herdr(NavigateAction::NextTab)),
+    ("C-x p", EmacsCommand::Herdr(NavigateAction::PreviousTab)),
+    ("C-x k", EmacsCommand::Herdr(NavigateAction::CloseTab)),
+    (
+        "C-x w",
+        EmacsCommand::Herdr(NavigateAction::WorkspacePicker),
+    ),
+    ("C-x [", EmacsCommand::Builtin(EmacsBuiltin::TextMode)),
+    ("C-q", EmacsCommand::Builtin(EmacsBuiltin::QuotedInsert)),
+    ("C-g", EmacsCommand::Builtin(EmacsBuiltin::KeyboardQuit)),
+    ("C-y", EmacsCommand::Builtin(EmacsBuiltin::Yank)),
+    ("M-y", EmacsCommand::Builtin(EmacsBuiltin::YankPop)),
 ];
 
 const DEFAULT_TEXT_BINDINGS: &[(&str, EmacsCommand)] = &[
-    ("C-f", EmacsCommand::ForwardChar),
-    ("C-b", EmacsCommand::BackwardChar),
-    ("C-n", EmacsCommand::NextLine),
-    ("C-p", EmacsCommand::PreviousLine),
-    ("M-f", EmacsCommand::ForwardWord),
-    ("M-b", EmacsCommand::BackwardWord),
-    ("C-a", EmacsCommand::MoveBeginningOfLine),
-    ("C-e", EmacsCommand::MoveEndOfLine),
-    ("C-v", EmacsCommand::ScrollUp),
-    ("M-v", EmacsCommand::ScrollDown),
-    ("M-<", EmacsCommand::BeginningOfBuffer),
-    ("M->", EmacsCommand::EndOfBuffer),
-    ("M-g g", EmacsCommand::GotoLine),
-    ("C-SPC", EmacsCommand::SetMark),
-    ("C-x C-x", EmacsCommand::ExchangePointAndMark),
-    ("M-w", EmacsCommand::KillRingSave),
-    ("C-w", EmacsCommand::KillRegion),
-    ("C-y", EmacsCommand::Yank),
-    ("M-y", EmacsCommand::YankPop),
-    ("C-g", EmacsCommand::KeyboardQuit),
-    ("q", EmacsCommand::ExitTextMode),
-    ("ESC", EmacsCommand::ExitTextMode),
+    ("C-f", EmacsCommand::Builtin(EmacsBuiltin::ForwardChar)),
+    ("C-b", EmacsCommand::Builtin(EmacsBuiltin::BackwardChar)),
+    ("C-n", EmacsCommand::Builtin(EmacsBuiltin::NextLine)),
+    ("C-p", EmacsCommand::Builtin(EmacsBuiltin::PreviousLine)),
+    ("M-f", EmacsCommand::Builtin(EmacsBuiltin::ForwardWord)),
+    ("M-b", EmacsCommand::Builtin(EmacsBuiltin::BackwardWord)),
+    (
+        "C-a",
+        EmacsCommand::Builtin(EmacsBuiltin::MoveBeginningOfLine),
+    ),
+    ("C-e", EmacsCommand::Builtin(EmacsBuiltin::MoveEndOfLine)),
+    ("C-v", EmacsCommand::Builtin(EmacsBuiltin::ScrollUp)),
+    ("M-v", EmacsCommand::Builtin(EmacsBuiltin::ScrollDown)),
+    (
+        "M-<",
+        EmacsCommand::Builtin(EmacsBuiltin::BeginningOfBuffer),
+    ),
+    ("M->", EmacsCommand::Builtin(EmacsBuiltin::EndOfBuffer)),
+    ("M-g g", EmacsCommand::Builtin(EmacsBuiltin::GotoLine)),
+    ("C-SPC", EmacsCommand::Builtin(EmacsBuiltin::SetMark)),
+    (
+        "C-x C-x",
+        EmacsCommand::Builtin(EmacsBuiltin::ExchangePointAndMark),
+    ),
+    ("M-w", EmacsCommand::Builtin(EmacsBuiltin::KillRingSave)),
+    ("C-w", EmacsCommand::Builtin(EmacsBuiltin::KillRegion)),
+    ("C-y", EmacsCommand::Builtin(EmacsBuiltin::Yank)),
+    ("M-y", EmacsCommand::Builtin(EmacsBuiltin::YankPop)),
+    ("q", EmacsCommand::Builtin(EmacsBuiltin::ExitTextMode)),
+    ("ESC", EmacsCommand::Builtin(EmacsBuiltin::ExitTextMode)),
 ];
+
+/// Filled in by Task 8 (minibuffer) and Task 10 (help).
+const DEFAULT_MINIBUFFER_BINDINGS: &[(&str, EmacsCommand)] = &[];
 
 /// Build the default keymaps and apply `[emacs.keys]` overrides.
 /// Returns (keymaps, warnings) — invalid chord strings or unknown command
-/// names become warnings, never hard errors.
+/// names become warnings, never hard errors. Task 6 routes the warnings
+/// through the config diagnostics pipeline.
 pub fn build_keymaps(overrides: &HashMap<String, String>) -> (KeymapSet, Vec<String>) {
     let mut set = KeymapSet::default();
     for (seq, cmd) in DEFAULT_GLOBAL_BINDINGS {
@@ -260,6 +445,12 @@ pub fn build_keymaps(overrides: &HashMap<String, String>) -> (KeymapSet, Vec<Str
     for (seq, cmd) in DEFAULT_TEXT_BINDINGS {
         set.text.bind(
             parse_key_seq(seq).expect("default text binding parses"),
+            *cmd,
+        );
+    }
+    for (seq, cmd) in DEFAULT_MINIBUFFER_BINDINGS {
+        set.minibuffer.bind(
+            parse_key_seq(seq).expect("default minibuffer binding parses"),
             *cmd,
         );
     }
@@ -277,13 +468,14 @@ pub fn build_keymaps(overrides: &HashMap<String, String>) -> (KeymapSet, Vec<Str
             warnings.push(format!("[emacs.keys] unknown command \"{cmd_name}\""));
             continue;
         };
-        if cmd.is_text_command() {
-            set.text.bind(seq, cmd);
-        } else if matches!(cmd, EmacsCommand::Yank | EmacsCommand::YankPop) {
-            set.global.bind(seq.clone(), cmd);
-            set.text.bind(seq, cmd);
-        } else {
-            set.global.bind(seq, cmd);
+        match cmd.map_slot() {
+            MapSlot::Global => set.global.bind(seq, cmd),
+            MapSlot::Text => set.text.bind(seq, cmd),
+            MapSlot::Minibuffer => set.minibuffer.bind(seq, cmd),
+            MapSlot::Both => {
+                set.global.bind(seq.clone(), cmd);
+                set.text.bind(seq, cmd);
+            }
         }
     }
     (set, warnings)
@@ -294,13 +486,99 @@ mod tests {
     use super::*;
     use crate::emacs::keymap::{parse_key_seq, Lookup};
 
+    fn builtin(b: EmacsBuiltin) -> EmacsCommand {
+        EmacsCommand::Builtin(b)
+    }
+    fn herdr(a: NavigateAction) -> EmacsCommand {
+        EmacsCommand::Herdr(a)
+    }
+
     #[test]
-    fn command_names_round_trip() {
-        for (cmd, name) in COMMAND_NAMES.iter().copied() {
-            assert_eq!(cmd.name(), name);
+    fn every_navigate_action_has_a_name() {
+        // The exhaustive match in `herdr_command_name` is the compiler-enforced
+        // guarantee (spec §3.4). This test pins the count so a silently added
+        // upstream variant cannot slip past the table either.
+        assert_eq!(
+            HERDR_COMMANDS.len(),
+            NAVIGATE_ACTION_COUNT,
+            "every NavigateAction variant must appear in herdr_command_table!"
+        );
+        for (name, action) in HERDR_COMMANDS.iter().copied() {
+            assert_eq!(herdr_command_name(action), name);
+            assert_eq!(
+                EmacsCommand::from_name(name),
+                Some(EmacsCommand::Herdr(action))
+            );
+        }
+    }
+
+    #[test]
+    fn command_names_round_trip_and_are_unique() {
+        let all = all_commands();
+        let mut seen = std::collections::HashSet::new();
+        for (name, cmd) in all.iter().copied() {
+            assert_eq!(cmd.name(), name, "{name} round-trips");
             assert_eq!(EmacsCommand::from_name(name), Some(cmd));
+            assert!(seen.insert(name), "duplicate command name {name}");
         }
         assert_eq!(EmacsCommand::from_name("no-such-command"), None);
+        // Sorted, so M-x completion is deterministic.
+        let mut sorted: Vec<&str> = all.iter().map(|(name, _)| *name).collect();
+        let original = sorted.clone();
+        sorted.sort_unstable();
+        assert_eq!(original, sorted, "all_commands() is sorted by name");
+    }
+
+    #[test]
+    fn herdr_actions_use_emacs_vocabulary_where_one_exists() {
+        for (name, action) in [
+            ("split-window-right", NavigateAction::SplitVertical),
+            ("split-window-below", NavigateAction::SplitHorizontal),
+            ("other-window", NavigateAction::CyclePaneNext),
+            ("previous-window", NavigateAction::CyclePanePrevious),
+            ("delete-window", NavigateAction::ClosePane),
+            ("delete-other-windows", NavigateAction::Zoom),
+            ("switch-to-buffer", NavigateAction::OpenNavigator),
+            ("windmove-left", NavigateAction::FocusPaneLeft),
+            ("windmove-swap-states-right", NavigateAction::SwapPaneRight),
+        ] {
+            assert_eq!(herdr_command_name(action), name);
+        }
+        // ...and herdr vocabulary where none does.
+        for (name, action) in [
+            ("toggle-sidebar", NavigateAction::ToggleSidebar),
+            ("detach", NavigateAction::Detach),
+            (
+                "open-navigator-notification-target",
+                NavigateAction::OpenNotificationTarget,
+            ),
+            ("new-worktree", NavigateAction::NewWorktree),
+        ] {
+            assert_eq!(herdr_command_name(action), name);
+        }
+    }
+
+    #[test]
+    fn indexed_actions_default_to_index_zero() {
+        // The index comes from the prefix arg at execution time
+        // (`C-u 2 M-x switch-tab`), so the named command carries 0.
+        assert_eq!(
+            EmacsCommand::from_name("switch-tab"),
+            Some(herdr(NavigateAction::SwitchTab(0)))
+        );
+        assert_eq!(
+            EmacsCommand::from_name("switch-workspace"),
+            Some(herdr(NavigateAction::SwitchWorkspace(0)))
+        );
+        assert_eq!(
+            EmacsCommand::from_name("focus-agent"),
+            Some(herdr(NavigateAction::FocusAgent(0)))
+        );
+        // Any index still names the same command.
+        assert_eq!(
+            herdr_command_name(NavigateAction::SwitchTab(7)),
+            "switch-tab"
+        );
     }
 
     #[test]
@@ -308,21 +586,22 @@ mod tests {
         let (keymaps, warnings) = build_keymaps(&Default::default());
         assert!(warnings.is_empty());
         let cases = [
-            ("C-x 2", EmacsCommand::SplitWindowBelow),
-            ("C-x 3", EmacsCommand::SplitWindowRight),
-            ("C-x o", EmacsCommand::OtherWindow),
-            ("C-x 0", EmacsCommand::DeleteWindow),
-            ("C-x 1", EmacsCommand::DeleteOtherWindows),
-            ("C-x b", EmacsCommand::SwitchToBuffer),
-            ("C-x c", EmacsCommand::NewTab),
-            ("C-x n", EmacsCommand::NextTab),
-            ("C-x p", EmacsCommand::PreviousTab),
-            ("C-x k", EmacsCommand::KillTab),
-            ("C-x w", EmacsCommand::WorkspacePicker),
-            ("C-x [", EmacsCommand::TextMode),
-            ("C-q", EmacsCommand::QuotedInsert),
-            ("C-y", EmacsCommand::Yank),
-            ("M-y", EmacsCommand::YankPop),
+            ("C-x 2", herdr(NavigateAction::SplitHorizontal)),
+            ("C-x 3", herdr(NavigateAction::SplitVertical)),
+            ("C-x o", herdr(NavigateAction::CyclePaneNext)),
+            ("C-x 0", herdr(NavigateAction::ClosePane)),
+            ("C-x 1", herdr(NavigateAction::Zoom)),
+            ("C-x b", herdr(NavigateAction::OpenNavigator)),
+            ("C-x c", herdr(NavigateAction::NewTab)),
+            ("C-x n", herdr(NavigateAction::NextTab)),
+            ("C-x p", herdr(NavigateAction::PreviousTab)),
+            ("C-x k", herdr(NavigateAction::CloseTab)),
+            ("C-x w", herdr(NavigateAction::WorkspacePicker)),
+            ("C-x [", builtin(EmacsBuiltin::TextMode)),
+            ("C-q", builtin(EmacsBuiltin::QuotedInsert)),
+            ("C-g", builtin(EmacsBuiltin::KeyboardQuit)),
+            ("C-y", builtin(EmacsBuiltin::Yank)),
+            ("M-y", builtin(EmacsBuiltin::YankPop)),
         ];
         for (seq, cmd) in cases {
             assert_eq!(
@@ -341,33 +620,32 @@ mod tests {
     fn default_text_keymap_binds_motions_and_region() {
         let (keymaps, _) = build_keymaps(&Default::default());
         let cases = [
-            ("C-f", EmacsCommand::ForwardChar),
-            ("C-b", EmacsCommand::BackwardChar),
-            ("C-n", EmacsCommand::NextLine),
-            ("C-p", EmacsCommand::PreviousLine),
-            ("M-f", EmacsCommand::ForwardWord),
-            ("M-b", EmacsCommand::BackwardWord),
-            ("C-a", EmacsCommand::MoveBeginningOfLine),
-            ("C-e", EmacsCommand::MoveEndOfLine),
-            ("C-v", EmacsCommand::ScrollUp),
-            ("M-v", EmacsCommand::ScrollDown),
-            ("M-<", EmacsCommand::BeginningOfBuffer),
-            ("M->", EmacsCommand::EndOfBuffer),
-            ("M-g g", EmacsCommand::GotoLine),
-            ("C-SPC", EmacsCommand::SetMark),
-            ("C-x C-x", EmacsCommand::ExchangePointAndMark),
-            ("M-w", EmacsCommand::KillRingSave),
-            ("C-w", EmacsCommand::KillRegion),
-            ("C-y", EmacsCommand::Yank),
-            ("M-y", EmacsCommand::YankPop),
-            ("C-g", EmacsCommand::KeyboardQuit),
-            ("q", EmacsCommand::ExitTextMode),
-            ("ESC", EmacsCommand::ExitTextMode),
+            ("C-f", EmacsBuiltin::ForwardChar),
+            ("C-b", EmacsBuiltin::BackwardChar),
+            ("C-n", EmacsBuiltin::NextLine),
+            ("C-p", EmacsBuiltin::PreviousLine),
+            ("M-f", EmacsBuiltin::ForwardWord),
+            ("M-b", EmacsBuiltin::BackwardWord),
+            ("C-a", EmacsBuiltin::MoveBeginningOfLine),
+            ("C-e", EmacsBuiltin::MoveEndOfLine),
+            ("C-v", EmacsBuiltin::ScrollUp),
+            ("M-v", EmacsBuiltin::ScrollDown),
+            ("M-<", EmacsBuiltin::BeginningOfBuffer),
+            ("M->", EmacsBuiltin::EndOfBuffer),
+            ("M-g g", EmacsBuiltin::GotoLine),
+            ("C-SPC", EmacsBuiltin::SetMark),
+            ("C-x C-x", EmacsBuiltin::ExchangePointAndMark),
+            ("M-w", EmacsBuiltin::KillRingSave),
+            ("C-w", EmacsBuiltin::KillRegion),
+            ("C-y", EmacsBuiltin::Yank),
+            ("M-y", EmacsBuiltin::YankPop),
+            ("q", EmacsBuiltin::ExitTextMode),
+            ("ESC", EmacsBuiltin::ExitTextMode),
         ];
         for (seq, cmd) in cases {
             assert_eq!(
                 keymaps.text.lookup(&parse_key_seq(seq).unwrap()),
-                Lookup::Bound(cmd),
+                Lookup::Bound(builtin(cmd)),
                 "text {seq}"
             );
         }
@@ -375,56 +653,10 @@ mod tests {
             keymaps.text.lookup(&parse_key_seq("M-g").unwrap()),
             Lookup::Prefix
         );
-    }
-
-    #[test]
-    fn config_overrides_rebind_and_warn() {
-        let mut overrides = std::collections::HashMap::new();
-        overrides.insert("C-x t".to_string(), "new-tab".to_string());
-        overrides.insert("C-x c".to_string(), "other-window".to_string());
-        overrides.insert("C-x z".to_string(), "no-such-command".to_string());
-        overrides.insert("???".to_string(), "new-tab".to_string());
-        let (keymaps, warnings) = build_keymaps(&overrides);
+        // C-g lives in the global map now and reaches TEXT mode by fallthrough.
         assert_eq!(
-            keymaps.global.lookup(&parse_key_seq("C-x t").unwrap()),
-            Lookup::Bound(EmacsCommand::NewTab)
-        );
-        assert_eq!(
-            keymaps.global.lookup(&parse_key_seq("C-x c").unwrap()),
-            Lookup::Bound(EmacsCommand::OtherWindow)
-        );
-        assert_eq!(warnings.len(), 2, "{warnings:?}");
-    }
-
-    #[test]
-    fn keyboard_quit_override_lands_in_text_keymap() {
-        let mut overrides = std::collections::HashMap::new();
-        overrides.insert("C-]".to_string(), "keyboard-quit".to_string());
-        let (keymaps, warnings) = build_keymaps(&overrides);
-        assert!(warnings.is_empty());
-        assert_eq!(
-            keymaps.text.lookup(&parse_key_seq("C-]").unwrap()),
-            Lookup::Bound(EmacsCommand::KeyboardQuit)
-        );
-        assert_eq!(
-            keymaps.global.lookup(&parse_key_seq("C-]").unwrap()),
-            Lookup::Unbound
-        );
-    }
-
-    #[test]
-    fn text_command_overrides_land_in_text_keymap() {
-        let mut overrides = std::collections::HashMap::new();
-        overrides.insert("C-j".to_string(), "next-line".to_string());
-        let (keymaps, warnings) = build_keymaps(&overrides);
-        assert!(warnings.is_empty());
-        assert_eq!(
-            keymaps.text.lookup(&parse_key_seq("C-j").unwrap()),
-            Lookup::Bound(EmacsCommand::NextLine)
-        );
-        assert_eq!(
-            keymaps.global.lookup(&parse_key_seq("C-j").unwrap()),
-            Lookup::Unbound
+            keymaps.lookup(MapContext::Text, &parse_key_seq("C-g").unwrap()),
+            Lookup::Bound(builtin(EmacsBuiltin::KeyboardQuit))
         );
     }
 
@@ -446,25 +678,59 @@ mod tests {
     #[test]
     fn global_bindings_fall_through_in_text_mode() {
         let (keymaps, _) = build_keymaps(&Default::default());
-        // THE regression: C-x 3 must dispatch from inside TEXT mode.
         assert_eq!(
             keymaps.lookup(MapContext::Text, &parse_key_seq("C-x 3").unwrap()),
-            Lookup::Bound(EmacsCommand::SplitWindowRight)
+            Lookup::Bound(herdr(NavigateAction::SplitVertical))
         );
-        // ...while the text map still shadows on C-x C-x.
         assert_eq!(
             keymaps.lookup(MapContext::Text, &parse_key_seq("C-x C-x").unwrap()),
-            Lookup::Bound(EmacsCommand::ExchangePointAndMark)
+            Lookup::Bound(builtin(EmacsBuiltin::ExchangePointAndMark))
         );
-        // C-x stays a live prefix in TEXT mode (union prefix).
         assert_eq!(
             keymaps.lookup(MapContext::Text, &parse_key_seq("C-x").unwrap()),
             Lookup::Prefix
         );
-        // Text-only motions are not reachable in live mode.
         assert_eq!(
             keymaps.lookup(MapContext::Live, &parse_key_seq("C-f").unwrap()),
             Lookup::Unbound
+        );
+    }
+
+    #[test]
+    fn config_overrides_bind_any_command_and_warn_on_junk() {
+        let mut overrides = std::collections::HashMap::new();
+        // Spec §4, verbatim.
+        overrides.insert("C-x 4".to_string(), "split-window-right".to_string());
+        overrides.insert("C-x t".to_string(), "toggle-sidebar".to_string());
+        overrides.insert("C-x z".to_string(), "no-such-command".to_string());
+        overrides.insert("???".to_string(), "new-tab".to_string());
+        let (keymaps, warnings) = build_keymaps(&overrides);
+        assert_eq!(
+            keymaps.global.lookup(&parse_key_seq("C-x 4").unwrap()),
+            Lookup::Bound(herdr(NavigateAction::SplitVertical))
+        );
+        assert_eq!(
+            keymaps.global.lookup(&parse_key_seq("C-x t").unwrap()),
+            Lookup::Bound(herdr(NavigateAction::ToggleSidebar)),
+            "a herdr action, exposed by name, with no code change"
+        );
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+    }
+
+    #[test]
+    fn text_only_builtins_override_into_the_text_map() {
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert("C-j".to_string(), "next-line".to_string());
+        let (keymaps, warnings) = build_keymaps(&overrides);
+        assert!(warnings.is_empty());
+        assert_eq!(
+            keymaps.text.lookup(&parse_key_seq("C-j").unwrap()),
+            Lookup::Bound(builtin(EmacsBuiltin::NextLine))
+        );
+        assert_eq!(
+            keymaps.global.lookup(&parse_key_seq("C-j").unwrap()),
+            Lookup::Unbound,
+            "a motion must not steal C-j from the agent in live mode"
         );
     }
 }

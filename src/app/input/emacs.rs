@@ -10,8 +10,7 @@ use crossterm::event::KeyEventKind;
 use super::navigate::{ActionContext, NavigateAction};
 use crate::app::state::Mode;
 use crate::app::App;
-use crate::emacs::commands::EmacsCommand;
-use crate::emacs::commands::MapContext;
+use crate::emacs::commands::{herdr_action_is_indexed, EmacsBuiltin, EmacsCommand, MapContext};
 use crate::emacs::keymap::{format_seq, Chord, Lookup};
 use crate::emacs::text_mode::{self, Pos, TextBuffer, TextModeState};
 use crate::input::TerminalKey;
@@ -91,7 +90,7 @@ impl App {
         // deactivates the mark). Delegates to KeyboardQuit so mid-chord quit
         // and bound quit behave identically.
         if !self.state.emacs.pending.is_empty() && chord == Chord::ctrl('g') {
-            self.execute_emacs_command(EmacsCommand::KeyboardQuit, None);
+            self.execute_emacs_command(EmacsCommand::Builtin(EmacsBuiltin::KeyboardQuit), None);
             return true;
         }
 
@@ -151,27 +150,25 @@ impl App {
         }
     }
 
-    /// Execute a named command. `prefix` is the universal-argument slot:
-    /// always `None` until Phase 4 wires `C-u`, but part of the calling
-    /// convention from day one (spec: "the command table is the spine").
+    /// Execute a named command. `prefix` is the universal argument
+    /// (`Option<i64>`): motions repeat, `C-u C-SPC` pops the mark ring, and
+    /// the three indexed herdr actions take their index from it.
     pub(crate) fn execute_emacs_command(&mut self, cmd: EmacsCommand, prefix: Option<i64>) {
-        let _ = prefix; // consumed by motions and C-u C-SPC in Phase 4
-        if !matches!(cmd, EmacsCommand::Yank | EmacsCommand::YankPop) {
+        if !matches!(
+            cmd,
+            EmacsCommand::Builtin(EmacsBuiltin::Yank | EmacsBuiltin::YankPop)
+        ) {
             self.state.emacs.last_yank = None;
         }
         match cmd {
-            EmacsCommand::SplitWindowBelow => self.emacs_navigate(NavigateAction::SplitHorizontal),
-            EmacsCommand::SplitWindowRight => self.emacs_navigate(NavigateAction::SplitVertical),
-            EmacsCommand::OtherWindow => self.emacs_navigate(NavigateAction::CyclePaneNext),
-            EmacsCommand::DeleteWindow => self.emacs_navigate(NavigateAction::ClosePane),
-            EmacsCommand::DeleteOtherWindows => self.emacs_navigate(NavigateAction::Zoom),
-            EmacsCommand::SwitchToBuffer => self.emacs_navigate(NavigateAction::OpenNavigator),
-            EmacsCommand::NewTab => self.emacs_navigate(NavigateAction::NewTab),
-            EmacsCommand::NextTab => self.emacs_navigate(NavigateAction::NextTab),
-            EmacsCommand::PreviousTab => self.emacs_navigate(NavigateAction::PreviousTab),
-            EmacsCommand::KillTab => self.emacs_navigate(NavigateAction::CloseTab),
-            EmacsCommand::WorkspacePicker => self.emacs_navigate(NavigateAction::WorkspacePicker),
-            EmacsCommand::QuotedInsert => {
+            EmacsCommand::Herdr(action) => self.emacs_navigate(action, prefix),
+            EmacsCommand::Builtin(builtin) => self.execute_emacs_builtin(builtin, prefix),
+        }
+    }
+
+    fn execute_emacs_builtin(&mut self, builtin: EmacsBuiltin, prefix: Option<i64>) {
+        match builtin {
+            EmacsBuiltin::QuotedInsert => {
                 if self.state.emacs.text_mode.is_some() {
                     self.state.emacs.echo = Some("Buffer is read-only".to_string());
                 } else {
@@ -179,59 +176,88 @@ impl App {
                     self.state.emacs.echo = Some("C-q-".to_string());
                 }
             }
-            EmacsCommand::KeyboardQuit => {
+            EmacsBuiltin::KeyboardQuit => {
                 self.state.emacs.pending.clear();
                 if let Some(text) = self.state.emacs.text_mode.as_mut() {
                     text.mark_active = false;
                 }
                 self.state.emacs.echo = Some("Quit".to_string());
             }
-            EmacsCommand::TextMode => {
+            EmacsBuiltin::TextMode => {
                 if self.state.emacs.text_mode.is_none() {
                     self.emacs_enter_text_mode();
                 }
             }
-            EmacsCommand::ExitTextMode => self.emacs_exit_text_mode(),
-            EmacsCommand::ForwardChar
-            | EmacsCommand::BackwardChar
-            | EmacsCommand::NextLine
-            | EmacsCommand::PreviousLine
-            | EmacsCommand::ForwardWord
-            | EmacsCommand::BackwardWord
-            | EmacsCommand::MoveBeginningOfLine
-            | EmacsCommand::MoveEndOfLine
-            | EmacsCommand::ScrollUp
-            | EmacsCommand::ScrollDown
-            | EmacsCommand::BeginningOfBuffer
-            | EmacsCommand::EndOfBuffer => self.emacs_text_motion(cmd),
-            EmacsCommand::SetMark => self.emacs_set_mark(),
-            EmacsCommand::ExchangePointAndMark => self.emacs_exchange_point_and_mark(),
+            EmacsBuiltin::ExitTextMode => self.emacs_exit_text_mode(),
+            EmacsBuiltin::ForwardChar
+            | EmacsBuiltin::BackwardChar
+            | EmacsBuiltin::NextLine
+            | EmacsBuiltin::PreviousLine
+            | EmacsBuiltin::ForwardWord
+            | EmacsBuiltin::BackwardWord
+            | EmacsBuiltin::MoveBeginningOfLine
+            | EmacsBuiltin::MoveEndOfLine
+            | EmacsBuiltin::ScrollUp
+            | EmacsBuiltin::ScrollDown
+            | EmacsBuiltin::BeginningOfBuffer
+            | EmacsBuiltin::EndOfBuffer => self.emacs_text_motion(builtin, prefix),
+            EmacsBuiltin::SetMark => self.emacs_set_mark(),
+            EmacsBuiltin::ExchangePointAndMark => self.emacs_exchange_point_and_mark(),
             // In a read-only buffer C-w cannot delete, so kill-region
-            // degrades to kill-ring-save (spec §Phase 1).
-            EmacsCommand::KillRingSave | EmacsCommand::KillRegion => self.emacs_kill_ring_save(),
-            EmacsCommand::Yank => {
+            // degrades to kill-ring-save.
+            EmacsBuiltin::KillRingSave | EmacsBuiltin::KillRegion => self.emacs_kill_ring_save(),
+            EmacsBuiltin::Yank => {
                 if self.state.emacs.text_mode.is_some() {
                     self.state.emacs.echo = Some("Buffer is read-only".to_string());
                 } else {
                     self.emacs_yank_live();
                 }
             }
-            EmacsCommand::YankPop => {
+            EmacsBuiltin::YankPop => {
                 if self.state.emacs.text_mode.is_some() {
                     self.state.emacs.echo = Some("Buffer is read-only".to_string());
                 } else {
                     self.emacs_yank_pop_live();
                 }
             }
-            EmacsCommand::GotoLine => {
+            EmacsBuiltin::GotoLine => {
                 if let Some(text) = self.state.emacs.text_mode.as_mut() {
                     text.goto_line = Some(String::new());
                 }
             }
+            // Wired in later tasks; named and reachable from M-x now.
+            EmacsBuiltin::UniversalArgument
+            | EmacsBuiltin::ExecuteExtendedCommand
+            | EmacsBuiltin::DeleteBackwardChar
+            | EmacsBuiltin::KillLine
+            | EmacsBuiltin::BackwardKillWord
+            | EmacsBuiltin::MinibufferComplete
+            | EmacsBuiltin::ExitMinibuffer
+            | EmacsBuiltin::DescribeKey
+            | EmacsBuiltin::DescribeBindings => {
+                self.state.emacs.echo = Some(format!(
+                    "{} is not implemented yet",
+                    EmacsCommand::Builtin(builtin).name()
+                ));
+            }
         }
     }
 
-    fn emacs_navigate(&mut self, action: NavigateAction) {
+    /// Run a herdr action. The three indexed actions take their index from
+    /// the prefix argument: `C-u 2 M-x switch-tab` is tab index 1 (the
+    /// prefix arg is 1-based, herdr's index is 0-based).
+    fn emacs_navigate(&mut self, action: NavigateAction, prefix: Option<i64>) {
+        let action = if herdr_action_is_indexed(action) {
+            let index = prefix.unwrap_or(1).max(1).saturating_sub(1) as usize;
+            match action {
+                NavigateAction::SwitchWorkspace(_) => NavigateAction::SwitchWorkspace(index),
+                NavigateAction::SwitchTab(_) => NavigateAction::SwitchTab(index),
+                NavigateAction::FocusAgent(_) => NavigateAction::FocusAgent(index),
+                other => other,
+            }
+        } else {
+            action
+        };
         self.execute_tui_navigate_action(action, ActionContext::Prefix);
     }
 
@@ -328,7 +354,8 @@ impl App {
 
     /// Run one motion command against the frozen buffer, then keep the
     /// point visible.
-    fn emacs_text_motion(&mut self, cmd: EmacsCommand) {
+    fn emacs_text_motion(&mut self, cmd: EmacsBuiltin, prefix: Option<i64>) {
+        let _ = prefix; // Task 7 makes motions repeat.
         let Some(text) = self.state.emacs.text_mode.as_ref() else {
             return;
         };
@@ -348,30 +375,30 @@ impl App {
             };
             let buf = RuntimeBuffer { rt };
             match cmd {
-                EmacsCommand::ForwardChar => text_mode::forward_char(&buf, point),
-                EmacsCommand::BackwardChar => text_mode::backward_char(&buf, point),
-                EmacsCommand::NextLine => text_mode::next_line(&buf, point),
-                EmacsCommand::PreviousLine => text_mode::previous_line(&buf, point),
-                EmacsCommand::ForwardWord => text_mode::forward_word(&buf, point),
-                EmacsCommand::BackwardWord => text_mode::backward_word(&buf, point),
-                EmacsCommand::MoveBeginningOfLine => text_mode::line_beginning(point),
-                EmacsCommand::MoveEndOfLine => text_mode::line_end(&buf, point),
-                EmacsCommand::ScrollUp => text_mode::clamp(
+                EmacsBuiltin::ForwardChar => text_mode::forward_char(&buf, point),
+                EmacsBuiltin::BackwardChar => text_mode::backward_char(&buf, point),
+                EmacsBuiltin::NextLine => text_mode::next_line(&buf, point),
+                EmacsBuiltin::PreviousLine => text_mode::previous_line(&buf, point),
+                EmacsBuiltin::ForwardWord => text_mode::forward_word(&buf, point),
+                EmacsBuiltin::BackwardWord => text_mode::backward_word(&buf, point),
+                EmacsBuiltin::MoveBeginningOfLine => text_mode::line_beginning(point),
+                EmacsBuiltin::MoveEndOfLine => text_mode::line_end(&buf, point),
+                EmacsBuiltin::ScrollUp => text_mode::clamp(
                     &buf,
                     Pos {
                         row: point.row.saturating_add(page),
                         col: point.col,
                     },
                 ),
-                EmacsCommand::ScrollDown => text_mode::clamp(
+                EmacsBuiltin::ScrollDown => text_mode::clamp(
                     &buf,
                     Pos {
                         row: point.row.saturating_sub(page),
                         col: point.col,
                     },
                 ),
-                EmacsCommand::BeginningOfBuffer => text_mode::buffer_beginning(),
-                EmacsCommand::EndOfBuffer => text_mode::buffer_end(&buf),
+                EmacsBuiltin::BeginningOfBuffer => text_mode::buffer_beginning(),
+                EmacsBuiltin::EndOfBuffer => text_mode::buffer_end(&buf),
                 _ => point,
             }
         };
@@ -1555,5 +1582,24 @@ mod tests {
         app.route_client_input(vec![0x18, b'[']); // C-x [ again
         let after = app.state.emacs.text_mode.as_ref().unwrap().clone_for_test();
         assert_eq!(after, before, "TEXT mode session untouched");
+    }
+
+    /// A herdr action that has no default binding at all becomes reachable
+    /// purely by naming it in config (spec §7.5).
+    #[tokio::test]
+    async fn a_config_bound_herdr_action_runs_without_a_code_change() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
+        let mut keys = std::collections::HashMap::new();
+        keys.insert("C-x t".to_string(), "toggle-sidebar".to_string());
+        app.state.emacs = crate::emacs::EmacsState::from_config(&crate::config::EmacsConfig {
+            enabled: true,
+            clipboard_sync: false,
+            keys,
+            ..Default::default()
+        });
+        let before = app.state.sidebar_collapsed;
+        app.route_client_input(vec![0x18, b't']); // C-x t
+        assert_ne!(app.state.sidebar_collapsed, before, "toggle-sidebar ran");
+        assert!(sent_bytes(&mut rx).is_empty());
     }
 }

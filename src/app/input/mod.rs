@@ -38,7 +38,8 @@ mod copy_mode;
 mod emacs;
 mod modal;
 mod mouse;
-mod navigate;
+// Emacs layer seam (fork): `crate::emacs::commands` names every NavigateAction.
+pub(crate) mod navigate;
 mod overlays;
 mod selection;
 mod settings;

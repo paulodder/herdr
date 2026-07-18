@@ -12,7 +12,8 @@ mod api_helpers;
 mod config_io;
 mod creation;
 mod ids;
-mod input;
+// Emacs layer seam (fork): `crate::emacs::commands` names every NavigateAction.
+pub(crate) mod input;
 mod runtime;
 mod runtime_mutations;
 mod session;
