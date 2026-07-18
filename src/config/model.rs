@@ -81,6 +81,15 @@ impl Default for EmacsConfig {
     }
 }
 
+impl EmacsConfig {
+    /// Binding errors, in the shape the diagnostics pipeline expects.
+    /// Same source of truth as the live keymaps (`build_keymaps`), so a
+    /// diagnostic and a dropped binding can never disagree.
+    pub fn binding_diagnostics(&self) -> Vec<String> {
+        crate::emacs::commands::build_keymaps(&self.keys).1
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ToastDelivery {
@@ -1765,6 +1774,66 @@ mark_ring_max = 4
         assert_eq!(
             parsed.emacs.keys.get("C-x c").map(String::as_str),
             Some("new-tab")
+        );
+    }
+
+    #[test]
+    fn emacs_binding_errors_become_config_diagnostics() {
+        let parsed: Config = toml::from_str(
+            r#"
+[emacs]
+enabled = true
+
+[emacs.keys]
+"C-x t" = "no-such-command"
+"???" = "new-tab"
+"C-x 4" = "split-window-right"
+"#,
+        )
+        .expect("emacs config parses");
+
+        let diagnostics = parsed.collect_diagnostics();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.contains("unknown command \"no-such-command\"")),
+            "{diagnostics:?}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.contains("invalid key sequence \"???\"")),
+            "{diagnostics:?}"
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|d| d.starts_with("[emacs.keys]"))
+                .count(),
+            2,
+            "the valid binding produces no diagnostic: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn a_clean_emacs_config_produces_no_diagnostics() {
+        let parsed: Config = toml::from_str(
+            r#"
+[emacs]
+enabled = true
+
+[emacs.keys]
+"C-x 4" = "split-window-right"
+"#,
+        )
+        .expect("emacs config parses");
+        assert!(
+            parsed
+                .collect_diagnostics()
+                .iter()
+                .all(|d| !d.starts_with("[emacs.keys]")),
+            "{:?}",
+            parsed.collect_diagnostics()
         );
     }
 }

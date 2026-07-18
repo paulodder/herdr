@@ -74,6 +74,8 @@ impl Config {
             .chain(keybind_diags)
             .chain(self.remote_image_paste_key().err())
             .chain(self.ui.sound.diagnostics())
+            // Emacs layer seam (fork).
+            .chain(self.emacs.binding_diagnostics())
             .chain(self.invalid_sidebar_bounds_diagnostic())
             .collect()
     }

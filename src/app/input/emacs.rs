@@ -995,7 +995,8 @@ mod tests {
     #[tokio::test]
     async fn disabled_layer_is_bit_for_bit_passthrough() {
         let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
-        app.state
+        let _ = app
+            .state
             .emacs
             .apply_config(&crate::config::EmacsConfig::default());
         assert!(!app.state.emacs.enabled);

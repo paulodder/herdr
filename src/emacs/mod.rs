@@ -56,10 +56,10 @@ pub struct EmacsState {
 
 impl EmacsState {
     pub fn from_config(config: &EmacsConfig) -> Self {
-        let (keymaps, warnings) = commands::build_keymaps(&config.keys);
-        for warning in &warnings {
-            tracing::warn!("{warning}");
-        }
+        // Warnings are NOT logged here: they are surfaced by
+        // `EmacsConfig::binding_diagnostics()` through the config
+        // diagnostics pipeline (spec §4).
+        let (keymaps, _warnings) = commands::build_keymaps(&config.keys);
         Self {
             enabled: config.enabled,
             clipboard_sync: config.clipboard_sync,
@@ -78,11 +78,9 @@ impl EmacsState {
 
     /// Live config reload: refresh config-derived fields, preserve runtime
     /// state (rings survive a reload); drop transient state when disabling.
-    pub fn apply_config(&mut self, config: &EmacsConfig) {
+    /// Returns binding warnings for the caller's diagnostics vec.
+    pub fn apply_config(&mut self, config: &EmacsConfig) -> Vec<String> {
         let (keymaps, warnings) = commands::build_keymaps(&config.keys);
-        for warning in &warnings {
-            tracing::warn!("{warning}");
-        }
         self.enabled = config.enabled;
         self.clipboard_sync = config.clipboard_sync;
         self.kill_ring_max = config.kill_ring_max.max(1);
@@ -99,6 +97,7 @@ impl EmacsState {
             self.text_mode = None;
             self.last_yank = None;
         }
+        warnings
     }
 
     /// Which keymap stack is active right now (spec §3.1).
@@ -140,7 +139,7 @@ mod tests {
         }
         assert_eq!(state.mark_rings[&pane_id].len(), 5);
 
-        state.apply_config(&EmacsConfig {
+        let _ = state.apply_config(&EmacsConfig {
             enabled: true,
             mark_ring_max: 2,
             ..Default::default()

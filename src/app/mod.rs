@@ -1354,7 +1354,7 @@ impl App {
 
         // Emacs layer seam (fork).
         if !invalid_section("emacs") {
-            self.state.emacs.apply_config(&config.emacs);
+            diagnostics.extend(self.state.emacs.apply_config(&config.emacs));
         }
 
         if !invalid_section("ui") {
@@ -2907,6 +2907,37 @@ mod tests {
         assert_eq!(
             app.state.sidebar_max_width, 36,
             "App::new must fall back to default max when bounds are inverted"
+        );
+    }
+
+    #[tokio::test]
+    async fn emacs_binding_errors_reach_the_reload_report() {
+        let mut app = test_app();
+        let mut keys = std::collections::HashMap::new();
+        keys.insert("C-x t".to_string(), "no-such-command".to_string());
+        let config = crate::config::Config {
+            emacs: crate::config::EmacsConfig {
+                enabled: true,
+                keys,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let report = app.apply_live_config(&config, &[], &[], false);
+
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("[emacs.keys] unknown command \"no-such-command\"")),
+            "{:?}",
+            report.diagnostics
+        );
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
+        assert!(
+            app.state.config_diagnostic.is_some(),
+            "a bad binding surfaces in the UI, not just the log"
         );
     }
 
