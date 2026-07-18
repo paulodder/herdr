@@ -113,20 +113,19 @@ impl App {
             }
             Lookup::Unbound => {
                 self.state.emacs.pending.clear();
-                if text_active {
-                    // Read-only buffer: swallow everything, explain like Emacs.
-                    self.state.emacs.echo = if seq.len() > 1 {
-                        Some(format!("{} is undefined", format_seq(&seq)))
-                    } else {
-                        Some("Buffer is read-only".to_string())
-                    };
+                self.state.emacs.last_yank = None;
+                let single = seq.len() == 1;
+                // Spec §3.3. "Buffer is read-only" is ONLY for a key that
+                // would insert; it is not the catch-all for unbound keys.
+                if text_active && single && chord.is_self_insert() {
+                    self.state.emacs.echo = Some("Buffer is read-only".to_string());
                     true
-                } else if seq.len() == 1 {
-                    // Plain unbound key in live mode: flows to the pane.
-                    self.state.emacs.last_yank = None;
+                } else if !text_active && single {
+                    // Live mode: a single unbound key belongs to the agent.
+                    // Silence here is correct — see the term-char-mode
+                    // contract in spec §2.
                     false
                 } else {
-                    self.state.emacs.last_yank = None;
                     self.state.emacs.echo = Some(format!("{} is undefined", format_seq(&seq)));
                     true
                 }
@@ -1004,14 +1003,66 @@ mod tests {
         );
     }
 
+    /// Spec §3.3: an unbound NON-self-inserting key in TEXT mode is
+    /// "undefined", not "read-only". The old code said "Buffer is read-only"
+    /// for every unbound single chord, which is wrong.
     #[tokio::test]
-    async fn unbound_printable_keys_report_read_only() {
+    async fn unbound_control_key_in_text_mode_is_undefined_not_read_only() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(FIVE_LINES);
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x14]); // C-t: bound nowhere
+        assert_eq!(app.state.emacs.echo.as_deref(), Some("C-t is undefined"));
+        assert!(sent_bytes(&mut rx).is_empty());
+        assert!(app.state.emacs.text_mode.is_some(), "still in TEXT mode");
+    }
+
+    /// ...and an unbound META key likewise.
+    #[tokio::test]
+    async fn unbound_meta_key_in_text_mode_is_undefined() {
+        let (mut app, _pane, _rx) = emacs_app_with_channel(FIVE_LINES);
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x1b, b'z']); // M-z
+        assert_eq!(app.state.emacs.echo.as_deref(), Some("M-z is undefined"));
+    }
+
+    /// Read-only is reserved for keys that WOULD insert.
+    #[tokio::test]
+    async fn self_inserting_key_in_text_mode_reports_read_only() {
         let (mut app, _pane, mut rx) = emacs_app_with_channel(FIVE_LINES);
         enter_text_mode(&mut app);
         app.route_client_input(vec![b'x']);
         assert_eq!(app.state.emacs.echo.as_deref(), Some("Buffer is read-only"));
+        app.route_client_input(vec![b'5']);
+        assert_eq!(app.state.emacs.echo.as_deref(), Some("Buffer is read-only"));
         assert!(sent_bytes(&mut rx).is_empty());
-        assert!(app.state.emacs.text_mode.is_some(), "still in TEXT mode");
+    }
+
+    /// An unbound multi-chord sequence in TEXT mode names the whole sequence.
+    #[tokio::test]
+    async fn unbound_sequence_in_text_mode_names_the_sequence() {
+        let (mut app, _pane, _rx) = emacs_app_with_channel(FIVE_LINES);
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x18, b'z']); // C-x z
+        assert_eq!(app.state.emacs.echo.as_deref(), Some("C-x z is undefined"));
+    }
+
+    /// Live mode: a single unbound key belongs to the agent, silently.
+    #[tokio::test]
+    async fn unbound_single_key_in_live_mode_stays_silent_and_reaches_the_pane() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
+        app.route_client_input(vec![0x14]); // C-t
+        assert_eq!(app.state.emacs.echo, None, "no echo: the agent owns it");
+        assert_eq!(sent_bytes(&mut rx), vec![0x14]);
+    }
+
+    /// Live mode: an unbound MULTI-chord sequence is the layer's own fault
+    /// and must say so.
+    #[tokio::test]
+    async fn unbound_sequence_in_live_mode_is_undefined() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
+        app.route_client_input(vec![0x18, b'z']); // C-x z
+        assert_eq!(app.state.emacs.echo.as_deref(), Some("C-x z is undefined"));
+        assert!(sent_bytes(&mut rx).is_empty());
     }
 
     #[tokio::test]
