@@ -198,6 +198,8 @@ pub struct TextModeState {
     pub entry_offset_from_bottom: usize,
     /// Digits typed after `M-g g` (goto-line prompt; wired in Task 12).
     pub goto_line: Option<String>,
+    /// Active incremental-search reader, if any.
+    pub isearch: Option<super::isearch::IsearchState>,
 }
 
 impl TextModeState {

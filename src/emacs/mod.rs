@@ -10,6 +10,7 @@
 #![allow(dead_code)] // remove when Phase 2 (isearch/occur) fills in the remaining commands
 
 pub mod commands;
+pub mod isearch;
 pub mod keymap;
 pub mod render;
 pub mod rings;
@@ -49,6 +50,8 @@ pub struct EmacsState {
     pub kill_ring: rings::KillRing,
     /// Per-pane mark rings (spec: per-pane, depth `mark_ring_max`).
     pub mark_rings: std::collections::HashMap<crate::layout::PaneId, rings::MarkRing>,
+    /// Recent incremental-search queries, newest first.
+    pub search_ring: isearch::SearchRing,
     /// Set by a live-mode yank; cleared by any other key. `M-y` only
     /// chains while this is `Some` (Emacs: "immediately after a yank").
     pub last_yank: Option<LastYank>,
@@ -72,6 +75,7 @@ impl EmacsState {
             text_mode: None,
             kill_ring: rings::KillRing::new(config.kill_ring_max.max(1)),
             mark_rings: std::collections::HashMap::new(),
+            search_ring: isearch::SearchRing::new(32),
             last_yank: None,
         }
     }
@@ -102,7 +106,13 @@ impl EmacsState {
 
     /// Which keymap stack is active right now (spec §3.1).
     pub fn map_context(&self) -> MapContext {
-        if self.text_mode.is_some() {
+        if self
+            .text_mode
+            .as_ref()
+            .is_some_and(|text| text.isearch.is_some())
+        {
+            MapContext::Isearch
+        } else if self.text_mode.is_some() {
             MapContext::Text
         } else {
             MapContext::Live

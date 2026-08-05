@@ -64,6 +64,8 @@ pub fn render_text_mode_overlay(
         }
     }
 
+    render_isearch_highlights(app, frame, info, rt, top, text);
+
     // Point: reversed+bold cell (theme-agnostic, like a block cursor).
     let Some(rel_row) = text.point.row.checked_sub(top) else {
         return;
@@ -79,6 +81,71 @@ pub fn render_text_mode_overlay(
     cell.set_style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD));
 }
 
+fn render_isearch_highlights(
+    app: &AppState,
+    frame: &mut Frame,
+    info: &PaneInfo,
+    rt: &TerminalRuntime,
+    top: u32,
+    text: &crate::emacs::text_mode::TextModeState,
+) {
+    let Some(search) = text
+        .isearch
+        .as_ref()
+        .filter(|search| !search.query.is_empty())
+    else {
+        return;
+    };
+    let bottom = top.saturating_add(u32::from(info.inner_rect.height.saturating_sub(1)));
+    let first_visible = search
+        .matches
+        .partition_point(|text_match| text_match.end.row < top);
+    let visible = &search.matches[first_visible..];
+    let visible_len = visible.partition_point(|text_match| text_match.start.row <= bottom);
+    let candidates = &visible[..visible_len];
+    let validity = rt.text_matches_are_current(candidates);
+
+    for current_only in [false, true] {
+        let style = if current_only {
+            Style::default()
+                .fg(app.palette.panel_bg)
+                .bg(app.palette.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(app.palette.text)
+                .bg(app.palette.surface1)
+        };
+        for (offset, (text_match, is_current)) in
+            candidates.iter().zip(validity.iter().copied()).enumerate()
+        {
+            let index = first_visible + offset;
+            if !is_current || (search.current == Some(index)) != current_only {
+                continue;
+            }
+            let start_row = text_match.start.row.max(top);
+            let end_row = text_match.end.row.min(bottom);
+            for row in start_row..=end_row {
+                let viewport_row = row.saturating_sub(top) as u16;
+                let start_col = if row == text_match.start.row {
+                    text_match.start.col
+                } else {
+                    0
+                };
+                let end_col = if row == text_match.end.row {
+                    text_match.end.col
+                } else {
+                    info.inner_rect.width.saturating_sub(1)
+                };
+                for col in start_col..=end_col.min(info.inner_rect.width.saturating_sub(1)) {
+                    frame.buffer_mut()[(info.inner_rect.x + col, info.inner_rect.y + viewport_row)]
+                        .set_style(style);
+                }
+            }
+        }
+    }
+}
+
 /// One-line echo area drawn over the bottom row of the terminal area.
 /// herdr has no persistent status line, so this is an overlay that only
 /// appears when the layer has something to say (message, pending chord,
@@ -87,7 +154,25 @@ pub fn render_echo_area(app: &AppState, frame: &mut Frame, terminal_area: Rect) 
     if terminal_area.height == 0 || terminal_area.width == 0 {
         return;
     }
-    let content = if let Some(prompt) = app
+    let content = if let Some(search) = app
+        .emacs
+        .text_mode
+        .as_ref()
+        .and_then(|text| text.isearch.as_ref())
+    {
+        let status = if search.failing {
+            "Failing "
+        } else if search.wrapped {
+            "Wrapped "
+        } else {
+            ""
+        };
+        let direction = match search.direction {
+            crate::emacs::isearch::SearchDirection::Forward => "",
+            crate::emacs::isearch::SearchDirection::Backward => " backward",
+        };
+        format!("{status}I-search{direction}: {}", search.query)
+    } else if let Some(prompt) = app
         .emacs
         .text_mode
         .as_ref()
@@ -167,6 +252,7 @@ mod tests {
             mark_active: false,
             entry_offset_from_bottom: 0,
             goto_line: Some("12".to_string()),
+            isearch: None,
         });
         // The prompt outranks a stale echo message.
         state.emacs.echo = Some("Mark set".to_string());

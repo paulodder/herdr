@@ -11,6 +11,9 @@ use super::navigate::{ActionContext, NavigateAction};
 use crate::app::state::Mode;
 use crate::app::App;
 use crate::emacs::commands::{herdr_action_is_indexed, EmacsBuiltin, EmacsCommand, MapContext};
+use crate::emacs::isearch::{
+    initial_selection, repeated_selection, IsearchState, SearchDirection, SearchSpan,
+};
 use crate::emacs::keymap::{format_seq, Chord, Lookup};
 use crate::emacs::text_mode::{self, Pos, TextBuffer, TextModeState};
 use crate::input::TerminalKey;
@@ -80,7 +83,8 @@ impl App {
         }
 
         let ctx = self.state.emacs.map_context();
-        let text_active = ctx == MapContext::Text;
+        let isearch_active = ctx == MapContext::Isearch;
+        let text_active = matches!(ctx, MapContext::Text | MapContext::Isearch);
 
         let Some(chord) = Chord::from_key(&key) else {
             return text_active;
@@ -114,6 +118,14 @@ impl App {
                 self.state.emacs.pending.clear();
                 self.state.emacs.last_yank = None;
                 let single = seq.len() == 1;
+                if isearch_active {
+                    if let Some(c) = chord.self_insert_char().filter(|_| single) {
+                        self.emacs_isearch_insert(c);
+                    } else {
+                        self.state.emacs.echo = Some(format!("{} is undefined", format_seq(&seq)));
+                    }
+                    return true;
+                }
                 // Spec §3.3. "Buffer is read-only" is ONLY for a key that
                 // would insert; it is not the catch-all for unbound keys.
                 if text_active && single && chord.is_self_insert() {
@@ -154,6 +166,28 @@ impl App {
     /// (`Option<i64>`): motions repeat, `C-u C-SPC` pops the mark ring, and
     /// the three indexed herdr actions take their index from it.
     pub(crate) fn execute_emacs_command(&mut self, cmd: EmacsCommand, prefix: Option<i64>) {
+        let is_search_command = matches!(
+            cmd,
+            EmacsCommand::Builtin(
+                EmacsBuiltin::IsearchForward
+                    | EmacsBuiltin::IsearchBackward
+                    | EmacsBuiltin::IsearchExit
+                    | EmacsBuiltin::IsearchDeleteChar
+                    | EmacsBuiltin::IsearchPreviousHistory
+                    | EmacsBuiltin::IsearchNextHistory
+                    | EmacsBuiltin::KeyboardQuit
+            )
+        );
+        if !is_search_command
+            && self
+                .state
+                .emacs
+                .text_mode
+                .as_ref()
+                .is_some_and(|text| text.isearch.is_some())
+        {
+            self.emacs_accept_isearch();
+        }
         if !matches!(
             cmd,
             EmacsCommand::Builtin(EmacsBuiltin::Yank | EmacsBuiltin::YankPop)
@@ -177,11 +211,21 @@ impl App {
                 }
             }
             EmacsBuiltin::KeyboardQuit => {
-                self.state.emacs.pending.clear();
-                if let Some(text) = self.state.emacs.text_mode.as_mut() {
-                    text.mark_active = false;
+                if self
+                    .state
+                    .emacs
+                    .text_mode
+                    .as_ref()
+                    .is_some_and(|text| text.isearch.is_some())
+                {
+                    self.emacs_abort_isearch();
+                } else {
+                    self.state.emacs.pending.clear();
+                    if let Some(text) = self.state.emacs.text_mode.as_mut() {
+                        text.mark_active = false;
+                    }
+                    self.state.emacs.echo = Some("Quit".to_string());
                 }
-                self.state.emacs.echo = Some("Quit".to_string());
             }
             EmacsBuiltin::TextMode => {
                 if self.state.emacs.text_mode.is_none() {
@@ -225,6 +269,16 @@ impl App {
                     text.goto_line = Some(String::new());
                 }
             }
+            EmacsBuiltin::IsearchForward => {
+                self.emacs_start_or_repeat_isearch(SearchDirection::Forward)
+            }
+            EmacsBuiltin::IsearchBackward => {
+                self.emacs_start_or_repeat_isearch(SearchDirection::Backward)
+            }
+            EmacsBuiltin::IsearchExit => self.emacs_accept_isearch(),
+            EmacsBuiltin::IsearchDeleteChar => self.emacs_isearch_delete_char(),
+            EmacsBuiltin::IsearchPreviousHistory => self.emacs_isearch_history(true),
+            EmacsBuiltin::IsearchNextHistory => self.emacs_isearch_history(false),
             EmacsBuiltin::MoveTabLeft => self.emacs_move_tab(-1),
             EmacsBuiltin::MoveTabRight => self.emacs_move_tab(1),
             // Wired in later tasks; named and reachable from M-x now.
@@ -370,6 +424,7 @@ impl App {
             mark_active: false,
             entry_offset_from_bottom: metrics.offset_from_bottom,
             goto_line: None,
+            isearch: None,
         });
     }
 
@@ -383,6 +438,269 @@ impl App {
             text.pane_id,
             text.entry_offset_from_bottom,
         );
+    }
+
+    fn emacs_start_or_repeat_isearch(&mut self, direction: SearchDirection) {
+        if self.state.emacs.text_mode.is_none() {
+            self.emacs_enter_text_mode();
+        }
+        let Some(text) = self.state.emacs.text_mode.as_mut() else {
+            return;
+        };
+        if text.isearch.is_none() {
+            text.mark_active = false;
+            text.isearch = Some(IsearchState::new(direction, text.point));
+            return;
+        }
+
+        let query_is_empty = text
+            .isearch
+            .as_ref()
+            .is_none_or(|isearch| isearch.query.is_empty());
+        if let Some(isearch) = text.isearch.as_mut() {
+            isearch.direction = direction;
+        }
+        if query_is_empty {
+            let previous = self.state.emacs.search_ring.get(0).map(str::to_owned);
+            if let (Some(previous), Some(isearch)) = (
+                previous,
+                self.state
+                    .emacs
+                    .text_mode
+                    .as_mut()
+                    .and_then(|text| text.isearch.as_mut()),
+            ) {
+                isearch.query = previous;
+                isearch.history_cursor = Some(0);
+                self.emacs_refresh_isearch(false);
+            }
+        } else {
+            self.emacs_refresh_isearch(true);
+        }
+    }
+
+    fn emacs_isearch_insert(&mut self, c: char) {
+        let Some(isearch) = self
+            .state
+            .emacs
+            .text_mode
+            .as_mut()
+            .and_then(|text| text.isearch.as_mut())
+        else {
+            return;
+        };
+        isearch.query.push(c);
+        isearch.history_cursor = None;
+        isearch.history_draft.clear();
+        self.emacs_refresh_isearch(false);
+    }
+
+    fn emacs_isearch_delete_char(&mut self) {
+        let Some(isearch) = self
+            .state
+            .emacs
+            .text_mode
+            .as_mut()
+            .and_then(|text| text.isearch.as_mut())
+        else {
+            return;
+        };
+        isearch.query.pop();
+        isearch.history_cursor = None;
+        isearch.history_draft.clear();
+        self.emacs_refresh_isearch(false);
+    }
+
+    fn emacs_isearch_history(&mut self, previous: bool) {
+        let Some(isearch) = self
+            .state
+            .emacs
+            .text_mode
+            .as_mut()
+            .and_then(|text| text.isearch.as_mut())
+        else {
+            return;
+        };
+
+        let (next_cursor, query) = if previous {
+            let next = match isearch.history_cursor {
+                Some(index) if index + 1 < self.state.emacs.search_ring.len() => index + 1,
+                Some(index) => index,
+                None => {
+                    isearch.history_draft = isearch.query.clone();
+                    0
+                }
+            };
+            (
+                Some(next),
+                self.state.emacs.search_ring.get(next).map(str::to_owned),
+            )
+        } else {
+            match isearch.history_cursor {
+                Some(0) => (None, Some(isearch.history_draft.clone())),
+                Some(index) => {
+                    let next = index - 1;
+                    (
+                        Some(next),
+                        self.state.emacs.search_ring.get(next).map(str::to_owned),
+                    )
+                }
+                None => return,
+            }
+        };
+        let Some(query) = query else {
+            return;
+        };
+        if let Some(isearch) = self
+            .state
+            .emacs
+            .text_mode
+            .as_mut()
+            .and_then(|text| text.isearch.as_mut())
+        {
+            isearch.history_cursor = next_cursor;
+            isearch.query = query;
+        }
+        self.emacs_refresh_isearch(false);
+    }
+
+    /// Re-scan the current terminal snapshot. Query edits restart at the
+    /// search origin; repeated C-s/C-r advances from the current match.
+    fn emacs_refresh_isearch(&mut self, repeat: bool) {
+        let Some(text) = self.state.emacs.text_mode.as_ref() else {
+            return;
+        };
+        let Some(isearch) = text.isearch.as_ref() else {
+            return;
+        };
+        let (pane_id, current_point) = (text.pane_id, text.point);
+        let (direction, origin, query) = (isearch.direction, isearch.origin, isearch.query.clone());
+        let previous_span = isearch.current.and_then(|index| {
+            isearch.matches.get(index).map(|text_match| SearchSpan {
+                start: Pos {
+                    row: text_match.start.row,
+                    col: text_match.start.col,
+                },
+                end: Pos {
+                    row: text_match.end.row,
+                    col: text_match.end.col,
+                },
+            })
+        });
+
+        if query.is_empty() {
+            if let Some(text) = self.state.emacs.text_mode.as_mut() {
+                text.point = origin;
+                if let Some(isearch) = text.isearch.as_mut() {
+                    isearch.matches.clear();
+                    isearch.current = None;
+                    isearch.failing = false;
+                    isearch.wrapped = false;
+                }
+            }
+            self.emacs_scroll_point_into_view(pane_id);
+            return;
+        }
+
+        let Some((ws_idx, focused_pane)) = self.emacs_focused_pane() else {
+            return;
+        };
+        if focused_pane != pane_id {
+            return;
+        }
+        let (matches, selection, new_point) = {
+            let Some(rt) =
+                self.state
+                    .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
+            else {
+                return;
+            };
+            let matches = rt.search_text_matches(&query, query.chars().any(char::is_uppercase));
+            let spans = matches
+                .iter()
+                .map(|text_match| SearchSpan {
+                    start: Pos {
+                        row: text_match.start.row,
+                        col: text_match.start.col,
+                    },
+                    end: Pos {
+                        row: text_match.end.row,
+                        col: text_match.end.col,
+                    },
+                })
+                .collect::<Vec<_>>();
+            let selection = if repeat {
+                let refreshed_current = previous_span
+                    .and_then(|previous| spans.iter().position(|span| *span == previous));
+                match (refreshed_current, isearch.current) {
+                    (Some(current), _) => repeated_selection(&spans, direction, Some(current)),
+                    (None, None) => repeated_selection(&spans, direction, None),
+                    (None, Some(_)) => initial_selection(&spans, direction, current_point),
+                }
+            } else {
+                initial_selection(&spans, direction, origin)
+            };
+            let new_point = selection.and_then(|selection| {
+                let span = spans.get(selection.index)?;
+                Some(match direction {
+                    SearchDirection::Forward => {
+                        text_mode::forward_char(&RuntimeBuffer { rt }, span.end)
+                    }
+                    SearchDirection::Backward => span.start,
+                })
+            });
+            (matches, selection, new_point)
+        };
+
+        if let Some(text) = self.state.emacs.text_mode.as_mut() {
+            if let Some(new_point) = new_point {
+                text.point = new_point;
+            }
+            if let Some(isearch) = text.isearch.as_mut() {
+                isearch.matches = matches;
+                isearch.current = selection.map(|selection| selection.index);
+                isearch.failing = selection.is_none();
+                isearch.wrapped = selection.is_some_and(|selection| selection.wrapped);
+            }
+        }
+        self.emacs_scroll_point_into_view(pane_id);
+    }
+
+    fn emacs_accept_isearch(&mut self) {
+        let Some(text) = self.state.emacs.text_mode.as_mut() else {
+            return;
+        };
+        let Some(isearch) = text.isearch.take() else {
+            return;
+        };
+        if isearch.query.is_empty() {
+            return;
+        }
+        let (pane_id, origin) = (text.pane_id, isearch.origin);
+        text.mark = Some(origin);
+        text.mark_active = false;
+        self.state.emacs.search_ring.push(isearch.query);
+        self.state
+            .emacs
+            .mark_rings
+            .entry(pane_id)
+            .or_insert_with(|| crate::emacs::rings::MarkRing::new(self.state.emacs.mark_ring_max))
+            .push((origin.row, origin.col));
+    }
+
+    fn emacs_abort_isearch(&mut self) {
+        let Some(text) = self.state.emacs.text_mode.as_mut() else {
+            return;
+        };
+        let Some(isearch) = text.isearch.take() else {
+            return;
+        };
+        let pane_id = text.pane_id;
+        text.point = isearch.origin;
+        self.state.emacs.search_ring.push(isearch.query);
+        self.state.emacs.pending.clear();
+        self.state.emacs.echo = Some("Quit".to_string());
+        self.emacs_scroll_point_into_view(pane_id);
     }
 
     /// Run one motion command against the frozen buffer, then keep the
@@ -521,7 +839,18 @@ impl App {
         let Some(info) = self.state.pane_info_by_id(pane_id) else {
             return;
         };
-        let view_rows = u32::from(info.inner_rect.height.max(1));
+        let search_active = self
+            .state
+            .emacs
+            .text_mode
+            .as_ref()
+            .is_some_and(|text| text.pane_id == pane_id && text.isearch.is_some());
+        let view_rows = u32::from(
+            info.inner_rect
+                .height
+                .saturating_sub(u16::from(search_active))
+                .max(1),
+        );
         let Some(metrics) = self
             .state
             .pane_scroll_metrics(&self.terminal_runtimes, pane_id)
@@ -1734,5 +2063,194 @@ mod tests {
         app.route_client_input(vec![0x18, b't']); // C-x t
         assert_ne!(app.state.sidebar_collapsed, before, "toggle-sidebar ran");
         assert!(sent_bytes(&mut rx).is_empty());
+    }
+
+    const SEARCH_LINES: &[u8] = b"needle one\r\nmiddle\r\nneedle two\r\nbravo\r\nneedle three\r\n";
+
+    #[tokio::test]
+    async fn c_s_from_live_mode_incrementally_searches_and_repeats() {
+        let (mut app, pane, mut rx) = emacs_app_with_channel(SEARCH_LINES);
+        app.route_client_input(vec![0x13]); // C-s
+        assert_eq!(
+            app.state.emacs.text_mode.as_ref().map(|text| text.pane_id),
+            Some(pane),
+            "live search enters TEXT mode"
+        );
+        app.route_client_input(b"needle".to_vec());
+        {
+            let text = app.state.emacs.text_mode.as_ref().expect("TEXT mode");
+            let search = text.isearch.as_ref().expect("isearch active");
+            assert_eq!(search.matches.len(), 3);
+            assert_eq!(search.current, None);
+            assert!(search.failing, "forward search stops at the live bottom");
+        }
+
+        app.route_client_input(vec![0x13]); // repeat C-s wraps
+        {
+            let text = app.state.emacs.text_mode.as_ref().expect("TEXT mode");
+            assert_eq!((text.point.row, text.point.col), (0, 6));
+            assert!(text.isearch.as_ref().unwrap().wrapped);
+        }
+        app.route_client_input(vec![0x13]); // repeat C-s advances
+        let text = app.state.emacs.text_mode.as_ref().expect("TEXT mode");
+        assert_eq!((text.point.row, text.point.col), (2, 6));
+        assert_eq!(
+            text.isearch.as_ref().and_then(|search| search.current),
+            Some(1)
+        );
+        assert!(
+            sent_bytes(&mut rx).is_empty(),
+            "search never reaches the PTY"
+        );
+    }
+
+    #[tokio::test]
+    async fn isearch_overlay_highlights_all_matches_and_the_current_one() {
+        let (mut app, pane, _rx) = emacs_app_with_channel(SEARCH_LINES);
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x1b, b'<']);
+        app.route_client_input(vec![0x13]);
+        app.route_client_input(b"needle".to_vec());
+        let inner = app.state.pane_info_by_id(pane).unwrap().inner_rect;
+        let buffer = draw_text_mode_overlay(&app, pane);
+        assert_eq!(
+            buffer[(inner.x, inner.y)].style().bg,
+            Some(app.state.palette.accent),
+            "current match uses the accent"
+        );
+        assert_eq!(
+            buffer[(inner.x, inner.y + 2)].style().bg,
+            Some(app.state.palette.surface1),
+            "other matches remain visible"
+        );
+    }
+
+    #[tokio::test]
+    async fn c_r_reverses_an_active_search_and_wraps() {
+        let (mut app, _pane, _rx) = emacs_app_with_channel(SEARCH_LINES);
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x1b, b'<']); // origin at buffer start
+        app.route_client_input(vec![0x13]); // C-s
+        app.route_client_input(b"needle".to_vec());
+        app.route_client_input(vec![0x13]); // second match
+        app.route_client_input(vec![0x12]); // C-r -> first match
+        {
+            let text = app.state.emacs.text_mode.as_ref().unwrap();
+            assert_eq!((text.point.row, text.point.col), (0, 0));
+            assert!(!text.isearch.as_ref().unwrap().wrapped);
+        }
+        app.route_client_input(vec![0x12]); // C-r -> wrap to last
+        let text = app.state.emacs.text_mode.as_ref().unwrap();
+        assert_eq!((text.point.row, text.point.col), (4, 0));
+        assert!(text.isearch.as_ref().unwrap().wrapped);
+    }
+
+    #[tokio::test]
+    async fn failing_search_recovers_as_the_query_is_deleted() {
+        let (mut app, _pane, _rx) = emacs_app_with_channel(SEARCH_LINES);
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x1b, b'<']);
+        let origin = app.state.emacs.text_mode.as_ref().unwrap().point;
+        app.route_client_input(vec![0x13]);
+        app.route_client_input(b"zzz".to_vec());
+        {
+            let text = app.state.emacs.text_mode.as_ref().unwrap();
+            assert_eq!(text.point, origin);
+            assert!(text.isearch.as_ref().unwrap().failing);
+        }
+        app.route_client_input(vec![0x7f, 0x7f, 0x7f]); // DEL x3
+        let text = app.state.emacs.text_mode.as_ref().unwrap();
+        let search = text.isearch.as_ref().unwrap();
+        assert_eq!(search.query, "");
+        assert!(!search.failing);
+        assert_eq!(text.point, origin);
+    }
+
+    #[tokio::test]
+    async fn enter_accepts_search_and_c_g_aborts_to_the_origin() {
+        let (mut app, pane, _rx) = emacs_app_with_channel(SEARCH_LINES);
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x1b, b'<']);
+        let origin = app.state.emacs.text_mode.as_ref().unwrap().point;
+        app.route_client_input(vec![0x13]);
+        app.route_client_input(b"bravo".to_vec());
+        app.route_client_input(vec![0x0d]); // RET
+        {
+            let text = app.state.emacs.text_mode.as_ref().unwrap();
+            assert!(text.isearch.is_none());
+            assert_eq!((text.point.row, text.point.col), (3, 5));
+            assert_eq!(text.mark, Some(origin));
+        }
+        assert_eq!(app.state.emacs.search_ring.get(0), Some("bravo"));
+        assert_eq!(
+            app.state.emacs.mark_rings.get(&pane).map(|ring| ring.len()),
+            Some(1)
+        );
+
+        app.route_client_input(vec![0x13]);
+        app.route_client_input(b"needle".to_vec());
+        assert_ne!(app.state.emacs.text_mode.as_ref().unwrap().point, origin);
+        app.route_client_input(vec![0x07]); // C-g
+        let text = app.state.emacs.text_mode.as_ref().unwrap();
+        assert!(text.isearch.is_none());
+        assert_eq!((text.point.row, text.point.col), (3, 5));
+        assert_eq!(app.state.emacs.echo.as_deref(), Some("Quit"));
+    }
+
+    #[tokio::test]
+    async fn c_s_c_s_reuses_the_last_search_and_history_can_be_browsed() {
+        let (mut app, _pane, _rx) = emacs_app_with_channel(SEARCH_LINES);
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x1b, b'<']);
+        for query in ["needle", "bravo"] {
+            app.route_client_input(vec![0x13]);
+            app.route_client_input(query.as_bytes().to_vec());
+            app.route_client_input(vec![0x0d]);
+            app.route_client_input(vec![0x1b, b'<']);
+        }
+
+        app.route_client_input(vec![0x13, 0x13]); // start, then reuse last
+        {
+            let search = app
+                .state
+                .emacs
+                .text_mode
+                .as_ref()
+                .and_then(|text| text.isearch.as_ref())
+                .unwrap();
+            assert_eq!(search.query, "bravo");
+        }
+        app.route_client_input(vec![0x07]); // leave the reused search
+        app.route_client_input(vec![0x13]); // fresh empty search
+        app.route_client_input(vec![0x1b, b'p']); // M-p: newest
+        assert_eq!(
+            app.state
+                .emacs
+                .text_mode
+                .as_ref()
+                .and_then(|text| text.isearch.as_ref())
+                .map(|search| search.query.as_str()),
+            Some("bravo")
+        );
+        app.route_client_input(vec![0x1b, b'p']); // M-p: older
+        assert_eq!(
+            app.state
+                .emacs
+                .text_mode
+                .as_ref()
+                .and_then(|text| text.isearch.as_ref())
+                .map(|search| search.query.as_str()),
+            Some("needle")
+        );
+        app.route_client_input(vec![0x1b, b'n']); // M-n: newer
+        assert_eq!(
+            app.state
+                .emacs
+                .text_mode
+                .as_ref()
+                .and_then(|text| text.isearch.as_ref())
+                .map(|search| search.query.as_str()),
+            Some("bravo")
+        );
     }
 }

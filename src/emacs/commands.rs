@@ -136,6 +136,8 @@ pub enum EmacsBuiltin {
     BeginningOfBuffer,
     EndOfBuffer,
     GotoLine,
+    IsearchForward,
+    IsearchBackward,
     SetMark,
     ExchangePointAndMark,
     // Rings
@@ -149,6 +151,11 @@ pub enum EmacsBuiltin {
     BackwardKillWord,
     MinibufferComplete,
     ExitMinibuffer,
+    // Incremental search editing
+    IsearchExit,
+    IsearchDeleteChar,
+    IsearchPreviousHistory,
+    IsearchNextHistory,
     // Help
     DescribeKey,
     DescribeBindings,
@@ -177,6 +184,15 @@ pub const BUILTIN_NAMES: &[(EmacsBuiltin, &str)] = &[
     (EmacsBuiltin::ForwardChar, "forward-char"),
     (EmacsBuiltin::ForwardWord, "forward-word"),
     (EmacsBuiltin::GotoLine, "goto-line"),
+    (EmacsBuiltin::IsearchBackward, "isearch-backward"),
+    (EmacsBuiltin::IsearchDeleteChar, "isearch-delete-char"),
+    (EmacsBuiltin::IsearchExit, "isearch-exit"),
+    (EmacsBuiltin::IsearchForward, "isearch-forward"),
+    (EmacsBuiltin::IsearchNextHistory, "isearch-next-history"),
+    (
+        EmacsBuiltin::IsearchPreviousHistory,
+        "isearch-previous-history",
+    ),
     (EmacsBuiltin::KeyboardQuit, "keyboard-quit"),
     (EmacsBuiltin::KillLine, "kill-line"),
     (EmacsBuiltin::KillRegion, "kill-region"),
@@ -209,6 +225,8 @@ pub enum MapSlot {
     Both,
     /// Minibuffer editing only.
     Minibuffer,
+    /// Incremental-search editing only.
+    Isearch,
 }
 
 impl EmacsBuiltin {
@@ -229,7 +247,9 @@ impl EmacsBuiltin {
             | Self::QuotedInsert
             | Self::MoveTabLeft
             | Self::MoveTabRight
-            | Self::TextMode => MapSlot::Global,
+            | Self::TextMode
+            | Self::IsearchForward
+            | Self::IsearchBackward => MapSlot::Global,
             Self::ExitTextMode
             | Self::ForwardChar
             | Self::BackwardChar
@@ -256,6 +276,10 @@ impl EmacsBuiltin {
             | Self::BackwardKillWord
             | Self::MinibufferComplete
             | Self::ExitMinibuffer => MapSlot::Minibuffer,
+            Self::IsearchExit
+            | Self::IsearchDeleteChar
+            | Self::IsearchPreviousHistory
+            | Self::IsearchNextHistory => MapSlot::Isearch,
         }
     }
 }
@@ -319,6 +343,8 @@ pub enum MapContext {
     Text,
     /// A minibuffer prompt is open.
     Minibuffer,
+    /// Incremental search is reading a query over a TEXT-mode buffer.
+    Isearch,
 }
 
 /// One entry of the active keymap stack: a display name (for
@@ -338,6 +364,8 @@ pub struct KeymapSet {
     pub text: Keymap<EmacsCommand>,
     /// Active while a minibuffer prompt is open (shadows `global`).
     pub minibuffer: Keymap<EmacsCommand>,
+    /// Active while incremental search is reading a query (shadows `global`).
+    pub isearch: Keymap<EmacsCommand>,
 }
 
 impl KeymapSet {
@@ -362,6 +390,13 @@ impl KeymapSet {
                 ActiveMap {
                     name: "minibuffer",
                     map: &self.minibuffer,
+                },
+                global,
+            ],
+            MapContext::Isearch => vec![
+                ActiveMap {
+                    name: "isearch",
+                    map: &self.isearch,
                 },
                 global,
             ],
@@ -406,6 +441,8 @@ const DEFAULT_GLOBAL_BINDINGS: &[(&str, EmacsCommand)] = &[
     ("C-g", EmacsCommand::Builtin(EmacsBuiltin::KeyboardQuit)),
     ("C-y", EmacsCommand::Builtin(EmacsBuiltin::Yank)),
     ("M-y", EmacsCommand::Builtin(EmacsBuiltin::YankPop)),
+    ("C-s", EmacsCommand::Builtin(EmacsBuiltin::IsearchForward)),
+    ("C-r", EmacsCommand::Builtin(EmacsBuiltin::IsearchBackward)),
 ];
 
 const DEFAULT_TEXT_BINDINGS: &[(&str, EmacsCommand)] = &[
@@ -444,6 +481,23 @@ const DEFAULT_TEXT_BINDINGS: &[(&str, EmacsCommand)] = &[
 /// Filled in by Task 8 (minibuffer) and Task 10 (help).
 const DEFAULT_MINIBUFFER_BINDINGS: &[(&str, EmacsCommand)] = &[];
 
+const DEFAULT_ISEARCH_BINDINGS: &[(&str, EmacsCommand)] = &[
+    ("RET", EmacsCommand::Builtin(EmacsBuiltin::IsearchExit)),
+    ("ESC", EmacsCommand::Builtin(EmacsBuiltin::IsearchExit)),
+    (
+        "DEL",
+        EmacsCommand::Builtin(EmacsBuiltin::IsearchDeleteChar),
+    ),
+    (
+        "M-p",
+        EmacsCommand::Builtin(EmacsBuiltin::IsearchPreviousHistory),
+    ),
+    (
+        "M-n",
+        EmacsCommand::Builtin(EmacsBuiltin::IsearchNextHistory),
+    ),
+];
+
 /// Build the default keymaps and apply `[emacs.keys]` overrides.
 /// Returns (keymaps, warnings) — invalid chord strings or unknown command
 /// names become warnings, never hard errors. Task 6 routes the warnings
@@ -468,6 +522,12 @@ pub fn build_keymaps(overrides: &HashMap<String, String>) -> (KeymapSet, Vec<Str
             *cmd,
         );
     }
+    for (seq, cmd) in DEFAULT_ISEARCH_BINDINGS {
+        set.isearch.bind(
+            parse_key_seq(seq).expect("default isearch binding parses"),
+            *cmd,
+        );
+    }
 
     let mut warnings = Vec::new();
     // Sort for deterministic application order.
@@ -486,6 +546,7 @@ pub fn build_keymaps(overrides: &HashMap<String, String>) -> (KeymapSet, Vec<Str
             MapSlot::Global => set.global.bind(seq, cmd),
             MapSlot::Text => set.text.bind(seq, cmd),
             MapSlot::Minibuffer => set.minibuffer.bind(seq, cmd),
+            MapSlot::Isearch => set.isearch.bind(seq, cmd),
             MapSlot::Both => {
                 set.global.bind(seq.clone(), cmd);
                 set.text.bind(seq, cmd);
@@ -790,5 +851,34 @@ mod tests {
         );
         assert_eq!(EmacsBuiltin::MoveTabLeft.default_map(), MapSlot::Global);
         assert_eq!(EmacsBuiltin::MoveTabRight.default_map(), MapSlot::Global);
+    }
+
+    #[test]
+    fn incremental_search_has_global_entry_and_a_local_keymap() {
+        let (keymaps, _) = build_keymaps(&Default::default());
+        assert_eq!(
+            keymaps.lookup(MapContext::Live, &parse_key_seq("C-s").unwrap()),
+            Lookup::Bound(EmacsCommand::Builtin(EmacsBuiltin::IsearchForward))
+        );
+        assert_eq!(
+            keymaps.lookup(MapContext::Live, &parse_key_seq("C-r").unwrap()),
+            Lookup::Bound(EmacsCommand::Builtin(EmacsBuiltin::IsearchBackward))
+        );
+        assert_eq!(
+            keymaps.lookup(MapContext::Isearch, &parse_key_seq("RET").unwrap()),
+            Lookup::Bound(EmacsCommand::Builtin(EmacsBuiltin::IsearchExit))
+        );
+        assert_eq!(
+            keymaps.lookup(MapContext::Isearch, &parse_key_seq("DEL").unwrap()),
+            Lookup::Bound(EmacsCommand::Builtin(EmacsBuiltin::IsearchDeleteChar))
+        );
+        assert_eq!(
+            keymaps
+                .active_maps(MapContext::Isearch)
+                .into_iter()
+                .map(|active| active.name)
+                .collect::<Vec<_>>(),
+            vec!["isearch", "global"]
+        );
     }
 }
