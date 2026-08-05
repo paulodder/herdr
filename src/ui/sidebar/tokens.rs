@@ -164,6 +164,23 @@ mod tests {
     }
 
     #[test]
+    fn default_agent_row_puts_custom_tab_title_before_workspace() {
+        let mut entry = entry();
+        entry.primary_tab_label = Some("my title".into());
+
+        let rows = agent_rows(&AgentsSidebarConfig::default(), &entry, "working");
+
+        assert_eq!(
+            rows[0],
+            vec![
+                ResolvedToken::StateIcon,
+                ResolvedToken::Tab("my title".into()),
+                ResolvedToken::Workspace("repo".into()),
+            ]
+        );
+    }
+
+    #[test]
     fn state_text_and_arbitrary_values_are_independent_tokens() {
         let mut entry = entry();
         entry

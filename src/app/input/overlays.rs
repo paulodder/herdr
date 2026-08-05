@@ -591,6 +591,36 @@ impl AppState {
             return;
         }
 
+        if let Some(page) = self.emacs_onboarding_page {
+            let (popup_w, popup_h) = crate::ui::EMACS_ONBOARDING_MODAL_SIZE;
+            let Some(inner) = self.onboarding_modal_inner(popup_w, popup_h) else {
+                return;
+            };
+            let actions = crate::ui::modal_stack_areas(inner, 2, 1, 1, 1)
+                .actions
+                .unwrap_or_default();
+            let (back, next) = crate::ui::emacs_onboarding_button_rects(actions, page);
+            if back.is_some_and(|rect| {
+                modal_action_from_buttons(mouse.column, mouse.row, &[(rect, ModalAction::Cancel)])
+                    == Some(ModalAction::Cancel)
+            }) {
+                self.emacs_onboarding_page = Some(page.saturating_sub(1));
+            } else if modal_action_from_buttons(
+                mouse.column,
+                mouse.row,
+                &[(next, ModalAction::Continue)],
+            ) == Some(ModalAction::Continue)
+            {
+                if page + 1 < crate::ui::EMACS_ONBOARDING_PAGE_COUNT {
+                    self.emacs_onboarding_page = Some(page + 1);
+                } else {
+                    self.emacs_onboarding_page = None;
+                    leave_modal(self);
+                }
+            }
+            return;
+        }
+
         let Some(inner) = self.onboarding_modal_inner(64, 16) else {
             return;
         };
@@ -763,6 +793,47 @@ mod tests {
         ));
 
         assert!(app.state.request_complete_onboarding);
+    }
+
+    #[test]
+    fn emacs_onboarding_buttons_walk_back_and_finish() {
+        let mut app = app_for_mouse_test();
+        super::super::modal::open_emacs_onboarding(&mut app.state);
+        let (popup_w, popup_h) = crate::ui::EMACS_ONBOARDING_MODAL_SIZE;
+        let inner = app.state.onboarding_modal_inner(popup_w, popup_h).unwrap();
+        let actions = crate::ui::modal_stack_areas(inner, 2, 1, 1, 1)
+            .actions
+            .unwrap();
+
+        let (_, next) = crate::ui::emacs_onboarding_button_rects(actions, 0);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            next.x,
+            next.y,
+        ));
+        assert_eq!(app.state.emacs_onboarding_page, Some(1));
+
+        let (back, _) = crate::ui::emacs_onboarding_button_rects(actions, 1);
+        let back = back.unwrap();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            back.x,
+            back.y,
+        ));
+        assert_eq!(app.state.emacs_onboarding_page, Some(0));
+
+        app.state.emacs_onboarding_page = Some(crate::ui::EMACS_ONBOARDING_PAGE_COUNT - 1);
+        let (_, done) = crate::ui::emacs_onboarding_button_rects(
+            actions,
+            crate::ui::EMACS_ONBOARDING_PAGE_COUNT - 1,
+        );
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            done.x,
+            done.y,
+        ));
+        assert_eq!(app.state.emacs_onboarding_page, None);
+        assert_eq!(app.state.mode, Mode::Navigate);
     }
 
     #[test]

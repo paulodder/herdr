@@ -33,9 +33,12 @@ impl App {
         self.state.update_dismissed = true;
 
         let key_event = key.as_key_event();
+        let exclusive_input = self.focused_pane_has_exclusive_input();
 
-        if let Some(action) = super::terminal_direct_non_indexed_navigation_action(&self.state, key)
-        {
+        let direct_action = (!exclusive_input)
+            .then(|| super::terminal_direct_non_indexed_navigation_action(&self.state, key))
+            .flatten();
+        if let Some(action) = direct_action {
             debug!(
                 code = ?key_event.code,
                 modifiers = ?key_event.modifiers,
@@ -51,11 +54,16 @@ impl App {
             return None;
         }
 
-        if let Some(binding) = super::navigate::command_for_key(
-            &self.state,
-            key,
-            super::navigate::BindingDispatch::Direct,
-        ) {
+        let custom_binding = (!exclusive_input)
+            .then(|| {
+                super::navigate::command_for_key(
+                    &self.state,
+                    key,
+                    super::navigate::BindingDispatch::Direct,
+                )
+            })
+            .flatten();
+        if let Some(binding) = custom_binding {
             debug!(
                 code = ?key_event.code,
                 modifiers = ?key_event.modifiers,
@@ -67,7 +75,10 @@ impl App {
             return None;
         }
 
-        if let Some(action) = super::terminal_direct_indexed_navigation_action(&self.state, key) {
+        let indexed_action = (!exclusive_input)
+            .then(|| super::terminal_direct_indexed_navigation_action(&self.state, key))
+            .flatten();
+        if let Some(action) = indexed_action {
             debug!(
                 code = ?key_event.code,
                 modifiers = ?key_event.modifiers,
@@ -79,12 +90,12 @@ impl App {
             return None;
         }
 
-        if self.state.is_prefix_key(key) {
+        if !exclusive_input && self.state.is_prefix_key(key) {
             self.state.mode = Mode::Prefix;
             return None;
         }
 
-        if is_modifier_only_key(&key_event.code) {
+        if !exclusive_input && is_modifier_only_key(&key_event.code) {
             debug!(
                 code = ?key_event.code,
                 modifiers = ?key_event.modifiers,
@@ -109,7 +120,8 @@ impl App {
         // produce a second host-scroll action.
         // Only intercept when we know the pane state; if input_state is unknown,
         // fail-open and forward the key to the pane.
-        if matches!(key_event.code, KeyCode::PageUp | KeyCode::PageDown)
+        if !exclusive_input
+            && matches!(key_event.code, KeyCode::PageUp | KeyCode::PageDown)
             && key_event.modifiers.is_empty()
         {
             if let Some(input_state) = rt.input_state() {
@@ -1186,6 +1198,69 @@ mod tests {
         let bytes = rx.try_recv().unwrap();
         assert_eq!(bytes.as_ref(), b"\x1b\x7f");
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn exclusive_overlay_forwards_emacs_and_host_keys_without_interception() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(0, 0, 80, 24));
+        let info = pane_infos[0].clone();
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(
+            info.inner_rect.width,
+            info.inner_rect.height,
+        );
+        ws.tabs[0].runtimes.insert(pane_id, runtime);
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.emacs.enabled = true;
+        app.state.view.pane_infos = pane_infos;
+        app.overlay_panes.insert(
+            pane_id,
+            crate::app::OverlayPaneState {
+                ws_idx: 0,
+                tab_idx: 0,
+                previous_focus: pane_id,
+                previous_zoomed: false,
+                temp_files: Vec::new(),
+                input_profile: crate::app::OverlayInputProfile::Exclusive,
+            },
+        );
+
+        let forwarded = [
+            (
+                TerminalKey::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+                b"\x18".as_slice(),
+            ),
+            (
+                TerminalKey::new(KeyCode::Char('b'), KeyModifiers::empty()),
+                b"b".as_slice(),
+            ),
+            (
+                TerminalKey::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+                b"\x02".as_slice(),
+            ),
+            (
+                TerminalKey::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                b"\x13".as_slice(),
+            ),
+            (
+                TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty()),
+                b"\x1b[5~".as_slice(),
+            ),
+        ];
+        for (key, expected) in forwarded {
+            app.route_client_events(vec![crate::raw_input::RawInputEvent::Key(key)], false);
+            assert_eq!(rx.try_recv().unwrap().as_ref(), expected);
+        }
+
+        assert!(rx.try_recv().is_err());
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(app.state.emacs.pending.is_empty());
     }
 
     #[tokio::test]

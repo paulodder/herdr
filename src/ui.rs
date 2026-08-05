@@ -36,8 +36,11 @@ use self::mobile::{
     render_mobile_toast_banner,
 };
 use self::navigator::render_navigator_overlay;
-pub(crate) use self::onboarding::onboarding_welcome_continue_rect;
 use self::onboarding::render_onboarding_overlay;
+pub(crate) use self::onboarding::{
+    emacs_onboarding_button_rects, onboarding_welcome_continue_rect, EMACS_ONBOARDING_MODAL_SIZE,
+    EMACS_ONBOARDING_PAGE_COUNT,
+};
 use self::panes::{compute_pane_infos, render_panes, resize_tab_panes};
 pub(crate) use self::release_notes::{
     product_announcement_display_lines, release_notes_close_button_rect,
@@ -1383,6 +1386,117 @@ mod tests {
         assert!(panes
             .iter()
             .any(|(key, label)| key == "prefix+l" && label.as_ref() == "focus pane right"));
+    }
+
+    #[test]
+    fn keybind_help_lists_the_active_emacs_keymaps() {
+        let mut app = crate::app::state::AppState::test_new();
+        let _ = app.emacs.apply_config(&crate::config::EmacsConfig {
+            enabled: true,
+            ..Default::default()
+        });
+
+        let groups = keybind_help_groups(&app);
+        let global = groups
+            .iter()
+            .find(|(name, _)| *name == "emacs — global / live")
+            .expect("global Emacs group");
+        let text = groups
+            .iter()
+            .find(|(name, _)| *name == "emacs — text mode")
+            .expect("text-mode Emacs group");
+        let minibuffer = groups
+            .iter()
+            .find(|(name, _)| *name == "emacs — minibuffer")
+            .expect("minibuffer Emacs group");
+
+        assert!(global
+            .1
+            .iter()
+            .any(|(key, label)| key == "C-x ?" && label.as_ref() == "describe-bindings"));
+        assert!(text
+            .1
+            .iter()
+            .any(|(key, label)| key == "C-f" && label.as_ref() == "forward-char"));
+        assert!(minibuffer
+            .1
+            .iter()
+            .any(|(key, label)| key == "RET" && label.as_ref() == "exit-minibuffer"));
+    }
+
+    #[test]
+    fn keybind_help_search_filters_keys_and_commands_case_insensitively() {
+        let mut app = crate::app::state::AppState::test_new();
+        let _ = app.emacs.apply_config(&crate::config::EmacsConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        app.keybind_help.query = "FORWARD-CHAR".into();
+
+        let groups = keybind_help_groups(&app);
+        let entries = groups
+            .iter()
+            .flat_map(|(_, entries)| entries)
+            .collect::<Vec<_>>();
+
+        assert!(!entries.is_empty());
+        assert!(entries
+            .iter()
+            .all(|(_, label)| label.to_ascii_lowercase().contains("forward-char")));
+
+        app.keybind_help.query = "C-x ?".into();
+        let entries = keybind_help_groups(&app)
+            .into_iter()
+            .flat_map(|(_, entries)| entries)
+            .collect::<Vec<_>>();
+        assert!(entries
+            .iter()
+            .any(|(key, label)| { key == "C-x ?" && label.as_ref() == "describe-bindings" }));
+    }
+
+    #[test]
+    fn keybind_help_search_highlights_matching_substrings() {
+        let mut app = crate::app::state::AppState::test_new();
+        let _ = app.emacs.apply_config(&crate::config::EmacsConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        app.keybind_help.query = "BIND".into();
+
+        let lines = keybind_help_lines(&app);
+        let matching_line = lines
+            .iter()
+            .map(|(_, line)| line)
+            .find(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+                    .contains("describe-bindings")
+            })
+            .expect("describe-bindings search result");
+        let highlighted = matching_line
+            .spans
+            .iter()
+            .find(|span| span.content.eq_ignore_ascii_case("bind"))
+            .expect("highlighted match span");
+
+        assert_eq!(highlighted.style.bg, Some(app.palette.accent));
+        assert!(highlighted.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn keybind_help_search_shows_an_empty_result_message() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.keybind_help.query = "definitely-not-a-binding".into();
+
+        let rendered = keybind_help_lines(&app)
+            .into_iter()
+            .flat_map(|(_, line)| line.spans)
+            .map(|span| span.content.into_owned())
+            .collect::<String>();
+
+        assert_eq!(rendered, " no matching keybindings");
     }
 
     #[test]

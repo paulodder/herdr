@@ -13,7 +13,8 @@
 //! coordinates. That keeps selection stable while the pane scrolls.
 
 use ratatui::layout::Rect;
-use std::{ffi::OsStr, io::Write};
+#[cfg(not(test))]
+use std::io::Write;
 
 use crate::{layout::PaneId, pane::ScrollMetrics};
 
@@ -263,71 +264,23 @@ fn clamp_to_pane(screen_col: u16, screen_row: u16, pane_inner: Rect) -> (u16, u1
     (clamped_row - pane_inner.y, clamped_col - pane_inner.x)
 }
 
-fn osc52_sequence(bytes: &[u8]) -> String {
+pub(crate) fn osc52_sequence(bytes: &[u8]) -> String {
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
     format!("\x1b]52;c;{encoded}\x07")
 }
 
-fn contains_wsl_marker(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    lower.contains("microsoft") || lower.contains("wsl2") || lower.contains("-wsl")
-}
-
-fn is_wsl_for_env(
-    os_release: Option<&str>,
-    proc_version: Option<&str>,
-    wsl_distro_name: Option<&OsStr>,
-    wsl_interop: Option<&OsStr>,
-    runtime_marker_exists: bool,
-) -> bool {
-    wsl_distro_name.is_some()
-        || wsl_interop.is_some()
-        || os_release.is_some_and(contains_wsl_marker)
-        || proc_version.is_some_and(contains_wsl_marker)
-        || runtime_marker_exists
-}
-
-fn is_wsl() -> bool {
-    let os_release = std::fs::read_to_string("/proc/sys/kernel/osrelease").ok();
-    let proc_version = std::fs::read_to_string("/proc/version").ok();
-    is_wsl_for_env(
-        os_release.as_deref(),
-        proc_version.as_deref(),
-        std::env::var_os("WSL_DISTRO_NAME").as_deref(),
-        std::env::var_os("WSL_INTEROP").as_deref(),
-        std::path::Path::new("/run/WSL").exists()
-            || std::path::Path::new("/proc/sys/fs/binfmt_misc/WSLInterop").exists(),
-    )
-}
-
-fn should_prefer_osc52_for_env(
-    ssh_connection: Option<&OsStr>,
-    ssh_tty: Option<&OsStr>,
-    wsl: bool,
-) -> bool {
-    ssh_connection.is_some() || ssh_tty.is_some() || wsl
-}
-
-fn should_prefer_osc52() -> bool {
-    should_prefer_osc52_for_env(
-        std::env::var_os("SSH_CONNECTION").as_deref(),
-        std::env::var_os("SSH_TTY").as_deref(),
-        is_wsl(),
-    )
-}
-
-/// Write clipboard bytes to the system clipboard via native platform tools or OSC 52.
+/// Write clipboard bytes to the terminal clipboard via OSC 52.
 ///
 /// OSC 52 format: `ESC ] 52 ; c ; <base64> BEL`
 ///
+/// Keep this path terminal-native. Waiting for clipboard-owner processes such
+/// as `wl-copy` or `xclip` here can freeze the input/render loop.
+///
 /// Some terminals still only honor BEL-terminated OSC 52 writes, so herdr
 /// emits BEL here even though ST works in newer emulators.
+#[cfg(not(test))]
 pub fn write_osc52_bytes(bytes: &[u8]) {
-    if !should_prefer_osc52() && crate::platform::write_clipboard(bytes) {
-        return;
-    }
-
     let sequence = osc52_sequence(bytes);
     let _ = std::io::stdout().write_all(sequence.as_bytes());
     let _ = std::io::stdout().flush();
@@ -348,80 +301,6 @@ mod tests {
     #[test]
     fn osc52_sequence_uses_bel_terminator() {
         assert_eq!(osc52_sequence(b"hello"), "\x1b]52;c;aGVsbG8=\x07");
-    }
-
-    #[test]
-    fn ssh_sessions_prefer_osc52() {
-        assert!(should_prefer_osc52_for_env(
-            Some(OsStr::new("1 2 3 4")),
-            None,
-            false
-        ));
-        assert!(should_prefer_osc52_for_env(
-            None,
-            Some(OsStr::new("/dev/ttys001")),
-            false
-        ));
-        assert!(!should_prefer_osc52_for_env(None, None, false));
-    }
-
-    #[test]
-    fn wsl_sessions_prefer_osc52() {
-        assert!(should_prefer_osc52_for_env(None, None, true));
-    }
-
-    #[test]
-    fn wsl_detection_uses_env_vars() {
-        assert!(is_wsl_for_env(
-            None,
-            None,
-            Some(OsStr::new("Ubuntu")),
-            None,
-            false
-        ));
-        assert!(is_wsl_for_env(
-            None,
-            None,
-            None,
-            Some(OsStr::new("/run/WSL/123_interop")),
-            false
-        ));
-    }
-
-    #[test]
-    fn wsl_detection_uses_kernel_markers() {
-        assert!(is_wsl_for_env(
-            Some("5.15.167.4-microsoft-standard-WSL2"),
-            None,
-            None,
-            None,
-            false
-        ));
-        assert!(is_wsl_for_env(
-            None,
-            Some("Linux version 5.15.167.4-microsoft-standard-WSL2"),
-            None,
-            None,
-            false
-        ));
-    }
-
-    #[test]
-    fn wsl_detection_ignores_non_wsl_kernel_strings() {
-        assert!(!contains_wsl_marker("notwsl-kernel"));
-        assert!(!is_wsl_for_env(
-            Some("6.8.0-31-generic"),
-            Some("Linux version 6.8.0-31-generic"),
-            None,
-            None,
-            false
-        ));
-    }
-
-    #[test]
-    fn wsl_detection_uses_wsl_runtime_markers() {
-        assert!(is_wsl_for_env(None, None, None, None, true));
-        assert!(!is_wsl_for_env(None, None, None, None, false));
     }
 
     #[test]

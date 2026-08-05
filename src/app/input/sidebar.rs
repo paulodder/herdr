@@ -197,7 +197,11 @@ impl AppState {
     }
 
     pub(crate) fn global_menu_labels(&self) -> Vec<&'static str> {
-        let mut labels = vec!["settings", "keybinds", "reload config"];
+        let mut labels = vec!["settings", "keybinds"];
+        if self.emacs.enabled {
+            labels.push("emacs tour");
+        }
+        labels.push("reload config");
         if self.update_available.is_some() {
             labels.push("update ready");
         } else if self.latest_release_notes_available {
@@ -531,6 +535,39 @@ mod tests {
         ));
 
         assert_eq!(app.state.mode, Mode::KeybindHelp);
+    }
+
+    #[test]
+    fn enabled_emacs_layer_adds_clickable_tour_to_global_menu() {
+        let mut app = app_for_mouse_test();
+        app.state.emacs.enabled = true;
+        let launcher = app.state.global_launcher_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            launcher.x,
+            launcher.y,
+        ));
+
+        assert_eq!(
+            app.state.global_menu_labels(),
+            vec![
+                "settings",
+                "keybinds",
+                "emacs tour",
+                "reload config",
+                "detach"
+            ]
+        );
+
+        let menu = app.state.global_menu_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu.x + 2,
+            menu.y + 3,
+        ));
+
+        assert_eq!(app.state.mode, Mode::Onboarding);
+        assert_eq!(app.state.emacs_onboarding_page, Some(0));
     }
 
     #[test]

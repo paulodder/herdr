@@ -9,12 +9,14 @@ use crossterm::event::KeyEventKind;
 
 use super::navigate::{ActionContext, NavigateAction};
 use crate::app::state::Mode;
+use crate::app::text_input::{action_for_key as text_action_for_key, TextInputAction};
 use crate::app::App;
 use crate::emacs::commands::{herdr_action_is_indexed, EmacsBuiltin, EmacsCommand, MapContext};
 use crate::emacs::isearch::{
     initial_selection, repeated_selection, IsearchState, SearchDirection, SearchSpan,
 };
 use crate::emacs::keymap::{format_seq, Chord, Lookup};
+use crate::emacs::open_target::{self, OpenTarget};
 use crate::emacs::text_mode::{self, Pos, TextBuffer, TextModeState};
 use crate::input::TerminalKey;
 
@@ -24,6 +26,12 @@ impl App {
     /// consumed the key.
     pub(crate) fn emacs_intercept_key(&mut self, key: TerminalKey) -> bool {
         if !self.state.emacs.enabled {
+            return false;
+        }
+        // A companion terminal Emacs frame owns its complete keyboard. The
+        // ordinary terminal dispatcher has a matching bypass for Herdr's
+        // direct bindings, prefix, and host PageUp/PageDown behavior.
+        if self.focused_pane_has_exclusive_input() {
             return false;
         }
         // The layer only owns dispatch while a pane has focus; herdr's own
@@ -44,6 +52,8 @@ impl App {
             }
         }
 
+        let chord = Chord::from_key(&key);
+
         self.state.emacs.echo = None;
 
         // Emacs layer seam (fork): TEXT mode freezes the cursor on the pane
@@ -53,16 +63,24 @@ impl App {
         // scroll-restore — and fall through to normal live-mode handling of
         // this key instead of swallowing keystrokes typed at a pane the
         // user can no longer see a cursor in.
-        if let Some(text_pane_id) = self.state.emacs.text_mode.as_ref().map(|text| text.pane_id) {
-            let focused_and_live = self.emacs_focused_pane().is_some_and(|(ws_idx, pane_id)| {
-                pane_id == text_pane_id
-                    && self
-                        .state
-                        .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
-                        .is_some()
-            });
-            if !focused_and_live {
-                self.emacs_exit_text_mode();
+        if self.state.emacs.minibuffer.is_none() {
+            if let Some(text_pane_id) = self.state.emacs.text_mode.as_ref().map(|text| text.pane_id)
+            {
+                let focused_and_live =
+                    self.emacs_focused_pane().is_some_and(|(ws_idx, pane_id)| {
+                        pane_id == text_pane_id
+                            && self
+                                .state
+                                .runtime_for_pane_in_workspace(
+                                    &self.terminal_runtimes,
+                                    ws_idx,
+                                    pane_id,
+                                )
+                                .is_some()
+                    });
+                if !focused_and_live {
+                    self.emacs_exit_text_mode();
+                }
             }
         }
 
@@ -86,9 +104,47 @@ impl App {
         let isearch_active = ctx == MapContext::Isearch;
         let text_active = matches!(ctx, MapContext::Text | MapContext::Isearch);
 
-        let Some(chord) = Chord::from_key(&key) else {
-            return text_active;
+        let Some(chord) = chord else {
+            return text_active || self.state.emacs.minibuffer.is_some();
         };
+
+        // M-x and feedback are Herdr-owned text fields. Give their structural
+        // editing keys to the same pure input engine used by rename/search
+        // prompts. Live terminal-owned Codex/Claude drafts never enter here.
+        if self.state.emacs.pending.is_empty() && self.state.emacs.minibuffer.is_some() {
+            let action = text_action_for_key(key.as_key_event()).filter(|action| {
+                matches!(
+                    action,
+                    TextInputAction::BackwardSexp
+                        | TextInputAction::ForwardSexp
+                        | TextInputAction::BackwardUpList
+                        | TextInputAction::DownList
+                        | TextInputAction::MarkSexp
+                        | TextInputAction::KillSexp
+                        | TextInputAction::UnwrapSelection
+                        | TextInputAction::ShrinkSelection
+                )
+            });
+            if let Some(action) = action {
+                let yank = self
+                    .state
+                    .emacs
+                    .kill_ring
+                    .head()
+                    .unwrap_or_default()
+                    .to_string();
+                let killed = self
+                    .state
+                    .emacs
+                    .minibuffer
+                    .as_mut()
+                    .and_then(|minibuffer| minibuffer.apply_text_action(action, &yank));
+                if let Some(killed) = killed {
+                    self.state.emacs.kill_ring.push(killed);
+                }
+                return true;
+            }
+        }
 
         // C-g always cancels an in-flight chord (and, in TEXT mode,
         // deactivates the mark). Delegates to KeyboardQuit so mid-chord quit
@@ -117,7 +173,18 @@ impl App {
             Lookup::Unbound => {
                 self.state.emacs.pending.clear();
                 self.state.emacs.last_yank = None;
+                self.state.emacs.recenter_cycle = 0;
                 let single = seq.len() == 1;
+                if self.state.emacs.minibuffer.is_some() {
+                    if let Some(c) = chord.self_insert_char().filter(|_| single) {
+                        if let Some(minibuffer) = self.state.emacs.minibuffer.as_mut() {
+                            minibuffer.insert_char(c);
+                        }
+                    } else {
+                        self.state.emacs.echo = Some(format!("{} is undefined", format_seq(&seq)));
+                    }
+                    return true;
+                }
                 if isearch_active {
                     if let Some(c) = chord.self_insert_char().filter(|_| single) {
                         self.emacs_isearch_insert(c);
@@ -146,7 +213,7 @@ impl App {
 
     /// Press-equivalent consume decision, used for repeat/release events.
     fn emacs_would_consume(&self, key: TerminalKey) -> bool {
-        if self.state.emacs.text_mode.is_some() {
+        if self.state.emacs.text_mode.is_some() || self.state.emacs.minibuffer.is_some() {
             return true;
         }
         let emacs = &self.state.emacs;
@@ -166,6 +233,9 @@ impl App {
     /// (`Option<i64>`): motions repeat, `C-u C-SPC` pops the mark ring, and
     /// the three indexed herdr actions take their index from it.
     pub(crate) fn execute_emacs_command(&mut self, cmd: EmacsCommand, prefix: Option<i64>) {
+        if cmd != EmacsCommand::Builtin(EmacsBuiltin::RecenterTopBottom) {
+            self.state.emacs.recenter_cycle = 0;
+        }
         let is_search_command = matches!(
             cmd,
             EmacsCommand::Builtin(
@@ -202,8 +272,17 @@ impl App {
 
     fn execute_emacs_builtin(&mut self, builtin: EmacsBuiltin, prefix: Option<i64>) {
         match builtin {
+            EmacsBuiltin::InterruptProcess => {
+                self.emacs_send_key_to_focused_pane(TerminalKey::new(
+                    crossterm::event::KeyCode::Char('c'),
+                    crossterm::event::KeyModifiers::CONTROL,
+                ));
+            }
             EmacsBuiltin::QuotedInsert => {
-                if self.state.emacs.text_mode.is_some() {
+                if self.state.emacs.minibuffer.is_some() {
+                    self.state.emacs.echo =
+                        Some("Quoted insert is not implemented here".to_string());
+                } else if self.state.emacs.text_mode.is_some() {
                     self.state.emacs.echo = Some("Buffer is read-only".to_string());
                 } else {
                     self.state.emacs.quoted_insert = true;
@@ -221,18 +300,21 @@ impl App {
                     self.emacs_abort_isearch();
                 } else {
                     self.state.emacs.pending.clear();
+                    self.state.emacs.minibuffer = None;
                     if let Some(text) = self.state.emacs.text_mode.as_mut() {
                         text.mark_active = false;
                     }
                     self.state.emacs.echo = Some("Quit".to_string());
                 }
             }
+            EmacsBuiltin::OpenAtPoint => self.emacs_open_at_point(),
             EmacsBuiltin::TextMode => {
                 if self.state.emacs.text_mode.is_none() {
                     self.emacs_enter_text_mode();
                 }
             }
             EmacsBuiltin::ExitTextMode => self.emacs_exit_text_mode(),
+            EmacsBuiltin::RecenterTopBottom => self.emacs_recenter_top_bottom(),
             EmacsBuiltin::ForwardChar
             | EmacsBuiltin::BackwardChar
             | EmacsBuiltin::NextLine
@@ -244,14 +326,27 @@ impl App {
             | EmacsBuiltin::ScrollUp
             | EmacsBuiltin::ScrollDown
             | EmacsBuiltin::BeginningOfBuffer
-            | EmacsBuiltin::EndOfBuffer => self.emacs_text_motion(builtin, prefix),
+            | EmacsBuiltin::EndOfBuffer => {
+                if self.state.emacs.minibuffer.is_some() {
+                    self.emacs_minibuffer_motion(builtin);
+                } else {
+                    self.emacs_text_motion(builtin, prefix);
+                }
+            }
             EmacsBuiltin::SetMark => self.emacs_set_mark(),
             EmacsBuiltin::ExchangePointAndMark => self.emacs_exchange_point_and_mark(),
             // In a read-only buffer C-w cannot delete, so kill-region
             // degrades to kill-ring-save.
             EmacsBuiltin::KillRingSave | EmacsBuiltin::KillRegion => self.emacs_kill_ring_save(),
             EmacsBuiltin::Yank => {
-                if self.state.emacs.text_mode.is_some() {
+                if self.state.emacs.minibuffer.is_some() {
+                    let content = self.state.emacs.kill_ring.head().map(str::to_owned);
+                    if let (Some(content), Some(minibuffer)) =
+                        (content, self.state.emacs.minibuffer.as_mut())
+                    {
+                        minibuffer.insert_str(&content);
+                    }
+                } else if self.state.emacs.text_mode.is_some() {
                     self.state.emacs.echo = Some("Buffer is read-only".to_string());
                 } else {
                     self.emacs_yank_live();
@@ -281,16 +376,71 @@ impl App {
             EmacsBuiltin::IsearchNextHistory => self.emacs_isearch_history(false),
             EmacsBuiltin::MoveTabLeft => self.emacs_move_tab(-1),
             EmacsBuiltin::MoveTabRight => self.emacs_move_tab(1),
+            EmacsBuiltin::ExecuteExtendedCommand => {
+                self.state.emacs.minibuffer =
+                    Some(crate::emacs::minibuffer::MinibufferState::command());
+            }
+            EmacsBuiltin::Feedback => {
+                self.state.emacs.minibuffer =
+                    Some(crate::emacs::minibuffer::MinibufferState::feedback());
+            }
+            EmacsBuiltin::HerdrOnboarding => super::modal::open_emacs_onboarding(&mut self.state),
+            EmacsBuiltin::RefreshHerdr => {
+                self.state.request_live_handoff = true;
+                self.state.emacs.echo = Some("Refreshing Herdr…".to_string());
+            }
+            EmacsBuiltin::ExitMinibuffer => self.emacs_minibuffer_exit(),
+            EmacsBuiltin::DeleteBackwardChar => {
+                if let Some(minibuffer) = self.state.emacs.minibuffer.as_mut() {
+                    minibuffer.delete_backward_char();
+                }
+            }
+            EmacsBuiltin::DeleteForwardChar => {
+                if let Some(minibuffer) = self.state.emacs.minibuffer.as_mut() {
+                    minibuffer.delete_forward_char();
+                }
+            }
+            EmacsBuiltin::KillBeginningOfLine => {
+                let killed = self
+                    .state
+                    .emacs
+                    .minibuffer
+                    .as_mut()
+                    .and_then(|minibuffer| minibuffer.kill_beginning_of_line());
+                if let Some(killed) = killed {
+                    self.state.emacs.kill_ring.push(killed);
+                }
+            }
+            EmacsBuiltin::KillLine => {
+                let killed = self
+                    .state
+                    .emacs
+                    .minibuffer
+                    .as_mut()
+                    .and_then(|minibuffer| minibuffer.kill_line());
+                if let Some(killed) = killed {
+                    self.state.emacs.kill_ring.push(killed);
+                }
+            }
+            EmacsBuiltin::BackwardKillWord => {
+                let killed = self
+                    .state
+                    .emacs
+                    .minibuffer
+                    .as_mut()
+                    .and_then(|minibuffer| minibuffer.backward_kill_word());
+                if let Some(killed) = killed {
+                    self.state.emacs.kill_ring.push(killed);
+                }
+            }
+            EmacsBuiltin::MarkWholeInput => {
+                if let Some(minibuffer) = self.state.emacs.minibuffer.as_mut() {
+                    minibuffer.select_all();
+                }
+            }
+            EmacsBuiltin::DescribeBindings => super::modal::open_keybind_help(&mut self.state),
             // Wired in later tasks; named and reachable from M-x now.
-            EmacsBuiltin::UniversalArgument
-            | EmacsBuiltin::ExecuteExtendedCommand
-            | EmacsBuiltin::DeleteBackwardChar
-            | EmacsBuiltin::KillLine
-            | EmacsBuiltin::BackwardKillWord
-            | EmacsBuiltin::MinibufferComplete
-            | EmacsBuiltin::ExitMinibuffer
-            | EmacsBuiltin::DescribeKey
-            | EmacsBuiltin::DescribeBindings => {
+            EmacsBuiltin::UniversalArgument | EmacsBuiltin::DescribeKey => {
                 self.state.emacs.echo = Some(format!(
                     "{} is not implemented yet",
                     EmacsCommand::Builtin(builtin).name()
@@ -368,6 +518,234 @@ impl App {
         let ws_idx = self.state.active?;
         let pane_id = self.state.workspaces.get(ws_idx)?.focused_pane_id()?;
         Some((ws_idx, pane_id))
+    }
+
+    fn emacs_open_at_point(&mut self) {
+        let Some((ws_idx, pane_id)) = self.emacs_focused_pane() else {
+            self.state.emacs.echo = Some("No focused pane".to_string());
+            return;
+        };
+        let Some(cwd) = self.follow_cwd_for_pane_in_workspace(ws_idx, pane_id) else {
+            self.state.emacs.echo = Some("Pane working directory is unavailable".to_string());
+            return;
+        };
+        let home = crate::integration::home_dir().ok();
+
+        let selected_region = self.state.emacs.text_mode.as_ref().and_then(|text| {
+            (text.pane_id == pane_id && text.mark_active)
+                .then_some(text.mark)
+                .flatten()
+                .map(|mark| (mark, text.point))
+        });
+        if let Some((mark, point)) = selected_region {
+            let (start, end) = if mark <= point {
+                (mark, point)
+            } else {
+                (point, mark)
+            };
+            let target = self
+                .emacs_region_text(ws_idx, pane_id, start, end)
+                .and_then(|selection| {
+                    open_target::resolve_selection(&selection, &cwd, home.as_deref())
+                });
+            match target {
+                Some(target) => self.emacs_open_target(target, cwd),
+                None => {
+                    self.state.emacs.echo =
+                        Some("Selected text is not an existing file or URL".to_string())
+                }
+            }
+            return;
+        }
+
+        let Some(point) = self.emacs_terminal_point_at_focus(ws_idx, pane_id) else {
+            return;
+        };
+        let target = {
+            let Some(rt) =
+                self.state
+                    .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
+            else {
+                self.state.emacs.echo = Some("Focused pane has no terminal".to_string());
+                return;
+            };
+
+            let hyperlink = rt
+                .hyperlink_uri_at(point)
+                .or_else(|| {
+                    point.col.checked_sub(1).and_then(|col| {
+                        rt.hyperlink_uri_at(crate::pane::TerminalTextPoint {
+                            row: point.row,
+                            col,
+                        })
+                    })
+                })
+                .and_then(|uri| open_target::resolve_selection(&uri, &cwd, home.as_deref()));
+            hyperlink.or_else(|| {
+                let logical = rt.logical_text_at_point(point)?;
+                open_target::resolve_at_point(
+                    &logical.text,
+                    logical.point_byte,
+                    &cwd,
+                    home.as_deref(),
+                )
+            })
+        };
+
+        match target {
+            Some(target) => self.emacs_open_target(target, cwd),
+            None => self.state.emacs.echo = Some("No existing file or URL at point".to_string()),
+        }
+    }
+
+    fn emacs_terminal_point_at_focus(
+        &mut self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+    ) -> Option<crate::pane::TerminalTextPoint> {
+        if let Some(text) = self
+            .state
+            .emacs
+            .text_mode
+            .as_ref()
+            .filter(|text| text.pane_id == pane_id)
+        {
+            return Some(crate::pane::TerminalTextPoint {
+                row: text.point.row,
+                col: text.point.col,
+            });
+        }
+
+        let info = self.state.pane_info_by_id(pane_id)?.clone();
+        let metrics = self
+            .state
+            .pane_scroll_metrics(&self.terminal_runtimes, pane_id)?;
+        if metrics.offset_from_bottom > 0 {
+            self.state.emacs.echo =
+                Some("Enter TEXT mode to open a target in scrollback".to_string());
+            return None;
+        }
+        let rt =
+            self.state
+                .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)?;
+        let cursor = rt
+            .cursor_state(info.inner_rect, true)
+            .filter(|cursor| cursor.visible)?;
+        let viewport_row = cursor.y.saturating_sub(info.inner_rect.y);
+        Some(crate::pane::TerminalTextPoint {
+            row: crate::selection::Selection::absolute_row_for_viewport(
+                viewport_row,
+                Some(metrics),
+            ),
+            col: cursor.x.saturating_sub(info.inner_rect.x),
+        })
+    }
+
+    fn emacs_open_target(&mut self, target: OpenTarget, cwd: std::path::PathBuf) {
+        let argv = open_target::emacsclient_argv(&target);
+        let new_pane =
+            match self.spawn_overlay_argv_command(&argv, Some(cwd), Vec::new(), Vec::new()) {
+                Ok((_ws_idx, new_pane)) => new_pane,
+                Err(err) => {
+                    self.state.emacs.echo = Some(format!("Could not start emacsclient: {err}"));
+                    return;
+                }
+            };
+
+        let pane_id = new_pane.pane_id;
+        let terminal_id = new_pane.terminal.id.clone();
+        self.terminal_runtimes
+            .insert(terminal_id.clone(), new_pane.runtime);
+        self.state.terminals.insert(terminal_id, new_pane.terminal);
+        self.state.remove_alias_shadowed_by_new_pane(pane_id);
+        if let Some(overlay) = self.overlay_panes.get_mut(&pane_id) {
+            overlay.input_profile = crate::app::OverlayInputProfile::Exclusive;
+        }
+        self.emacs_leave_outer_interaction();
+    }
+
+    fn emacs_leave_outer_interaction(&mut self) {
+        if self.state.emacs.text_mode.is_some() {
+            self.emacs_exit_text_mode();
+        }
+        self.state.emacs.pending.clear();
+        self.state.emacs.quoted_insert = false;
+        self.state.emacs.minibuffer = None;
+        self.state.emacs.echo = None;
+        self.state.emacs.last_yank = None;
+        self.state.emacs.recenter_cycle = 0;
+    }
+
+    fn emacs_minibuffer_motion(&mut self, builtin: EmacsBuiltin) {
+        let Some(minibuffer) = self.state.emacs.minibuffer.as_mut() else {
+            return;
+        };
+        match builtin {
+            EmacsBuiltin::MoveBeginningOfLine => minibuffer.move_beginning_of_line(),
+            EmacsBuiltin::MoveEndOfLine => minibuffer.move_end_of_line(),
+            EmacsBuiltin::ForwardChar => minibuffer.forward_char(),
+            EmacsBuiltin::BackwardChar => minibuffer.backward_char(),
+            EmacsBuiltin::ForwardWord => minibuffer.forward_word(),
+            EmacsBuiltin::BackwardWord => minibuffer.backward_word(),
+            _ => {}
+        }
+    }
+
+    fn emacs_minibuffer_exit(&mut self) {
+        let is_empty_feedback = self
+            .state
+            .emacs
+            .minibuffer
+            .as_ref()
+            .is_some_and(|minibuffer| {
+                matches!(
+                    minibuffer.kind,
+                    crate::emacs::minibuffer::MinibufferKind::Feedback
+                ) && minibuffer.input.trim().is_empty()
+            });
+        if is_empty_feedback {
+            if let Some(minibuffer) = self.state.emacs.minibuffer.as_mut() {
+                minibuffer.prompt = "Feedback is empty — type a comment: ".to_string();
+            }
+            return;
+        }
+
+        let Some(minibuffer) = self.state.emacs.minibuffer.take() else {
+            return;
+        };
+        match minibuffer.kind {
+            crate::emacs::minibuffer::MinibufferKind::ExecuteCommand => {
+                let name = minibuffer.input.trim();
+                match EmacsCommand::from_name(name) {
+                    Some(command) => {
+                        self.execute_emacs_command(command, None);
+                    }
+                    None => {
+                        self.state.emacs.echo = Some(format!("No match: {name}"));
+                    }
+                }
+            }
+            crate::emacs::minibuffer::MinibufferKind::Feedback => {
+                self.emacs_submit_feedback(minibuffer.input.trim())
+            }
+        }
+    }
+
+    fn emacs_submit_feedback(&mut self, comment: &str) {
+        let Some((ws_idx, pane_id)) = self.emacs_focused_pane() else {
+            self.state.emacs.echo = Some("No focused pane for feedback".to_string());
+            return;
+        };
+        let message = format!("Herdr feedback:\n{comment}");
+        if self.emacs_send_text_to_pane(ws_idx, pane_id, &message, 0) {
+            self.emacs_send_key_to_focused_pane(crate::input::TerminalKey::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::empty(),
+            ));
+            self.state.emacs.echo = Some("Feedback sent".to_string());
+        } else {
+            self.state.emacs.echo = Some("Could not send feedback to pane".to_string());
+        }
     }
 
     /// `C-x [` — freeze the focused pane into TEXT mode. Mirrors
@@ -872,6 +1250,35 @@ impl App {
             .set_pane_scroll_offset(&self.terminal_runtimes, pane_id, offset);
     }
 
+    /// `C-l` / `recenter-top-bottom`: keep point fixed and cycle its screen
+    /// position through middle, top, and bottom, as Emacs does by default.
+    fn emacs_recenter_top_bottom(&mut self) {
+        let Some(text) = self.state.emacs.text_mode.as_ref() else {
+            self.state.emacs.recenter_cycle = 0;
+            return;
+        };
+        let (pane_id, point_row) = (text.pane_id, text.point.row);
+        let Some(metrics) = self
+            .state
+            .pane_scroll_metrics(&self.terminal_runtimes, pane_id)
+        else {
+            return;
+        };
+        let view_rows = metrics.viewport_rows.max(1);
+        let target_row = match self.state.emacs.recenter_cycle {
+            0 => view_rows / 2,
+            1 => 0,
+            _ => view_rows - 1,
+        };
+        let top = (point_row as usize)
+            .saturating_sub(target_row)
+            .min(metrics.max_offset_from_bottom);
+        let offset = metrics.max_offset_from_bottom.saturating_sub(top);
+        self.state
+            .set_pane_scroll_offset(&self.terminal_runtimes, pane_id, offset);
+        self.state.emacs.recenter_cycle = (self.state.emacs.recenter_cycle + 1) % 3;
+    }
+
     /// `C-SPC` — set the mark at point, activate the region, and push the
     /// pane's mark ring.
     fn emacs_set_mark(&mut self) {
@@ -1079,6 +1486,8 @@ impl TextBuffer for RuntimeBuffer<'_> {
 mod tests {
     use super::super::app_for_mouse_test;
     use crate::app::{App, Mode};
+    use crate::emacs::text_mode::Pos;
+    use crate::input::TerminalKey;
     use crate::workspace::Workspace;
 
     /// App with the Emacs layer enabled and one focused pane whose PTY
@@ -1164,7 +1573,10 @@ mod tests {
         assert_eq!(app.state.workspaces[0].active_tab, 1);
         app.route_client_input(KITTY_C_RBRACKET.to_vec());
         assert_eq!(app.state.workspaces[0].active_tab, 2);
-        assert!(sent_bytes(&mut rx).is_empty(), "chords never reach the pane");
+        assert!(
+            sent_bytes(&mut rx).is_empty(),
+            "chords never reach the pane"
+        );
     }
 
     #[tokio::test]
@@ -1283,6 +1695,96 @@ mod tests {
             sent_bytes(&mut rx).is_empty(),
             "chord must not reach the pane"
         );
+    }
+
+    #[tokio::test]
+    async fn c_x_t_opens_the_visible_tab_name_prompt() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
+        app.route_client_input(vec![0x18, b't']);
+
+        assert_eq!(app.state.mode, Mode::RenameTab);
+        assert_eq!(app.state.name_input, "1");
+        assert_eq!(app.state.rename_pane_target, None);
+        assert!(sent_bytes(&mut rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn monolithic_input_route_uses_the_emacs_dispatcher() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
+
+        app.handle_raw_input_event(crate::raw_input::RawInputEvent::Key(TerminalKey::new(
+            crossterm::event::KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::CONTROL,
+        )))
+        .await;
+
+        assert_eq!(app.state.emacs.pending.len(), 1);
+        assert_eq!(app.state.emacs.echo.as_deref(), Some("C-x-"));
+        assert!(sent_bytes(&mut rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn c_c_t_opens_the_visible_tab_name_prompt() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
+        app.route_client_input(vec![0x03, b't']);
+
+        assert_eq!(app.state.mode, Mode::RenameTab);
+        assert_eq!(app.state.name_input, "1");
+        assert!(sent_bytes(&mut rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn c_c_is_a_prefix_and_c_c_c_c_forwards_one_interrupt() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
+
+        app.route_client_input(vec![0x03]);
+        assert_eq!(app.state.emacs.pending.len(), 1);
+        assert_eq!(app.state.emacs.echo.as_deref(), Some("C-c-"));
+        assert!(sent_bytes(&mut rx).is_empty());
+
+        app.route_client_input(vec![0x03]);
+        assert!(app.state.emacs.pending.is_empty());
+        assert_eq!(sent_bytes(&mut rx), vec![0x03]);
+    }
+
+    #[tokio::test]
+    async fn meta_n_and_meta_p_cycle_detected_agents_without_pty_passthrough() {
+        let (mut app, pane_a, mut rx_a) = emacs_app_with_channel(b"");
+        let pane_b = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces[0].tabs[0].layout.focus_pane(pane_a);
+        app.state.ensure_test_terminals();
+        for pane_id in [pane_a, pane_b] {
+            let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("test terminal")
+                .set_detected_state(
+                    Some(crate::detect::Agent::Pi),
+                    crate::detect::AgentState::Idle,
+                );
+        }
+
+        app.route_client_input(vec![0x1b, b'n']);
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(pane_b));
+        app.route_client_input(vec![0x1b, b'p']);
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(pane_a));
+        assert!(sent_bytes(&mut rx_a).is_empty());
+    }
+
+    #[tokio::test]
+    async fn control_meta_n_and_p_cycle_workspaces_without_pty_passthrough() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
+        app.state.workspaces.push(Workspace::test_new("other"));
+
+        app.route_client_input(b"\x1b[110;7u".to_vec()); // C-M-n
+        assert_eq!(app.state.active, Some(1));
+
+        app.route_client_input(b"\x1b[112;7u".to_vec()); // C-M-p
+        assert_eq!(app.state.active, Some(0));
+        assert!(sent_bytes(&mut rx).is_empty());
     }
 
     #[tokio::test]
@@ -1425,6 +1927,63 @@ mod tests {
             .pane_scroll_metrics(&app.terminal_runtimes, pane)
             .expect("metrics");
         assert_eq!(metrics.offset_from_bottom, entry_offset, "scroll restored");
+    }
+
+    #[tokio::test]
+    async fn c_l_cycles_point_through_middle_top_and_bottom() {
+        let (mut app, pane, _rx) = emacs_app_with_channel(&fifty_lines());
+        enter_text_mode(&mut app);
+        let point_row = 25;
+        app.state.emacs.text_mode.as_mut().unwrap().point = Pos {
+            row: point_row,
+            col: 0,
+        };
+
+        let viewport_top = |app: &App| {
+            let metrics = app
+                .state
+                .pane_scroll_metrics(&app.terminal_runtimes, pane)
+                .expect("metrics");
+            metrics.max_offset_from_bottom - metrics.offset_from_bottom
+        };
+        let viewport_rows = app
+            .state
+            .pane_scroll_metrics(&app.terminal_runtimes, pane)
+            .expect("metrics")
+            .viewport_rows;
+
+        app.route_client_input(vec![0x0c]);
+        assert_eq!(viewport_top(&app), point_row as usize - viewport_rows / 2);
+        app.route_client_input(vec![0x0c]);
+        assert_eq!(viewport_top(&app), point_row as usize);
+        app.route_client_input(vec![0x0c]);
+        assert_eq!(viewport_top(&app), point_row as usize - (viewport_rows - 1));
+        app.route_client_input(vec![0x0c]);
+        assert_eq!(viewport_top(&app), point_row as usize - viewport_rows / 2);
+        assert_eq!(
+            app.state.emacs.text_mode.as_ref().unwrap().point.row,
+            point_row,
+            "recenter never moves point"
+        );
+    }
+
+    #[tokio::test]
+    async fn another_command_resets_c_l_cycle_to_middle() {
+        let (mut app, pane, _rx) = emacs_app_with_channel(&fifty_lines());
+        enter_text_mode(&mut app);
+        app.state.emacs.text_mode.as_mut().unwrap().point = Pos { row: 25, col: 0 };
+
+        app.route_client_input(vec![0x0c, 0x0c]); // middle, then top
+        app.route_client_input(vec![0x0e]); // C-n
+        let point_row = app.state.emacs.text_mode.as_ref().unwrap().point.row;
+        app.route_client_input(vec![0x0c]);
+
+        let metrics = app
+            .state
+            .pane_scroll_metrics(&app.terminal_runtimes, pane)
+            .expect("metrics");
+        let top = metrics.max_offset_from_bottom - metrics.offset_from_bottom;
+        assert_eq!(top, point_row as usize - metrics.viewport_rows / 2);
     }
 
     /// Finding 1: TEXT mode must not survive the user focusing a different
@@ -1693,6 +2252,32 @@ mod tests {
             Some((0, 0)),
             "mark position survives deactivation (Emacs behavior)"
         );
+    }
+
+    #[tokio::test]
+    async fn repeated_c_n_extends_an_active_region_until_buffer_end() {
+        use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+
+        let (mut app, _pane, _rx) = emacs_app_with_channel(FIVE_LINES);
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x1b, b'<']); // M-<
+        app.route_client_input(vec![0x00]); // C-SPC
+
+        let press = crate::input::TerminalKey::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
+        let repeat = press.with_kind(KeyEventKind::Repeat);
+        app.route_client_events(
+            vec![
+                crate::raw_input::RawInputEvent::Key(press),
+                crate::raw_input::RawInputEvent::Key(repeat),
+                crate::raw_input::RawInputEvent::Key(repeat),
+            ],
+            false,
+        );
+
+        let text = app.state.emacs.text_mode.as_ref().unwrap();
+        assert_eq!(text.point.row, 3, "press plus two repeats move three rows");
+        assert_eq!(text.mark.map(|mark| mark.row), Some(0));
+        assert!(text.mark_active);
     }
 
     #[tokio::test]
@@ -2065,6 +2650,154 @@ mod tests {
         assert!(sent_bytes(&mut rx).is_empty());
     }
 
+    fn type_ascii(app: &mut App, text: &str) {
+        app.route_client_input(text.as_bytes().to_vec());
+    }
+
+    fn open_feedback_prompt(app: &mut App) {
+        app.route_client_input(vec![0x1b, b'x']); // M-x
+        type_ascii(app, "feedback");
+        app.route_client_input(vec![0x0d]); // RET
+    }
+
+    #[tokio::test]
+    async fn m_x_feedback_sends_a_plain_comment() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
+        app.route_client_input(b"a".to_vec());
+        assert_eq!(sent_bytes(&mut rx), b"a");
+
+        open_feedback_prompt(&mut app);
+        let prompt = app.state.emacs.minibuffer.as_ref().expect("feedback open");
+        assert_eq!(
+            prompt.kind,
+            crate::emacs::minibuffer::MinibufferKind::Feedback
+        );
+
+        type_ascii(&mut app, "make tabs calmer");
+        app.route_client_input(vec![0x0d]); // RET submits
+
+        assert!(app.state.emacs.minibuffer.is_none());
+        assert_eq!(sent_bytes(&mut rx), b"Herdr feedback:\nmake tabs calmer\r");
+        assert_eq!(app.state.emacs.echo.as_deref(), Some("Feedback sent"));
+    }
+
+    #[tokio::test]
+    async fn feedback_dispatches_structural_editing_through_shared_text_input() {
+        use crate::input::TerminalKey;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let (mut app, _pane, _rx) = emacs_app_with_channel(b"");
+        app.state.emacs.minibuffer = Some(crate::emacs::minibuffer::MinibufferState::feedback());
+        let minibuffer = app.state.emacs.minibuffer.as_mut().unwrap();
+        minibuffer.insert_str("(héllo [world]) tail");
+        minibuffer.move_beginning_of_line();
+
+        let control_meta = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        assert!(app.emacs_intercept_key(TerminalKey::new(KeyCode::Char(' '), control_meta,)));
+        assert!(app.emacs_intercept_key(TerminalKey::new(KeyCode::Char('k'), control_meta,)));
+
+        assert_eq!(app.state.emacs.minibuffer.as_ref().unwrap().input, " tail");
+        assert_eq!(app.state.emacs.kill_ring.head(), Some("(héllo [world])"));
+    }
+
+    #[tokio::test]
+    async fn c_g_aborts_feedback_without_sending_anything() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
+        open_feedback_prompt(&mut app);
+        type_ascii(&mut app, "never mind");
+        app.route_client_input(vec![0x07]); // C-g
+        assert!(app.state.emacs.minibuffer.is_none());
+        assert_eq!(app.state.emacs.echo.as_deref(), Some("Quit"));
+        assert!(sent_bytes(&mut rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn paste_edits_feedback_instead_of_reaching_the_pane() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
+        open_feedback_prompt(&mut app);
+        app.handle_paste("pasted\ncomment".to_string()).await;
+        assert_eq!(
+            app.state.emacs.minibuffer.as_ref().unwrap().input,
+            "pastedcomment",
+            "the one-line minibuffer drops control characters"
+        );
+        assert!(sent_bytes(&mut rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn feedback_works_without_leaving_text_mode() {
+        let (mut app, pane_id, mut rx) = emacs_app_with_channel(b"buffer text");
+        app.emacs_enter_text_mode();
+        assert_eq!(
+            app.state.emacs.text_mode.as_ref().map(|text| text.pane_id),
+            Some(pane_id)
+        );
+
+        open_feedback_prompt(&mut app);
+        type_ascii(&mut app, "motion felt wrong");
+        app.route_client_input(vec![0x0d]);
+
+        assert_eq!(sent_bytes(&mut rx), b"Herdr feedback:\nmotion felt wrong\r");
+        assert!(
+            app.state.emacs.text_mode.is_some(),
+            "submitting feedback preserves the frozen view"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_feedback_stays_open_with_a_visible_error() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
+        open_feedback_prompt(&mut app);
+        app.route_client_input(vec![0x0d]);
+
+        let prompt = app
+            .state
+            .emacs
+            .minibuffer
+            .as_ref()
+            .expect("prompt remains open");
+        assert!(prompt.prompt.starts_with("Feedback is empty"));
+        assert!(sent_bytes(&mut rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn c_x_question_mark_opens_the_bindings_cheat_sheet() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
+        app.route_client_input(vec![0x18, b'?']);
+
+        assert_eq!(app.state.mode, crate::app::state::Mode::KeybindHelp);
+        assert!(sent_bytes(&mut rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn m_x_refresh_herdr_requests_live_handoff_without_typing_into_pane() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
+        assert!(!app.state.request_live_handoff);
+
+        app.route_client_input(vec![0x1b, b'x']); // M-x
+        type_ascii(&mut app, "refresh-herdr");
+        app.route_client_input(vec![0x0d]); // RET
+
+        assert!(app.state.emacs.minibuffer.is_none());
+        assert!(app.state.request_live_handoff);
+        assert_eq!(app.state.emacs.echo.as_deref(), Some("Refreshing Herdr…"));
+        assert!(sent_bytes(&mut rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn m_x_herdr_onboarding_opens_the_replayable_tour() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
+
+        app.route_client_input(vec![0x1b, b'x']); // M-x
+        type_ascii(&mut app, "herdr-onboarding");
+        app.route_client_input(vec![0x0d]); // RET
+
+        assert!(app.state.emacs.minibuffer.is_none());
+        assert_eq!(app.state.mode, crate::app::state::Mode::Onboarding);
+        assert_eq!(app.state.emacs_onboarding_page, Some(0));
+        assert!(sent_bytes(&mut rx).is_empty());
+    }
+
     const SEARCH_LINES: &[u8] = b"needle one\r\nmiddle\r\nneedle two\r\nbravo\r\nneedle three\r\n";
 
     #[tokio::test]
@@ -2254,3 +2987,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod conformance_tests;

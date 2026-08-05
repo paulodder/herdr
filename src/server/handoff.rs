@@ -55,22 +55,10 @@ pub(crate) fn handoff_socket_path() -> PathBuf {
 
 #[cfg(unix)]
 pub(crate) fn spawn_handoff_import(
-    import_exe: Option<&Path>,
+    exe: &Path,
     socket_path: &Path,
     token: &str,
 ) -> io::Result<Child> {
-    let fallback_exe;
-    let exe = if let Some(import_exe) = import_exe {
-        import_exe
-    } else {
-        fallback_exe = std::env::current_exe().map_err(|err| {
-            io::Error::new(
-                err.kind(),
-                format!("failed to determine herdr executable path: {err}"),
-            )
-        })?;
-        &fallback_exe
-    };
     let mut command = Command::new(exe);
     command
         .arg("server")
@@ -97,6 +85,35 @@ pub(crate) fn spawn_handoff_import(
             ),
         )
     })
+}
+
+#[cfg(unix)]
+pub(crate) fn resolve_handoff_import_executable(import_exe: Option<&Path>) -> io::Result<PathBuf> {
+    let exe = match import_exe {
+        Some(path) => path.to_path_buf(),
+        None => crate::platform::handoff_import_executable().map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!("failed to determine herdr executable path: {err}"),
+            )
+        })?,
+    };
+    let metadata = std::fs::metadata(&exe).map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!(
+                "handoff import executable is unavailable at {}: {err}",
+                exe.display()
+            ),
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("handoff import executable is not a file: {}", exe.display()),
+        ));
+    }
+    Ok(exe)
 }
 
 #[cfg(unix)]
@@ -463,4 +480,26 @@ fn recv_fds(stream: &UnixStream, expected: usize) -> io::Result<Vec<RawFd>> {
 #[cfg(unix)]
 pub(crate) fn log_import_result(panes: usize) {
     info!(panes, "handoff import ready");
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_handoff_executable_is_validated_before_use() {
+        let current = std::env::current_exe().expect("test executable path");
+        assert_eq!(
+            resolve_handoff_import_executable(Some(&current)).expect("existing executable"),
+            current
+        );
+
+        let missing = std::env::temp_dir().join(format!(
+            "herdr-missing-handoff-executable-{}",
+            std::process::id()
+        ));
+        let err = resolve_handoff_import_executable(Some(&missing))
+            .expect_err("missing executable must fail before handoff");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
 }

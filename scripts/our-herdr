@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly our_herdr_repo="/home/paul/projects/herdr"
+readonly our_herdr_binary="$our_herdr_repo/target/our-herdr/herdr"
+readonly our_herdr_config="${HERDR_CONFIG_PATH:-/home/paul/.config/herdr/config.toml}"
+readonly our_herdr_rust_bin="/home/paul/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin"
+
+build_our_herdr() {
+    if [[ ! -x "$our_herdr_rust_bin/cargo" ]]; then
+        printf 'our-herdr: cargo not found: %s\n' "$our_herdr_rust_bin/cargo" >&2
+        exit 1
+    fi
+
+    env \
+        PATH="$our_herdr_rust_bin:/usr/local/bin:/usr/bin:/bin" \
+        ZIG="${ZIG:-/usr/bin/true}" \
+        "$our_herdr_rust_bin/cargo" build --profile our-herdr --locked
+}
+
+run_our_herdr() {
+    env \
+        -u HERDR_ENV \
+        -u HERDR_SOCKET_PATH \
+        -u HERDR_CLIENT_SOCKET_PATH \
+        HERDR_CONFIG_PATH="$our_herdr_config" \
+        "$our_herdr_binary" "$@"
+}
+
+if [[ "${1:-}" == "refresh" ]]; then
+    if (( $# != 1 )); then
+        printf 'usage: our-herdr refresh\n' >&2
+        exit 2
+    fi
+
+    cd "$our_herdr_repo"
+    build_our_herdr
+
+    server_status="$(run_our_herdr status server 2>/dev/null || true)"
+    if [[ "$server_status" == *"status: running"* ]]; then
+        run_our_herdr server live-handoff --import-exe "$our_herdr_binary"
+        printf 'our-herdr: refreshed the running server without stopping its panes\n' >&2
+    else
+        printf 'our-herdr: optimized binary built; no running server needed a handoff\n' >&2
+    fi
+    exit 0
+fi
+
+if [[ ! -x "$our_herdr_binary" ]]; then
+    printf 'our-herdr: optimized binary not found: %s\n' "$our_herdr_binary" >&2
+    printf 'build it with: our-herdr refresh\n' >&2
+    exit 1
+fi
+
+exec env \
+    -u HERDR_ENV \
+    -u HERDR_SOCKET_PATH \
+    -u HERDR_CLIENT_SOCKET_PATH \
+    HERDR_CONFIG_PATH="$our_herdr_config" \
+    "$our_herdr_binary" "$@"

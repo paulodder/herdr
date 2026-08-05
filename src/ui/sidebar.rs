@@ -540,6 +540,16 @@ fn resolved_agent_rows(app: &AppState, entry: &AgentPanelEntry) -> Vec<Vec<Resol
     tokens::agent_rows(&app.sidebar_agents, entry, label)
 }
 
+fn trailing_workspace(resolved: &[ResolvedToken]) -> Option<(&[ResolvedToken], &str)> {
+    let (last, leading) = resolved.split_last()?;
+    match last {
+        ResolvedToken::Workspace(workspace) if !leading.is_empty() => {
+            Some((leading, workspace.as_str()))
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn agent_entry_height_in_body(
     app: &AppState,
     entry: &AgentPanelEntry,
@@ -884,6 +894,7 @@ fn resolved_token_spans(
     state_text_style: Style,
     workspace_style: Style,
     secondary_style: Style,
+    agent_style: Style,
     custom_style: Style,
     p: &Palette,
     max_width: usize,
@@ -1011,10 +1022,16 @@ fn resolved_token_spans(
                     workspace_style,
                 ));
             }
-            ResolvedToken::Tab(text) | ResolvedToken::Pane(text) | ResolvedToken::Agent(text) => {
+            ResolvedToken::Tab(text) | ResolvedToken::Pane(text) => {
                 spans.push(Span::styled(
                     truncate_end(text, budgets[index]),
                     secondary_style,
+                ));
+            }
+            ResolvedToken::Agent(text) => {
+                spans.push(Span::styled(
+                    truncate_end(text, budgets[index]),
+                    agent_style,
                 ));
             }
             ResolvedToken::Branch(text) => {
@@ -1200,6 +1217,7 @@ fn render_workspace_list(
                 name_style,
                 branch_style,
                 branch_style,
+                branch_style,
                 p,
                 card.rect.width.saturating_sub(prefix_width) as usize,
             ));
@@ -1312,7 +1330,7 @@ fn render_agent_detail(
         } else {
             Style::default()
         };
-        let name_style = if is_active {
+        let title_style = if is_active {
             Style::default().fg(p.text).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
@@ -1322,26 +1340,91 @@ fn render_agent_detail(
         } else {
             Style::default().fg(label_color).add_modifier(Modifier::DIM)
         };
-        let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
+        let workspace_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
+        let secondary_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
+        let agent_style = Style::default().fg(p.mauve).add_modifier(Modifier::BOLD);
         let state_icon = agent_icon(detail.state, detail.seen, app.spinner_tick, p);
 
         for (row_index, resolved) in rows.iter().take(height as usize).enumerate() {
-            let mut spans = vec![Span::raw(if row_index == 0 { " " } else { "   " })];
-            spans.extend(resolved_token_spans(
-                resolved,
-                state_icon,
-                status_style,
-                name_style,
-                agent_style,
-                agent_style,
-                p,
-                body.width
-                    .saturating_sub(if row_index == 0 { 1 } else { 3 }) as usize,
-            ));
-            frame.render_widget(
-                Paragraph::new(Line::from(spans)).style(row_style),
-                Rect::new(body.x, row_y + row_index as u16, body.width, 1),
-            );
+            let y = row_y + row_index as u16;
+            let row_rect = Rect::new(body.x, y, body.width, 1);
+            frame.render_widget(Paragraph::new("").style(row_style), row_rect);
+
+            let prefix = if row_index == 0 { " " } else { "   " };
+            let prefix_width = display_width(prefix).min(body.width as usize);
+            if let Some((leading, workspace)) = trailing_workspace(resolved) {
+                let content_width = (body.width as usize).saturating_sub(prefix_width);
+                let leading_has_title = leading.iter().any(|token| {
+                    matches!(
+                        token,
+                        ResolvedToken::Tab(_)
+                            | ResolvedToken::Pane(_)
+                            | ResolvedToken::Agent(_)
+                            | ResolvedToken::TerminalTitle(_)
+                            | ResolvedToken::Custom(_)
+                    )
+                });
+                let workspace_limit = if leading_has_title && content_width > 1 {
+                    (content_width / 2).max(1)
+                } else {
+                    content_width
+                };
+                let workspace_width = display_width(workspace).min(workspace_limit);
+                let gap = usize::from(workspace_width < content_width);
+                let leading_width = content_width.saturating_sub(workspace_width + gap);
+                let mut spans = vec![Span::raw(prefix)];
+                spans.extend(resolved_token_spans(
+                    leading,
+                    state_icon,
+                    status_style,
+                    workspace_style,
+                    title_style,
+                    agent_style,
+                    secondary_style,
+                    p,
+                    leading_width,
+                ));
+                frame.render_widget(
+                    Paragraph::new(Line::from(spans)).style(row_style),
+                    Rect::new(
+                        body.x,
+                        y,
+                        u16::try_from(prefix_width + leading_width).unwrap_or(body.width),
+                        1,
+                    ),
+                );
+                if workspace_width > 0 {
+                    let workspace_width = u16::try_from(workspace_width).unwrap_or(body.width);
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(
+                            truncate_end(workspace, workspace_width as usize),
+                            workspace_style,
+                        ))
+                        .style(row_style)
+                        .alignment(Alignment::Right),
+                        Rect::new(
+                            body.x + body.width.saturating_sub(workspace_width),
+                            y,
+                            workspace_width,
+                            1,
+                        ),
+                    );
+                }
+            } else {
+                let mut spans = vec![Span::raw(prefix)];
+                spans.extend(resolved_token_spans(
+                    resolved,
+                    state_icon,
+                    status_style,
+                    workspace_style,
+                    title_style,
+                    agent_style,
+                    secondary_style,
+                    p,
+                    body.width.saturating_sub(prefix_width as u16) as usize,
+                ));
+                frame.render_widget(Paragraph::new(Line::from(spans)).style(row_style), row_rect);
+            }
         }
         row_y = row_y.saturating_add(height);
         if row_y < body_bottom {
@@ -1415,6 +1498,28 @@ mod tests {
     }
 
     #[test]
+    fn agent_tokens_use_their_dedicated_strong_style() {
+        let app = crate::app::state::AppState::test_new();
+        let agent_style = Style::default()
+            .fg(ratatui::style::Color::Magenta)
+            .add_modifier(Modifier::BOLD);
+        let spans = resolved_token_spans(
+            &[ResolvedToken::Agent("planner".into())],
+            ("", Style::default()),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            agent_style,
+            Style::default(),
+            &app.palette,
+            20,
+        );
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].style, agent_style);
+    }
+
+    #[test]
     fn default_agent_rows_remove_redundant_state_text() {
         let mut app = crate::app::state::AppState::test_new();
         let workspace = Workspace::test_new("one");
@@ -1446,7 +1551,7 @@ mod tests {
     }
 
     #[test]
-    fn narrow_agent_rows_preserve_later_tab_tokens() {
+    fn narrow_agent_rows_preserve_title_and_right_aligned_workspace() {
         let mut app = crate::app::state::AppState::test_new();
         let mut workspace = Workspace::test_new("very-long-workspace-name");
         let tab_idx = workspace.test_add_tab(Some("logs"));
@@ -1469,7 +1574,45 @@ mod tests {
         let first = row_text(buffer, body.y, 17);
 
         assert!(first.contains("logs"), "rendered row: {first:?}");
-        assert!(first.contains('·'), "rendered row: {first:?}");
+        assert!(first.ends_with('…'), "rendered row: {first:?}");
+    }
+
+    #[test]
+    fn agent_title_is_strong_and_clipped_before_right_aligned_workspace() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = Workspace::test_new("repo");
+        workspace.tabs[0].set_custom_name("very-long-agent-title".into());
+        let pane_id = workspace.tabs[0].root_pane;
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+        app.selected = 0;
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Pi);
+
+        let area = Rect::new(0, 0, 18, 20);
+        let mut terminal = Terminal::new(TestBackend::new(18, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let (_, agent_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+        let body = agent_panel_body_rect(agent_area, false);
+        let first = row_text(buffer, body.y, body.width);
+
+        assert!(first.ends_with("repo"), "rendered row: {first:?}");
+        assert!(first.contains("very"), "rendered row: {first:?}");
+        assert!(!first.contains("very-long-agent-title"));
+
+        let workspace_x = body.x + body.width - 4;
+        assert_eq!(buffer[(workspace_x, body.y)].symbol(), "r");
+        assert_eq!(buffer[(workspace_x, body.y)].fg, app.palette.overlay0);
+        let title_x = (body.x..workspace_x)
+            .find(|x| buffer[(*x, body.y)].symbol() == "v")
+            .expect("title should remain visible before workspace");
+        assert_eq!(buffer[(title_x, body.y)].fg, app.palette.text);
     }
 
     #[test]
@@ -1504,6 +1647,7 @@ mod tests {
         let spans = resolved_token_spans(
             &[ResolvedToken::TerminalTitle("修复🙂标题很长".into())],
             ("", Style::default()),
+            Style::default(),
             Style::default(),
             Style::default(),
             Style::default(),

@@ -939,6 +939,37 @@ impl HeadlessServer {
             ));
         }
 
+        // Resolve and spawn the replacement before disconnecting clients or
+        // pausing panes. A failed rebuild path must leave the current session
+        // completely untouched.
+        let resolved_import_exe = match crate::server::handoff::resolve_handoff_import_executable(
+            import_exe.as_deref(),
+        ) {
+            Ok(exe) => exe,
+            Err(err) => {
+                let _ = std::fs::remove_file(&socket_path);
+                return Err(err);
+            }
+        };
+        let mut import_child = match crate::server::handoff::spawn_handoff_import(
+            &resolved_import_exe,
+            &socket_path,
+            &token,
+        ) {
+            Ok(child) => child,
+            Err(err) => {
+                let _ = std::fs::remove_file(&socket_path);
+                return Err(err);
+            }
+        };
+        let child_pid = import_child.id();
+        info!(
+            pid = child_pid,
+            socket = %socket_path.display(),
+            executable = %resolved_import_exe.display(),
+            "spawned handoff import server"
+        );
+
         self.handoff_in_progress = true;
         self.disconnect_all_clients_for_handoff();
         let _ = reject_pending_client_connections(&self.client_listener);
@@ -947,6 +978,7 @@ impl HeadlessServer {
         for terminal_id in pane_by_terminal.keys() {
             if let Some(runtime) = self.app.terminal_runtimes.get(terminal_id) {
                 if let Err(err) = runtime.pause_handoff_reader(Duration::from_secs(2)) {
+                    crate::server::handoff::cleanup_failed_import_child(&mut import_child);
                     self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
                     return Err(err);
                 }
@@ -993,20 +1025,6 @@ impl HeadlessServer {
             params.expected_protocol,
             params.expected_version,
         );
-        let mut import_child = match crate::server::handoff::spawn_handoff_import(
-            import_exe.as_deref(),
-            &socket_path,
-            &token,
-        ) {
-            Ok(child) => child,
-            Err(err) => {
-                self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
-                return Err(err);
-            }
-        };
-        let child_pid = import_child.id();
-        info!(pid = child_pid, socket = %socket_path.display(), "spawned handoff import server");
-
         let mut fds = Vec::new();
         let duplicate_result = (|| {
             for (terminal_id, _) in &handoff_entries {
@@ -2298,9 +2316,7 @@ impl HeadlessServer {
             self.send_to_client(
                 client_id,
                 ServerMessage::ServerShutdown {
-                    reason: Some(
-                        "live update in progress; reconnect after handoff completes".to_owned(),
-                    ),
+                    reason: Some(crate::protocol::LIVE_HANDOFF_RECONNECT_REASON.to_owned()),
                 },
             );
             if let Some(client) = self.clients.get_mut(&client_id) {
@@ -2447,6 +2463,16 @@ impl HeadlessServer {
             self.reload_server_config(false);
         } else {
             self.sync_foreground_client_state();
+        }
+
+        if std::mem::take(&mut self.app.state.request_live_handoff) {
+            info!(client_id, "live handoff requested from in-app command");
+            if let Err(err) = self.perform_live_handoff(Default::default()) {
+                warn!(client_id, err = %err, "in-app live handoff failed");
+                self.app.state.emacs.echo = Some(format!("Refresh failed: {err}"));
+                return true;
+            }
+            return true;
         }
 
         if self.app.state.detach_requested {
@@ -3247,6 +3273,7 @@ impl HeadlessServer {
             && self.app.state.context_menu.is_none()
             && self.app.state.toast.is_none()
             && self.app.state.copy_feedback.is_none()
+            && !self.app.state.emacs.has_render_overlay()
             && !self.app.full_redraw_pending
     }
 
@@ -7410,6 +7437,79 @@ next_tab = ""
             client_rx.recv_timeout(Duration::from_millis(50)).is_err(),
             "retained path should not stream a frame that can overwrite copy feedback cells"
         );
+    }
+
+    #[tokio::test]
+    async fn text_mode_hides_terminal_cursor_and_declines_retained_pty_updates() {
+        let (mut server, client_rx, pane_id) = retained_test_server(b"codex");
+        server.app.state.emacs.text_mode = Some(crate::emacs::text_mode::TextModeState {
+            pane_id,
+            point: crate::emacs::text_mode::Pos { row: 0, col: 1 },
+            mark: None,
+            mark_active: false,
+            entry_offset_from_bottom: 0,
+            goto_line: None,
+            isearch: None,
+        });
+
+        server.render_and_stream();
+        let initial = read_server_frame(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initial text-mode frame"),
+        );
+        assert_eq!(
+            initial.cursor, None,
+            "the drawn Emacs cursor must suppress the pane's native cursor"
+        );
+
+        let runtime = server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .expect("runtime");
+        runtime.test_process_pty_bytes(b"\rZ");
+
+        assert!(!server.render_retained_pty_update_and_stream());
+        assert!(
+            client_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "retained PTY patches must not repaint over the drawn Emacs cursor"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_emacs_prefix_declines_retained_pty_updates() {
+        let (mut server, client_rx, pane_id) = retained_test_server(b"codex");
+        server.app.state.emacs.pending =
+            crate::emacs::keymap::parse_key_seq("C-x").expect("valid prefix");
+        server.render_and_stream();
+        let initial = read_server_frame(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initial prefix frame"),
+        );
+        assert!(frame_text(&initial).contains("C-x-"));
+
+        let runtime = server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .expect("runtime");
+        runtime.test_process_pty_bytes(b"\rZ");
+
+        assert!(!server.render_retained_pty_update_and_stream());
+        assert!(
+            client_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "retained PTY patches must not repaint over the pending prefix"
+        );
+
+        server.render_and_stream();
+        let refreshed = read_server_frame(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("full prefix frame"),
+        );
+        assert!(frame_text(&refreshed).contains("C-x-"));
     }
 
     #[tokio::test]

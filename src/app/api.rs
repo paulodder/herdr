@@ -1268,6 +1268,7 @@ mod tests {
                 previous_focus,
                 previous_zoomed,
                 temp_files: Vec::new(),
+                input_profile: crate::app::OverlayInputProfile::Normal,
             },
         );
         app
@@ -1840,6 +1841,7 @@ mod tests {
                 previous_focus,
                 previous_zoomed: false,
                 temp_files: Vec::new(),
+                input_profile: crate::app::OverlayInputProfile::Normal,
             },
         );
 

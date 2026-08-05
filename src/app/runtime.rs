@@ -139,6 +139,10 @@ impl App {
         let previous_mode = self.state.mode;
         let changed = match event {
             crate::raw_input::RawInputEvent::Key(key) => {
+                if self.emacs_intercept_key(key) {
+                    self.sync_prefix_input_source(previous_mode);
+                    return true;
+                }
                 let key_id = repeat_key_identity(&key);
                 match key.kind {
                     crossterm::event::KeyEventKind::Press => {

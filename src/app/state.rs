@@ -661,6 +661,7 @@ pub struct WorktreeOpenState {
     pub entries: Vec<WorktreeOpenEntry>,
     pub selected: usize,
     pub query: String,
+    pub(crate) query_input: super::text_input::TextInputState,
     pub search_focused: bool,
     pub error: Option<String>,
 }
@@ -837,6 +838,7 @@ pub(crate) enum NavigatorStateFilter {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NavigatorState {
     pub query: String,
+    pub(crate) query_input: super::text_input::TextInputState,
     pub selected: usize,
     pub scroll: usize,
     pub search_focused: bool,
@@ -1296,6 +1298,8 @@ pub struct ProductAnnouncementState {
 
 pub struct KeybindHelpState {
     pub scroll: u16,
+    pub query: String,
+    pub(crate) query_input: super::text_input::TextInputState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1341,6 +1345,9 @@ pub struct AppState {
     pub request_submit_worktree_open: bool,
     pub request_submit_worktree_remove: bool,
     pub request_reload_config: bool,
+    /// Set by an in-app command when the headless server should hand the
+    /// current session to the replacement Herdr executable on disk.
+    pub request_live_handoff: bool,
     /// Set when the headless server should ask attached clients to reload
     /// their client-local sound config from disk.
     pub request_client_config_reload: bool,
@@ -1356,8 +1363,14 @@ pub struct AppState {
     pub worktree_directory: std::path::PathBuf,
     pub collapsed_space_keys: std::collections::HashSet<String>,
     pub request_complete_onboarding: bool,
+    /// Active page of the replayable Emacs tour. `None` means the normal
+    /// first-run onboarding is being shown when `mode == Mode::Onboarding`.
+    pub emacs_onboarding_page: Option<usize>,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
+    pub(crate) name_input_edit: super::text_input::TextInputState,
+    /// Last text killed from a Herdr-owned field, shared for `C-y`.
+    pub(crate) text_input_yank: String,
     pub release_notes: Option<ReleaseNotesState>,
     pub product_announcement: Option<ProductAnnouncementState>,
     pub keybind_help: KeybindHelpState,
@@ -1701,6 +1714,7 @@ impl AppState {
             request_submit_worktree_open: false,
             request_submit_worktree_remove: false,
             request_reload_config: false,
+            request_live_handoff: false,
             request_client_config_reload: false,
             request_clipboard_write: None,
             creating_new_tab: false,
@@ -1712,11 +1726,18 @@ impl AppState {
             worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
             collapsed_space_keys: std::collections::HashSet::new(),
             request_complete_onboarding: false,
+            emacs_onboarding_page: None,
             name_input: String::new(),
             name_input_replace_on_type: false,
+            name_input_edit: super::text_input::TextInputState::default(),
+            text_input_yank: String::new(),
             release_notes: None,
             product_announcement: None,
-            keybind_help: KeybindHelpState { scroll: 0 },
+            keybind_help: KeybindHelpState {
+                scroll: 0,
+                query: String::new(),
+                query_input: super::text_input::TextInputState::default(),
+            },
             navigator: NavigatorState::default(),
             copy_mode: None,
             workspace_scroll: 0,

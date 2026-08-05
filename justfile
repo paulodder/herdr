@@ -11,6 +11,15 @@ test:
 test-one filter:
     cargo nextest run --locked "{{filter}}" --status-level fail --final-status-level fail --failure-output final --success-output never
 
+# Compare TEXT-mode behavior with the pinned GNU Emacs oracle and Herdr dispatcher
+emacs-conformance:
+    python3 scripts/emacs_conformance.py verify
+    cargo nextest run --locked emacs_conformance_corpus_matches --status-level fail --final-status-level fail --failure-output final --success-output never
+
+# Deliberately refresh committed oracle snapshots with the pinned GNU Emacs version
+emacs-conformance-update:
+    python3 scripts/emacs_conformance.py update
+
 # Run fast local lint checks
 lint:
     cargo fmt --check
@@ -42,6 +51,10 @@ install-hooks:
 # Build release binary
 build:
     cargo build --release --locked
+
+# Build the optimized, isolated local fork used by the `our-herdr` shortcut
+our-herdr-build:
+    cargo build --profile our-herdr --locked
 
 # Build the website and documentation
 website-build:

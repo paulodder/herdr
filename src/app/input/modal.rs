@@ -8,6 +8,7 @@ use crate::{
         state::{
             AppState, ContextMenuKind, ContextMenuState, MenuListState, Mode, NavigatorStateFilter,
         },
+        text_input::{action_for_key, TextInputState},
         App,
     },
     input::TerminalKey,
@@ -77,16 +78,17 @@ pub(crate) enum GlobalMenuAction {
     Detach,
     WhatsNew,
     Keybinds,
+    EmacsOnboarding,
     ReloadConfig,
     Settings,
 }
 
 pub(super) fn global_menu_actions(state: &AppState) -> Vec<GlobalMenuAction> {
-    let mut actions = vec![
-        GlobalMenuAction::Settings,
-        GlobalMenuAction::Keybinds,
-        GlobalMenuAction::ReloadConfig,
-    ];
+    let mut actions = vec![GlobalMenuAction::Settings, GlobalMenuAction::Keybinds];
+    if state.emacs.enabled {
+        actions.push(GlobalMenuAction::EmacsOnboarding);
+    }
+    actions.push(GlobalMenuAction::ReloadConfig);
     if state.update_available.is_some() || state.latest_release_notes_available {
         actions.push(GlobalMenuAction::WhatsNew);
     }
@@ -101,7 +103,29 @@ pub(super) fn open_global_menu(state: &mut AppState) {
 
 pub(super) fn open_keybind_help(state: &mut AppState) {
     state.keybind_help.scroll = 0;
+    state.keybind_help.query.clear();
+    state.keybind_help.query_input.reset();
     state.mode = Mode::KeybindHelp;
+}
+
+pub(super) fn open_emacs_onboarding(state: &mut AppState) {
+    state.emacs_onboarding_page = Some(0);
+    state.mode = Mode::Onboarding;
+}
+
+fn edit_text_input(
+    text: &mut String,
+    input: &mut TextInputState,
+    yank: &mut String,
+    key: KeyEvent,
+) -> bool {
+    let Some(action) = action_for_key(key) else {
+        return false;
+    };
+    if let Some(killed) = input.apply(text, action, yank) {
+        *yank = killed;
+    }
+    true
 }
 
 fn open_update_release_notes(state: &mut AppState) {
@@ -134,6 +158,7 @@ pub(super) fn apply_global_menu_action(state: &mut AppState, action: GlobalMenuA
         }
         GlobalMenuAction::WhatsNew => open_update_release_notes(state),
         GlobalMenuAction::Keybinds => open_keybind_help(state),
+        GlobalMenuAction::EmacsOnboarding => open_emacs_onboarding(state),
         GlobalMenuAction::ReloadConfig => {
             state.request_reload_config = true;
             leave_modal(state);
@@ -167,13 +192,11 @@ pub(crate) fn handle_navigator_key(
             KeyCode::Esc => {
                 state.navigator.search_focused = false;
             }
+            KeyCode::Char('g') if key.modifiers == KeyModifiers::CONTROL => {
+                state.navigator.search_focused = false;
+            }
             KeyCode::Enter => {
                 state.accept_navigator_selection_from(terminal_runtimes);
-            }
-            KeyCode::Backspace => {
-                state.navigator.state_filter = None;
-                state.navigator.query.pop();
-                state.clamp_navigator_selection_from(terminal_runtimes);
             }
             KeyCode::Up => state.move_navigator_selection_from(terminal_runtimes, -1),
             KeyCode::Down => state.move_navigator_selection_from(terminal_runtimes, 1),
@@ -183,17 +206,23 @@ pub(crate) fn handle_navigator_key(
             KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
                 state.move_navigator_selection_from(terminal_runtimes, -1)
             }
-            KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => {
-                state.navigator.query.clear();
-                state.navigator.state_filter = None;
-                state.clamp_navigator_selection_from(terminal_runtimes);
-            }
             KeyCode::Char(c)
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
             {
                 insert_navigator_search_text(state, terminal_runtimes, &c.to_string());
             }
-            _ => {}
+            _ => {
+                let edited = edit_text_input(
+                    &mut state.navigator.query,
+                    &mut state.navigator.query_input,
+                    &mut state.text_input_yank,
+                    key,
+                );
+                if edited {
+                    state.navigator.state_filter = None;
+                    state.clamp_navigator_selection_from(terminal_runtimes);
+                }
+            }
         }
         return;
     }
@@ -202,12 +231,19 @@ pub(crate) fn handle_navigator_key(
         KeyCode::Esc => {
             leave_modal(state);
         }
+        KeyCode::Char('q') if key.modifiers.is_empty() => {
+            leave_modal(state);
+        }
         KeyCode::Enter => {
             state.accept_navigator_selection_from(terminal_runtimes);
         }
         KeyCode::Char('/') => {
             state.navigator.state_filter = None;
             state.navigator.search_focused = true;
+            state
+                .navigator
+                .query_input
+                .move_to_end(&state.navigator.query);
             state.clamp_navigator_selection_from(terminal_runtimes);
         }
         KeyCode::Backspace if state.navigator.state_filter.is_some() => {
@@ -216,26 +252,31 @@ pub(crate) fn handle_navigator_key(
         }
         KeyCode::Char('a') if key.modifiers.is_empty() => {
             state.navigator.query.clear();
+            state.navigator.query_input.reset();
             state.navigator.state_filter = None;
             state.clamp_navigator_selection_from(terminal_runtimes);
         }
         KeyCode::Char('b') if key.modifiers.is_empty() => {
             state.navigator.query.clear();
+            state.navigator.query_input.reset();
             state.navigator.state_filter = Some(NavigatorStateFilter::Blocked);
             state.clamp_navigator_selection_from(terminal_runtimes);
         }
         KeyCode::Char('w') if key.modifiers.is_empty() => {
             state.navigator.query.clear();
+            state.navigator.query_input.reset();
             state.navigator.state_filter = Some(NavigatorStateFilter::Working);
             state.clamp_navigator_selection_from(terminal_runtimes);
         }
         KeyCode::Char('i') if key.modifiers.is_empty() => {
             state.navigator.query.clear();
+            state.navigator.query_input.reset();
             state.navigator.state_filter = Some(NavigatorStateFilter::Idle);
             state.clamp_navigator_selection_from(terminal_runtimes);
         }
         KeyCode::Char('d') if key.modifiers.is_empty() => {
             state.navigator.query.clear();
+            state.navigator.query_input.reset();
             state.navigator.state_filter = Some(NavigatorStateFilter::Done);
             state.clamp_navigator_selection_from(terminal_runtimes);
         }
@@ -280,21 +321,46 @@ pub(crate) fn insert_navigator_search_text(
         return;
     }
     state.navigator.state_filter = None;
-    state.navigator.query.push_str(text);
+    state
+        .navigator
+        .query_input
+        .insert_str(&mut state.navigator.query, text);
     state.clamp_navigator_selection_from(terminal_runtimes);
 }
 
 pub(crate) fn handle_keybind_help_key(state: &mut AppState, key: KeyEvent) {
     match key.code {
-        KeyCode::Up | KeyCode::Char('k') => state.scroll_keybind_help(-1),
-        KeyCode::Down | KeyCode::Char('j') => state.scroll_keybind_help(1),
+        KeyCode::Up => state.scroll_keybind_help(-1),
+        KeyCode::Down => state.scroll_keybind_help(1),
         KeyCode::PageUp => state.scroll_keybind_help(-8),
         KeyCode::PageDown => state.scroll_keybind_help(8),
         KeyCode::Home => state.keybind_help.scroll = 0,
         KeyCode::End => state.keybind_help.scroll = state.keybind_help_max_scroll(),
-        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?') => leave_modal(state),
-        _ => {}
+        KeyCode::Esc | KeyCode::Enter => leave_modal(state),
+        KeyCode::Char('g') if key.modifiers == KeyModifiers::CONTROL => leave_modal(state),
+        KeyCode::Char('q') if key.modifiers.is_empty() => leave_modal(state),
+        KeyCode::Char(c) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+            insert_keybind_help_search_text(state, &c.to_string());
+        }
+        _ => {
+            if edit_text_input(
+                &mut state.keybind_help.query,
+                &mut state.keybind_help.query_input,
+                &mut state.text_input_yank,
+                key,
+            ) {
+                state.keybind_help.scroll = 0;
+            }
+        }
     }
+}
+
+pub(crate) fn insert_keybind_help_search_text(state: &mut AppState, text: &str) {
+    state
+        .keybind_help
+        .query_input
+        .insert_str(&mut state.keybind_help.query, text);
+    state.keybind_help.scroll = 0;
 }
 
 pub(super) fn open_rename_workspace(
@@ -307,6 +373,7 @@ pub(super) fn open_rename_workspace(
     state.name_input =
         state.workspaces[ws_idx].display_name_from(&state.terminals, terminal_runtimes);
     state.name_input_replace_on_type = false;
+    state.name_input_edit = TextInputState::at_end(&state.name_input);
     state.mode = Mode::RenameWorkspace;
 }
 
@@ -318,6 +385,14 @@ pub(super) fn open_rename_active_tab(state: &mut AppState, replace_on_type: bool
         if let Some(name) = ws.active_tab_display_name() {
             state.name_input = name;
             state.name_input_replace_on_type = replace_on_type;
+            state.name_input_edit = TextInputState::at_end(&state.name_input);
+            if replace_on_type {
+                state.name_input_edit.apply(
+                    &mut state.name_input,
+                    crate::app::text_input::TextInputAction::SelectAll,
+                    "",
+                );
+            }
             state.mode = Mode::RenameTab;
         }
     }
@@ -338,6 +413,14 @@ pub(super) fn open_rename_pane(state: &mut AppState, pane_id: crate::layout::Pan
         .and_then(|t| t.manual_label.clone())
         .unwrap_or_default();
     state.name_input_replace_on_type = terminal.and_then(|t| t.manual_label.as_ref()).is_none();
+    state.name_input_edit = TextInputState::at_end(&state.name_input);
+    if state.name_input_replace_on_type {
+        state.name_input_edit.apply(
+            &mut state.name_input,
+            crate::app::text_input::TextInputAction::SelectAll,
+            "",
+        );
+    }
     state.mode = Mode::RenamePane;
 }
 
@@ -355,6 +438,12 @@ pub(super) fn open_new_tab_dialog(state: &mut AppState) {
     state.rename_pane_target = None;
     state.name_input = next_new_tab_default_name(state);
     state.name_input_replace_on_type = true;
+    state.name_input_edit = TextInputState::at_end(&state.name_input);
+    state.name_input_edit.apply(
+        &mut state.name_input,
+        crate::app::text_input::TextInputAction::SelectAll,
+        "",
+    );
     state.mode = Mode::RenameTab;
 }
 
@@ -511,98 +600,46 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
 fn clear_rename_input(state: &mut AppState) {
     state.name_input.clear();
     state.name_input_replace_on_type = false;
+    state.name_input_edit.reset();
 }
 
 pub(crate) fn insert_rename_input_text(state: &mut AppState, text: &str) {
     if state.name_input_replace_on_type {
         clear_rename_input(state);
     }
-    state.name_input.push_str(text);
-}
-
-fn delete_rename_input_char(state: &mut AppState) {
-    if state.name_input_replace_on_type {
-        clear_rename_input(state);
-    } else {
-        state.name_input.pop();
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RenameWordDeleteClass {
-    Word,
-    Separator,
-}
-
-fn rename_word_delete_class(ch: char) -> RenameWordDeleteClass {
-    if ch.is_alphanumeric() || ch == '_' {
-        RenameWordDeleteClass::Word
-    } else {
-        RenameWordDeleteClass::Separator
-    }
-}
-
-fn delete_rename_input_word(state: &mut AppState) {
-    if state.name_input_replace_on_type {
-        clear_rename_input(state);
-        return;
-    }
-
-    while state
-        .name_input
-        .chars()
-        .last()
-        .is_some_and(char::is_whitespace)
-    {
-        state.name_input.pop();
-    }
-
-    let Some(class) = state
-        .name_input
-        .chars()
-        .last()
-        .map(rename_word_delete_class)
-    else {
-        return;
-    };
-
-    while state
-        .name_input
-        .chars()
-        .last()
-        .is_some_and(|ch| !ch.is_whitespace() && rename_word_delete_class(ch) == class)
-    {
-        state.name_input.pop();
-    }
+    state
+        .name_input_edit
+        .insert_str(&mut state.name_input, text);
 }
 
 fn handle_rename_edit_key(state: &mut AppState, key: KeyEvent) {
     match key.code {
-        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            clear_rename_input(state);
-        }
         KeyCode::Backspace if key.modifiers.contains(KeyModifiers::SUPER) => {
             clear_rename_input(state);
         }
-        KeyCode::Backspace
-            if key.modifiers.contains(KeyModifiers::CONTROL)
-                || key.modifiers.contains(KeyModifiers::ALT) =>
-        {
-            delete_rename_input_word(state);
-        }
-        KeyCode::Char('h' | 'w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            delete_rename_input_word(state);
-        }
-        KeyCode::Backspace => delete_rename_input_char(state),
         KeyCode::Char(c) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
             insert_rename_input_text(state, &c.to_string());
         }
-        _ => {}
+        _ => {
+            if state.name_input_replace_on_type && action_for_key(key).is_some() {
+                state.name_input_replace_on_type = false;
+            }
+            edit_text_input(
+                &mut state.name_input,
+                &mut state.name_input_edit,
+                &mut state.text_input_yank,
+                key,
+            );
+        }
     }
 }
 
 #[cfg(test)]
 pub(crate) fn handle_rename_key(state: &mut AppState, key: KeyEvent) {
+    if key.code == KeyCode::Char('g') && key.modifiers == KeyModifiers::CONTROL {
+        apply_rename_action(state, ModalAction::Cancel);
+        return;
+    }
     if let Some(action) = modal_action_from_key(&key, RENAME_ACTIONS) {
         apply_rename_action(state, action);
         return;
@@ -900,6 +937,10 @@ pub(crate) fn handle_context_menu_key(
 
 impl App {
     pub(crate) fn handle_rename_key_via_api(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Char('g') && key.modifiers == KeyModifiers::CONTROL {
+            self.apply_rename_mouse_action_via_api(ModalAction::Cancel);
+            return;
+        }
         if let Some(action) = modal_action_from_key(&key, RENAME_ACTIONS) {
             self.apply_rename_mouse_action_via_api(action);
             return;
@@ -1584,7 +1625,7 @@ mod tests {
     }
 
     #[test]
-    fn rename_modal_does_not_insert_modified_shortcut_chars() {
+    fn rename_modal_applies_control_motion_before_shifted_text() {
         let mut state = state_with_workspaces(&["test"]);
         state.mode = Mode::RenameWorkspace;
         state.name_input = "website".into();
@@ -1599,7 +1640,94 @@ mod tests {
             &mut state,
             KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::SHIFT),
         );
-        assert_eq!(state.name_input, "websiteZ");
+        assert_eq!(state.name_input, "Zwebsite");
+    }
+
+    #[test]
+    fn keybind_help_typing_filters_and_editing_resets_scroll() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_keybind_help(&mut state);
+        state.keybind_help.scroll = 4;
+
+        handle_keybind_help_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty()),
+        );
+        handle_keybind_help_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT),
+        );
+        handle_keybind_help_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT),
+        );
+
+        assert_eq!(state.keybind_help.query, "jK?");
+        assert_eq!(state.keybind_help.scroll, 0);
+
+        handle_keybind_help_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()),
+        );
+        assert_eq!(state.keybind_help.query, "jK");
+
+        handle_keybind_help_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        );
+        assert!(state.keybind_help.query.is_empty());
+    }
+
+    #[test]
+    fn opening_keybind_help_clears_the_previous_search() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybind_help.query = "forward".into();
+        state.keybind_help.scroll = 3;
+
+        open_keybind_help(&mut state);
+
+        assert_eq!(state.mode, Mode::KeybindHelp);
+        assert!(state.keybind_help.query.is_empty());
+        assert_eq!(state.keybind_help.scroll, 0);
+    }
+
+    #[test]
+    fn q_closes_keybind_help_without_quitting_herdr() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_keybind_help(&mut state);
+
+        handle_keybind_help_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Terminal);
+        assert!(!state.should_quit);
+        assert!(!state.detach_requested);
+    }
+
+    #[test]
+    fn keybind_help_supports_emacs_editing_keys() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_keybind_help(&mut state);
+        insert_keybind_help_search_text(&mut state, "forward-char");
+
+        handle_keybind_help_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT),
+        );
+        handle_keybind_help_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(state.keybind_help.query, "forward-");
+        assert_eq!(state.text_input_yank, "char");
+
+        handle_keybind_help_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(state.keybind_help.query, "forward-char");
     }
 
     #[test]
@@ -1614,6 +1742,61 @@ mod tests {
 
         assert_eq!(state.navigator.query, "beta");
         assert_eq!(state.navigator.state_filter, None);
+    }
+
+    #[test]
+    fn navigator_q_closes_while_browsing_but_types_while_searching() {
+        let mut state = state_with_workspaces(&["alpha", "beta"]);
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.mode = Mode::Navigator;
+
+        handle_navigator_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()),
+        );
+        assert_eq!(state.mode, Mode::Terminal);
+        assert!(!state.should_quit);
+        assert!(!state.detach_requested);
+
+        state.mode = Mode::Navigator;
+        state.navigator.search_focused = true;
+        handle_navigator_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()),
+        );
+        assert_eq!(state.mode, Mode::Navigator);
+        assert_eq!(state.navigator.query, "q");
+    }
+
+    #[test]
+    fn navigator_search_supports_motion_delete_select_and_replace() {
+        let mut state = state_with_workspaces(&["alpha", "beta"]);
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.mode = Mode::Navigator;
+        state.navigator.search_focused = true;
+        insert_navigator_search_text(&mut state, &terminal_runtimes, "alpha beta");
+
+        for key in [
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT),
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+        ] {
+            handle_navigator_key(&mut state, &terminal_runtimes, key);
+        }
+        assert_eq!(state.navigator.query, "alpha eta");
+
+        handle_navigator_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT),
+        );
+        handle_navigator_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Char('z'), KeyModifiers::empty()),
+        );
+        assert_eq!(state.navigator.query, "z");
     }
 
     #[test]

@@ -111,6 +111,74 @@ fn spawn_client_process(
     }
 }
 
+fn read_pty_output_in_background(
+    mut reader: Box<dyn Read + Send>,
+) -> std::sync::mpsc::Receiver<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let mut buf = [0_u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(count) => {
+                    if tx
+                        .send(String::from_utf8_lossy(&buf[..count]).into_owned())
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(_) => thread::sleep(Duration::from_millis(10)),
+            }
+        }
+    });
+    rx
+}
+
+fn strip_terminal_control_sequences(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut plain = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != 0x1b {
+            plain.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+
+        index += 1;
+        match bytes.get(index).copied() {
+            Some(b'[') => {
+                index += 1;
+                while index < bytes.len() {
+                    let byte = bytes[index];
+                    index += 1;
+                    if (0x40..=0x7e).contains(&byte) {
+                        break;
+                    }
+                }
+            }
+            Some(b']') => {
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == 0x07 {
+                        index += 1;
+                        break;
+                    }
+                    if bytes[index] == 0x1b && bytes.get(index + 1) == Some(&b'\\') {
+                        index += 2;
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+            Some(_) => index += 1,
+            None => {}
+        }
+    }
+    String::from_utf8_lossy(&plain).into_owned()
+}
+
 fn spawn_server(
     config_home: &PathBuf,
     runtime_dir: &PathBuf,
@@ -586,6 +654,94 @@ fn server_crash_after_attach_causes_lost_connection_error() {
     let _ = spawned.child.wait();
 
     cleanup_test_base(&base);
+}
+
+#[test]
+fn thin_client_reconnects_and_renders_after_live_handoff() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
+    let mut thin_client = spawn_client_process(&config_home, &runtime_dir, &api_socket);
+    let thin_reader = thin_client
+        ._master
+        .as_ref()
+        .expect("thin client master")
+        .try_clone_reader()
+        .expect("clone client PTY reader");
+    let output_rx = read_pty_output_in_background(thin_reader);
+
+    let initial_deadline = Instant::now() + Duration::from_secs(8);
+    let mut initial_output = String::new();
+    while Instant::now() < initial_deadline {
+        if let Ok(chunk) = output_rx.recv_timeout(Duration::from_millis(100)) {
+            initial_output.push_str(&chunk);
+            if initial_output.contains("workspace") || initial_output.contains("terminal") {
+                break;
+            }
+        }
+    }
+    assert!(
+        !initial_output.is_empty(),
+        "thin client must render before handoff"
+    );
+
+    let handoff = send_json_request(
+        &api_socket,
+        r#"{"id":"test:handoff","method":"server.live_handoff","params":{}}"#,
+    );
+    assert!(handoff.get("error").is_none(), "handoff failed: {handoff}");
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
+    while output_rx.try_recv().is_ok() {}
+
+    let workspaces = send_json_request(
+        &api_socket,
+        r#"{"id":"workspace_list","method":"workspace.list","params":{}}"#,
+    );
+    let workspace_id = workspaces["result"]["workspaces"][0]["workspace_id"]
+        .as_str()
+        .expect("startup workspace id");
+    let pane_id = first_pane_id_in_workspace(&api_socket, workspace_id);
+    let marker = "HERDR_RECONNECTED_AFTER_HANDOFF";
+    let send = send_json_request(
+        &api_socket,
+        &format!(
+            r#"{{"id":"pane_input","method":"pane.send_input","params":{{"pane_id":"{pane_id}","text":"printf {marker}","keys":["Enter"]}}}}"#
+        ),
+    );
+    assert!(send.get("error").is_none(), "pane input failed: {send}");
+
+    let render_deadline = Instant::now() + Duration::from_secs(10);
+    let mut reconnected_output = String::new();
+    while Instant::now() < render_deadline
+        && !strip_terminal_control_sequences(&reconnected_output).contains(marker)
+    {
+        assert!(
+            thin_client.child.try_wait().ok().flatten().is_none(),
+            "thin client exited instead of reconnecting"
+        );
+        if let Ok(chunk) = output_rx.recv_timeout(Duration::from_millis(100)) {
+            reconnected_output.push_str(&chunk);
+        }
+    }
+    assert!(
+        strip_terminal_control_sequences(&reconnected_output).contains(marker),
+        "thin client did not render pane output after reconnect: {reconnected_output:?}"
+    );
+
+    let _ = send_json_request(
+        &api_socket,
+        r#"{"id":"test:stop","method":"server.stop","params":{}}"#,
+    );
+    drop(thin_client);
+    cleanup_spawned_herdr(spawned, base);
 }
 
 #[test]

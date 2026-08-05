@@ -382,7 +382,29 @@ impl AppState {
         for (ws_idx, ws) in self.workspaces.iter().enumerate() {
             let workspace_label = ws.display_name_from(&self.terminals, terminal_runtimes);
             let activity = workspace_activity_summary(ws, &self.terminals);
-            let workspace_search_text = format!("{workspace_label} {activity}").to_lowercase();
+            let mut workspace_search_terms = vec![workspace_label.clone(), activity.clone()];
+            if let Some(cwd) = ws.resolved_identity_cwd_from(&self.terminals, terminal_runtimes) {
+                workspace_search_terms.push(cwd.display().to_string());
+            }
+            workspace_search_terms.push(ws.identity_cwd.display().to_string());
+            if let Some(custom_name) = &ws.custom_name {
+                workspace_search_terms.push(custom_name.clone());
+            }
+            if let Some(branch) = ws.branch() {
+                workspace_search_terms.push(branch);
+            }
+            if let Some(space) = ws.worktree_space() {
+                workspace_search_terms.extend([
+                    space.label.clone(),
+                    space.repo_root.display().to_string(),
+                    space.checkout_path.display().to_string(),
+                ]);
+            }
+            if let Some(space) = &ws.cached_git_space {
+                workspace_search_terms
+                    .extend([space.label.clone(), space.repo_root.display().to_string()]);
+            }
+            let workspace_search_text = workspace_search_terms.join(" ").to_lowercase();
             let workspace_matches = match query_kind {
                 NavigatorQueryKind::Empty => true,
                 NavigatorQueryKind::State(filter) => {
@@ -551,7 +573,26 @@ impl AppState {
                 (None, _) => "shell".to_string(),
             };
             let is_current = self.is_active_pane(ws_idx, tab_idx, pane_id);
-            let search_text = format!("{label} {meta}").to_lowercase();
+            let mut search_terms = vec![label.clone(), meta.clone()];
+            if let Some(terminal) = terminal {
+                search_terms.push(terminal.cwd.display().to_string());
+                if let Some(title) = &terminal.terminal_title {
+                    search_terms.push(title.clone());
+                }
+                if let Some(manual_label) = &terminal.manual_label {
+                    search_terms.push(manual_label.clone());
+                }
+                if let Some(agent_name) = &terminal.agent_name {
+                    search_terms.push(agent_name.clone());
+                }
+                if let Some(agent) = terminal.effective_agent_label() {
+                    search_terms.push(agent.to_string());
+                }
+                if let Some(argv) = &terminal.launch_argv {
+                    search_terms.extend(argv.iter().cloned());
+                }
+            }
+            let search_text = search_terms.join(" ").to_lowercase();
             rows.push(NavigatorRow {
                 target: NavigatorTarget::Pane {
                     ws_idx,
@@ -3379,7 +3420,7 @@ mod tests {
         );
         let root = std::env::temp_dir().join(unique);
         let stale_cwd = root.join("issue-264-nix-support");
-        let live_cwd = root.join("herdr");
+        let live_cwd = root.join("runtime-label");
         std::fs::create_dir_all(stale_cwd.join(".git")).unwrap();
         std::fs::create_dir_all(live_cwd.join(".git")).unwrap();
 
@@ -3417,7 +3458,7 @@ mod tests {
         let mut runtime_registry = crate::terminal::TerminalRuntimeRegistry::new();
         runtime_registry.insert(terminal_id, runtime);
         state.open_navigator_from(&runtime_registry);
-        state.navigator.query = "herdr".into();
+        state.navigator.query = "runtime-label".into();
         let rows = state.navigator_rows_from(&runtime_registry);
 
         for (_, runtime) in runtime_registry.drain() {
@@ -3426,7 +3467,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
 
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].label, "herdr (1)");
+        assert_eq!(rows[0].label, "runtime-label (1)");
     }
 
     #[test]
@@ -3534,14 +3575,54 @@ mod tests {
     }
 
     #[test]
-    fn navigator_search_only_matches_visible_row_text() {
+    fn navigator_search_matches_workspace_directory_and_worktree_metadata() {
         let mut state = app_with_workspaces(&["one"]);
         state.workspaces[0].identity_cwd = "/tmp/herdr-worktrees/issue-work".into();
+        state.workspaces[0].cached_git_branch = Some("feature/navigator-search".into());
+        state.workspaces[0].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr-review".into(),
+            repo_root: "/src/herdr".into(),
+            checkout_path: "/src/reviews/keyboard-navigation".into(),
+            is_linked_worktree: true,
+        });
 
         state.open_navigator();
-        state.navigator.query = "work".into();
 
-        assert!(state.navigator_rows().is_empty());
+        for query in [
+            "issue-work",
+            "navigator-search",
+            "herdr-review",
+            "keyboard-navigation",
+        ] {
+            state.navigator.query = query.into();
+            assert!(state.navigator_rows().iter().any(|row| matches!(
+                row.target,
+                crate::app::state::NavigatorTarget::Workspace { ws_idx: 0 }
+            )));
+        }
+    }
+
+    #[test]
+    fn navigator_search_matches_pane_directory_and_launch_command() {
+        let mut state = app_with_workspaces(&["one"]);
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].terminal_id(pane_id).cloned().unwrap();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.cwd = "/src/herdr-worktrees/search-panes".into();
+        terminal.launch_argv = Some(vec!["/usr/local/bin/codex".into(), "--resume".into()]);
+        state.open_navigator();
+
+        for query in ["search-panes", "codex", "resume"] {
+            state.navigator.query = query.into();
+            assert!(state.navigator_rows().iter().any(|row| matches!(
+                row.target,
+                crate::app::state::NavigatorTarget::Pane {
+                    pane_id: found,
+                    ..
+                } if found == pane_id
+            )));
+        }
     }
 
     #[test]

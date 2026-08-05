@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Added
+- Added Emacs `open-at-point` on `ctrl+alt+o`. URLs open in EWW and existing files, directories, and `path:line:column` references open in a temporary terminal `emacsclient` frame backed by the user's persistent Emacs server.
+- Added a replayable Emacs onboarding tour, available from the sidebar menu or with `M-x herdr-onboarding`, covering Herdr's hierarchy, primary navigation chords, and parallel mouse controls.
+- Emacs TEXT mode now supports `ctrl+l` recentering with the standard middle, top, and bottom cycle around point.
 - Emacs TEXT mode now supports incremental smart-case scrollback search with `ctrl+s` and `ctrl+r`, live match highlighting, repeat/wrap navigation, query history, and accept/abort behavior.
 - Copy mode now supports literal smart-case search with `/` and `?`, repeating with `n` and `N`, match highlighting, and tmux-style cross-line `w`/`b`/`e` word motions. (#1230)
 - Added maki detection with idle, working, and blocked screen states. (#1301, thanks @tontinton)

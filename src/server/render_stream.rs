@@ -291,14 +291,16 @@ pub(crate) fn render_virtual_with_runtime_registry(
     cell_size: crate::kitty_graphics::HostCellSize,
 ) -> (ratatui::buffer::Buffer, Option<CursorState>) {
     let pre_compute_suppresses_focused_terminal_cursor =
-        focused_terminal_suppresses_host_cursor(app_state, terminal_runtimes);
+        focused_terminal_suppresses_host_cursor(app_state, terminal_runtimes)
+            || focused_pane_uses_drawn_emacs_cursor(app_state);
     if resize_panes {
         crate::ui::compute_view_with_cell_size(app_state, terminal_runtimes, area, cell_size);
     } else {
         crate::ui::compute_view_without_resizing_panes(app_state, terminal_runtimes, area);
     }
     let suppress_focused_terminal_cursor = pre_compute_suppresses_focused_terminal_cursor
-        || focused_terminal_suppresses_host_cursor(app_state, terminal_runtimes);
+        || focused_terminal_suppresses_host_cursor(app_state, terminal_runtimes)
+        || focused_pane_uses_drawn_emacs_cursor(app_state);
 
     let backend = CursorTrackingBackend::new(area.width, area.height);
     let mut terminal = ratatui::Terminal::new(backend).expect("TestBackend::new should never fail");
@@ -393,6 +395,9 @@ pub(crate) fn focused_terminal_cursor(
         .pane_infos
         .iter()
         .find(|info| info.is_focused)?;
+    if app_state.emacs.owns_pane_cursor(info.id) {
+        return None;
+    }
     if !app_state.pane_exposes_host_cursor(ws_idx, info.id) {
         return None;
     }
@@ -449,6 +454,15 @@ pub(crate) fn focused_terminal_cursor(
     } else {
         None
     }
+}
+
+fn focused_pane_uses_drawn_emacs_cursor(app_state: &AppState) -> bool {
+    app_state
+        .view
+        .pane_infos
+        .iter()
+        .find(|info| info.is_focused)
+        .is_some_and(|info| app_state.emacs.owns_pane_cursor(info.id))
 }
 
 fn focused_terminal_owns_host_cursor(

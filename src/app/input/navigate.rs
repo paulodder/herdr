@@ -124,7 +124,14 @@ impl App {
         let key = raw_key.as_key_event();
         self.state.update_dismissed = true;
 
-        if key.code == KeyCode::Esc || self.state.is_prefix_key(raw_key) {
+        // `Mode::Navigate` is the workspace picker. A plain `q` is a local
+        // close action here, never the globally configurable detach action.
+        // Keep this before keybinding dispatch so a picker cannot terminate
+        // a no-session Herdr process.
+        if key.code == KeyCode::Esc
+            || (key.code == KeyCode::Char('q') && key.modifiers.is_empty())
+            || self.state.is_prefix_key(raw_key)
+        {
             leave_navigate_mode(&mut self.state);
             return;
         }
@@ -1002,6 +1009,7 @@ impl App {
                 previous_focus,
                 previous_zoomed,
                 temp_files,
+                input_profile: super::super::OverlayInputProfile::Normal,
             },
         );
         self.state.remove_alias_shadowed_by_new_pane(new_pane_id);
@@ -1078,6 +1086,7 @@ impl App {
                     previous_focus,
                     previous_zoomed,
                     temp_files,
+                    input_profile: super::super::OverlayInputProfile::Normal,
                 },
             );
             (tab_idx, new_pane, ws.id.clone())
@@ -1257,7 +1266,10 @@ pub(crate) fn handle_navigate_key(state: &mut AppState, key: KeyEvent) {
     state.update_dismissed = true;
     let terminal_key = TerminalKey::from(key);
 
-    if state.is_prefix_key(terminal_key) || key.code == KeyCode::Esc {
+    if state.is_prefix_key(terminal_key)
+        || key.code == KeyCode::Esc
+        || (key.code == KeyCode::Char('q') && key.modifiers.is_empty())
+    {
         leave_navigate_mode(state);
         return;
     }
@@ -3230,16 +3242,18 @@ navigate_pane_down = "ctrl+j"
     }
 
     #[test]
-    fn navigate_q_detaches_in_persistence_mode() {
-        let mut state = crate::app::state::AppState::test_new();
-        state.detach_exits = false;
+    fn navigate_q_closes_picker_without_detaching_or_quitting() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::Navigate;
+        state.detach_exits = true;
 
         handle_navigate_key(
             &mut state,
             KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()),
         );
 
-        assert!(state.detach_requested);
+        assert_eq!(state.mode, Mode::Terminal);
+        assert!(!state.detach_requested);
         assert!(!state.should_quit);
     }
 }

@@ -8,6 +8,11 @@ use std::io::{self, Read, Write};
 
 use serde::{Deserialize, Serialize};
 
+/// Server-shutdown reason that asks an interactive client to reconnect to the
+/// replacement server instead of exiting during a live handoff.
+pub const LIVE_HANDOFF_RECONNECT_REASON: &str =
+    "live update in progress; reconnect after handoff completes";
+
 // ---------------------------------------------------------------------------
 // Protocol constants
 // ---------------------------------------------------------------------------

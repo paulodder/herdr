@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::ops::Range;
 
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -59,9 +60,42 @@ fn indexed_range_prefix(bindings: &[crate::config::IndexedKeybind]) -> Option<&s
     Some(prefix)
 }
 
+fn emacs_help_group(
+    title: &'static str,
+    map: &crate::emacs::keymap::Keymap<crate::emacs::commands::EmacsCommand>,
+) -> HelpGroup {
+    let mut entries: Vec<HelpEntry> = map
+        .bindings()
+        .iter()
+        .map(|(sequence, command)| {
+            (
+                crate::emacs::keymap::format_seq(sequence),
+                Cow::Borrowed(command.name()),
+            )
+        })
+        .collect();
+    entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    (title, entries)
+}
+
 pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
     let kb = &app.keybinds;
     let mut groups = Vec::new();
+
+    if app.emacs.enabled {
+        groups.push(emacs_help_group(
+            "emacs — global / live",
+            &app.emacs.keymaps.global,
+        ));
+        groups.push(emacs_help_group(
+            "emacs — text mode",
+            &app.emacs.keymaps.text,
+        ));
+        groups.push(emacs_help_group(
+            "emacs — minibuffer",
+            &app.emacs.keymaps.minibuffer,
+        ));
+    }
 
     groups.push((
         "global",
@@ -74,6 +108,7 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
             help_entry(keybind_label(&kb.settings), "settings"),
             help_entry(keybind_label(&kb.detach), "detach"),
             help_entry(keybind_label(&kb.reload_config), "reload config"),
+            help_entry("C-p / up · C-n / down", "move selection / scroll"),
             help_entry(
                 keybind_label(&kb.open_notification_target),
                 "open notification target",
@@ -178,7 +213,74 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         ));
     }
 
+    let query = app.keybind_help.query.as_str();
+    if query.is_empty() {
+        return groups;
+    }
+
     groups
+        .into_iter()
+        .filter_map(|(title, entries)| {
+            let matching_entries = entries
+                .into_iter()
+                .filter(|(key, label)| {
+                    contains_case_insensitive(key, query)
+                        || contains_case_insensitive(label.as_ref(), query)
+                })
+                .collect::<Vec<_>>();
+            (!matching_entries.is_empty()).then_some((title, matching_entries))
+        })
+        .collect()
+}
+
+fn contains_case_insensitive(text: &str, query: &str) -> bool {
+    text.to_ascii_lowercase()
+        .contains(&query.to_ascii_lowercase())
+}
+
+fn matching_ranges(text: &str, query: &str) -> Vec<Range<usize>> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+
+    let lowercase_text = text.to_ascii_lowercase();
+    let lowercase_query = query.to_ascii_lowercase();
+    lowercase_text
+        .match_indices(&lowercase_query)
+        .map(|(start, matched)| start..start + matched.len())
+        .collect()
+}
+
+fn push_highlighted_spans(
+    spans: &mut Vec<Span<'static>>,
+    text: &str,
+    query: &str,
+    base_style: Style,
+    highlight_style: Style,
+) {
+    let ranges = matching_ranges(text, query);
+    if ranges.is_empty() {
+        spans.push(Span::styled(text.to_string(), base_style));
+        return;
+    }
+
+    let mut cursor = 0;
+    for range in ranges {
+        if cursor < range.start {
+            spans.push(Span::styled(
+                text[cursor..range.start].to_string(),
+                base_style,
+            ));
+        }
+        spans.push(Span::styled(
+            text[range.clone()].to_string(),
+            highlight_style,
+        ));
+        cursor = range.end;
+    }
+    if cursor < text.len() {
+        spans.push(Span::styled(text[cursor..].to_string(), base_style));
+    }
 }
 
 pub(crate) fn keybind_help_lines(app: &AppState) -> Vec<(usize, Line<'static>)> {
@@ -189,8 +291,23 @@ pub(crate) fn keybind_help_lines(app: &AppState) -> Vec<(usize, Line<'static>)> 
         .fg(app.palette.mauve)
         .add_modifier(Modifier::BOLD);
     let label_style = Style::default().fg(app.palette.text);
+    let highlight_style = Style::default()
+        .fg(panel_contrast_fg(&app.palette))
+        .bg(app.palette.accent)
+        .add_modifier(Modifier::BOLD);
+    let query = app.keybind_help.query.as_str();
 
     let groups = keybind_help_groups(app);
+    if groups.is_empty() {
+        const EMPTY_MESSAGE: &str = " no matching keybindings";
+        return vec![(
+            EMPTY_MESSAGE.chars().count(),
+            Line::from(Span::styled(
+                EMPTY_MESSAGE,
+                Style::default().fg(app.palette.overlay1),
+            )),
+        )];
+    }
     let key_width = groups
         .iter()
         .flat_map(|(_, entries)| entries.iter().map(|(key, _)| key.chars().count()))
@@ -205,15 +322,21 @@ pub(crate) fn keybind_help_lines(app: &AppState) -> Vec<(usize, Line<'static>)> 
             Line::from(vec![Span::styled(format!(" {group}"), heading_style)]),
         ));
         for (key, label) in entries {
-            let padded_key = format!(" {:<width$} ", key, width = key_width);
-            let width = padded_key.chars().count() + label.chars().count();
-            lines.push((
-                width,
-                Line::from(vec![
-                    Span::styled(padded_key, key_style),
-                    Span::styled(label.into_owned(), label_style),
-                ]),
+            let width = key_width + 2 + label.chars().count();
+            let mut spans = vec![Span::styled(" ", key_style)];
+            push_highlighted_spans(&mut spans, &key, query, key_style, highlight_style);
+            spans.push(Span::styled(
+                " ".repeat(key_width.saturating_sub(key.chars().count()) + 1),
+                key_style,
             ));
+            push_highlighted_spans(
+                &mut spans,
+                label.as_ref(),
+                query,
+                label_style,
+                highlight_style,
+            );
+            lines.push((width, Line::from(spans)));
         }
         lines.push((0, Line::raw("")));
     }
@@ -246,9 +369,28 @@ pub(super) fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
             .bg(app.palette.accent)
             .add_modifier(Modifier::BOLD),
     );
+    let query = app.keybind_help.query.as_str();
+    let search_text = if query.is_empty() {
+        Span::styled(
+            "type to search commands",
+            Style::default().fg(app.palette.overlay0),
+        )
+    } else {
+        Span::styled(
+            app.keybind_help.query_input.with_cursor(query),
+            Style::default().fg(app.palette.text),
+        )
+    };
     frame.render_widget(
-        Paragraph::new(" available commands and configured shortcuts")
-            .style(Style::default().fg(app.palette.overlay1)),
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                " / ",
+                Style::default()
+                    .fg(app.palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            search_text,
+        ])),
         header_rows[1],
     );
 
@@ -294,14 +436,17 @@ pub(super) fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" scroll ", Style::default().fg(app.palette.overlay0)),
-            Span::styled("wheel ↑↓", Style::default().fg(app.palette.text)),
+            Span::styled(" search ", Style::default().fg(app.palette.overlay0)),
+            Span::styled("type", Style::default().fg(app.palette.text)),
             Span::styled("  ·  ", Style::default().fg(app.palette.overlay0)),
-            Span::styled("jump", Style::default().fg(app.palette.overlay0)),
-            Span::styled(" pgup / pgdn ", Style::default().fg(app.palette.text)),
+            Span::styled("erase ", Style::default().fg(app.palette.overlay0)),
+            Span::styled("backspace", Style::default().fg(app.palette.text)),
             Span::styled("  ·  ", Style::default().fg(app.palette.overlay0)),
-            Span::styled("close", Style::default().fg(app.palette.overlay0)),
-            Span::styled(" esc / enter ", Style::default().fg(app.palette.text)),
+            Span::styled("scroll ", Style::default().fg(app.palette.overlay0)),
+            Span::styled("↑↓ / pgup / pgdn", Style::default().fg(app.palette.text)),
+            Span::styled("  ·  ", Style::default().fg(app.palette.overlay0)),
+            Span::styled("close ", Style::default().fg(app.palette.overlay0)),
+            Span::styled("esc / enter", Style::default().fg(app.palette.text)),
         ])),
         stack.footer.unwrap_or_default(),
     );

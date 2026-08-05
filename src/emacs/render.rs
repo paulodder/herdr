@@ -154,7 +154,9 @@ pub fn render_echo_area(app: &AppState, frame: &mut Frame, terminal_area: Rect) 
     if terminal_area.height == 0 || terminal_area.width == 0 {
         return;
     }
-    let content = if let Some(search) = app
+    let content = if let Some(minibuffer) = app.emacs.minibuffer.as_ref() {
+        minibuffer.render_line()
+    } else if let Some(search) = app
         .emacs
         .text_mode
         .as_ref()
@@ -258,5 +260,40 @@ mod tests {
         state.emacs.echo = Some("Mark set".to_string());
         let text = bottom_row_text(&state, Rect::new(0, 0, 20, 5));
         assert!(text.starts_with("Goto line: 12"), "{text:?}");
+    }
+
+    #[test]
+    fn echo_area_shows_feedback_comment() {
+        let mut state = crate::app::AppState::test_new();
+        let mut minibuffer = crate::emacs::minibuffer::MinibufferState::feedback();
+        minibuffer.insert_str("tabs surprised me");
+        state.emacs.minibuffer = Some(minibuffer);
+        let text = bottom_row_text(&state, Rect::new(0, 0, 70, 5));
+        assert!(text.starts_with("Feedback tabs surprised me"), "{text:?}");
+    }
+
+    #[test]
+    fn echo_area_shows_incremental_search_state() {
+        let mut state = crate::app::AppState::test_new();
+        let mut search = crate::emacs::isearch::IsearchState::new(
+            crate::emacs::isearch::SearchDirection::Backward,
+            crate::emacs::text_mode::Pos { row: 2, col: 3 },
+        );
+        search.query = "missing".to_string();
+        search.failing = true;
+        state.emacs.text_mode = Some(crate::emacs::text_mode::TextModeState {
+            pane_id: crate::layout::PaneId::alloc(),
+            point: crate::emacs::text_mode::Pos { row: 2, col: 3 },
+            mark: None,
+            mark_active: false,
+            entry_offset_from_bottom: 0,
+            goto_line: None,
+            isearch: Some(search),
+        });
+        let text = bottom_row_text(&state, Rect::new(0, 0, 50, 5));
+        assert!(
+            text.starts_with("Failing I-search backward: missing"),
+            "{text:?}"
+        );
     }
 }

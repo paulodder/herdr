@@ -214,8 +214,8 @@ impl Default for AgentsSidebarConfig {
             rows: vec![
                 vec![
                     AgentSidebarToken::StateIcon,
-                    AgentSidebarToken::Workspace,
                     AgentSidebarToken::Tab,
+                    AgentSidebarToken::Workspace,
                 ],
                 vec![AgentSidebarToken::Agent],
             ],
@@ -261,8 +261,8 @@ mod tests {
             vec![
                 vec![
                     AgentSidebarToken::StateIcon,
-                    AgentSidebarToken::Workspace,
                     AgentSidebarToken::Tab,
+                    AgentSidebarToken::Workspace,
                 ],
                 vec![AgentSidebarToken::Agent],
             ]

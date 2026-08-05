@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
+    ffi::OsString,
     io::Write,
     os::fd::RawFd,
+    os::unix::ffi::{OsStrExt, OsStringExt},
+    path::Path,
     path::PathBuf,
     process::{Command, Stdio},
     sync::Mutex,
@@ -39,6 +42,29 @@ static FOREGROUND_MEMBERS_CACHE: Mutex<ForegroundMembersCache> =
     Mutex::new(ForegroundMembersCache { cached: None });
 
 pub fn raise_server_nofile_limit() {}
+
+/// Resolve the executable used for a live handoff. Linux appends
+/// ` (deleted)` to `/proc/self/exe` after a build replaces the running file;
+/// if a new file now exists at the original path, use that replacement.
+pub(crate) fn handoff_import_executable() -> std::io::Result<PathBuf> {
+    let reported = std::env::current_exe()?;
+    if reported.is_file() {
+        return Ok(reported);
+    }
+    if let Some(replacement) = replaced_executable_candidate(&reported) {
+        if replacement.is_file() {
+            return Ok(replacement);
+        }
+    }
+    Ok(reported)
+}
+
+fn replaced_executable_candidate(reported: &Path) -> Option<PathBuf> {
+    const DELETED_SUFFIX: &[u8] = b" (deleted)";
+    let bytes = reported.as_os_str().as_bytes();
+    let original = bytes.strip_suffix(DELETED_SUFFIX)?;
+    Some(PathBuf::from(OsString::from_vec(original.to_vec())))
+}
 
 pub(crate) fn should_draw_host_cursor_by_default() -> bool {
     running_inside_wsl()
@@ -384,6 +410,9 @@ pub fn process_exists(pid: u32) -> bool {
     }
 }
 
+// Kept as the native clipboard backend for callers that cannot emit OSC 52;
+// the current terminal client deliberately uses OSC 52 instead.
+#[allow(dead_code)]
 pub fn write_clipboard(bytes: &[u8]) -> bool {
     for command in clipboard_commands() {
         if run_clipboard_command(&command, bytes) {
@@ -560,6 +589,8 @@ fn read_clipboard_image_with_spawned_command_max(
     }
 }
 
+// Part of the retained native clipboard backend above.
+#[allow(dead_code)]
 fn clipboard_commands() -> Vec<ClipboardCommand> {
     let mut commands = Vec::new();
 
@@ -650,6 +681,8 @@ fn read_clipboard_text_with_command(command: &ClipboardCommand) -> Option<String
     }
 }
 
+// Part of the retained native clipboard backend above.
+#[allow(dead_code)]
 fn run_clipboard_command(command: &ClipboardCommand, bytes: &[u8]) -> bool {
     let mut child = match Command::new(command.program)
         .args(command.args)
@@ -694,6 +727,15 @@ mod tests {
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn replaced_executable_candidate_removes_linux_deleted_suffix() {
+        assert_eq!(
+            replaced_executable_candidate(Path::new("/tmp/herdr (deleted)")),
+            Some(PathBuf::from("/tmp/herdr"))
+        );
+        assert_eq!(replaced_executable_candidate(Path::new("/tmp/herdr")), None);
     }
 
     fn proc_entry(pid: u32, pgrp: i32, comm: &str) -> ProcStatEntry {

@@ -41,8 +41,8 @@ use self::agent_detection::{
 };
 use self::terminal::{GhosttyPaneTerminal, PaneTerminal};
 pub(crate) use self::terminal::{
-    TerminalDirtyPatch, TerminalDirtyPatchOutcome, TerminalTextMatch, TerminalTextPoint,
-    TerminalWordMotion,
+    TerminalDirtyPatch, TerminalDirtyPatchOutcome, TerminalLogicalTextAtPoint, TerminalTextMatch,
+    TerminalTextPoint, TerminalWordMotion,
 };
 pub use self::{
     state::PaneState,
@@ -2496,6 +2496,17 @@ impl PaneRuntime {
 
     pub fn text_row(&self, row: u32) -> Option<String> {
         self.terminal.text_row(row)
+    }
+
+    pub(crate) fn logical_text_at_point(
+        &self,
+        point: TerminalTextPoint,
+    ) -> Option<TerminalLogicalTextAtPoint> {
+        self.terminal.logical_text_at_point(point)
+    }
+
+    pub(crate) fn hyperlink_uri_at(&self, point: TerminalTextPoint) -> Option<String> {
+        self.terminal.hyperlink_uri_at(point)
     }
 
     pub fn read_text_range(&self, start: (u16, u32), end: (u16, u32)) -> Option<String> {

@@ -12,6 +12,8 @@
 pub mod commands;
 pub mod isearch;
 pub mod keymap;
+pub mod minibuffer;
+pub mod open_target;
 pub mod render;
 pub mod rings;
 pub mod text_mode;
@@ -41,6 +43,8 @@ pub struct EmacsState {
     pub pending: Vec<Chord>,
     /// True after `C-q`: the next key is sent literally to the pane.
     pub quoted_insert: bool,
+    /// Open `M-x` or feedback minibuffer, if any.
+    pub minibuffer: Option<minibuffer::MinibufferState>,
     /// Echo-area message; cleared at the start of the next handled key.
     pub echo: Option<String>,
     /// Active TEXT-mode session, if any (`C-x [`). `mode` stays
@@ -55,6 +59,9 @@ pub struct EmacsState {
     /// Set by a live-mode yank; cleared by any other key. `M-y` only
     /// chains while this is `Some` (Emacs: "immediately after a yank").
     pub last_yank: Option<LastYank>,
+    /// Next `recenter-top-bottom` position: middle, top, then bottom.
+    /// Any intervening command resets this to middle.
+    pub recenter_cycle: u8,
 }
 
 impl EmacsState {
@@ -71,12 +78,14 @@ impl EmacsState {
             keymaps,
             pending: Vec::new(),
             quoted_insert: false,
+            minibuffer: None,
             echo: None,
             text_mode: None,
             kill_ring: rings::KillRing::new(config.kill_ring_max.max(1)),
             mark_rings: std::collections::HashMap::new(),
             search_ring: isearch::SearchRing::new(32),
             last_yank: None,
+            recenter_cycle: 0,
         }
     }
 
@@ -97,16 +106,20 @@ impl EmacsState {
         if !self.enabled {
             self.pending.clear();
             self.quoted_insert = false;
+            self.minibuffer = None;
             self.echo = None;
             self.text_mode = None;
             self.last_yank = None;
+            self.recenter_cycle = 0;
         }
         warnings
     }
 
     /// Which keymap stack is active right now (spec §3.1).
     pub fn map_context(&self) -> MapContext {
-        if self
+        if self.minibuffer.is_some() {
+            MapContext::Minibuffer
+        } else if self
             .text_mode
             .as_ref()
             .is_some_and(|text| text.isearch.is_some())
@@ -125,6 +138,16 @@ impl EmacsState {
         self.text_mode
             .as_ref()
             .is_some_and(|text| text.pane_id == pane_id)
+    }
+
+    /// True while Emacs draws presentation state over the terminal surface.
+    /// Retained PTY patches cannot safely bypass these overlays because they
+    /// would repaint terminal cells without reapplying the Emacs layer.
+    pub fn has_render_overlay(&self) -> bool {
+        self.text_mode.is_some()
+            || self.minibuffer.is_some()
+            || self.echo.is_some()
+            || !self.pending.is_empty()
     }
 }
 

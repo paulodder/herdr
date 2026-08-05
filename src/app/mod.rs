@@ -20,6 +20,7 @@ mod session;
 pub mod state;
 mod terminal_targets;
 mod terminal_titles;
+pub(crate) mod text_input;
 mod theme_sync;
 mod worktrees;
 
@@ -74,6 +75,14 @@ pub(crate) struct OverlayPaneState {
     previous_focus: crate::layout::PaneId,
     previous_zoomed: bool,
     temp_files: Vec<std::path::PathBuf>,
+    input_profile: OverlayInputProfile,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum OverlayInputProfile {
+    #[default]
+    Normal,
+    Exclusive,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -355,6 +364,19 @@ fn resolve_effective_theme(
 }
 
 impl App {
+    pub(crate) fn focused_pane_has_exclusive_input(&self) -> bool {
+        let focused = self
+            .state
+            .active
+            .and_then(|ws_idx| self.state.workspaces.get(ws_idx))
+            .and_then(crate::workspace::Workspace::focused_pane_id);
+        focused.is_some_and(|pane_id| {
+            self.overlay_panes
+                .get(&pane_id)
+                .is_some_and(|overlay| overlay.input_profile == OverlayInputProfile::Exclusive)
+        })
+    }
+
     pub fn new(
         config: &Config,
         no_session: bool,
@@ -528,6 +550,7 @@ impl App {
             request_submit_worktree_open: false,
             request_submit_worktree_remove: false,
             request_reload_config: false,
+            request_live_handoff: false,
             request_client_config_reload: false,
             request_clipboard_write: None,
             creating_new_tab: false,
@@ -539,8 +562,11 @@ impl App {
             worktree_directory,
             collapsed_space_keys,
             request_complete_onboarding: false,
+            emacs_onboarding_page: None,
             name_input: String::new(),
             name_input_replace_on_type: false,
+            name_input_edit: text_input::TextInputState::default(),
+            text_input_yank: String::new(),
             release_notes: None,
             product_announcement: startup_product_announcement.map(|announcement| {
                 state::ProductAnnouncementState {
@@ -552,7 +578,11 @@ impl App {
                     preview: announcement.preview,
                 }
             }),
-            keybind_help: state::KeybindHelpState { scroll: 0 },
+            keybind_help: state::KeybindHelpState {
+                scroll: 0,
+                query: String::new(),
+                query_input: text_input::TextInputState::default(),
+            },
             navigator: state::NavigatorState::default(),
             copy_mode: None,
             workspace_scroll: 0,
@@ -1605,6 +1635,10 @@ impl App {
                     }
                 }
                 crate::raw_input::RawInputEvent::Paste(text) => {
+                    if let Some(minibuffer) = self.state.emacs.minibuffer.as_mut() {
+                        minibuffer.insert_str(&text);
+                        continue;
+                    }
                     // Emacs layer seam (fork): TEXT mode is a read-only view
                     // over a hidden live pane — a host-terminal paste must be
                     // swallowed like any other key, not typed into the PTY.
@@ -1667,6 +1701,7 @@ impl App {
     /// Uses the standalone handler functions that work on `&mut AppState`
     /// since the server doesn't have the async context of the monolithic App.
     fn handle_non_terminal_key_headless(&mut self, key: crate::input::TerminalKey) {
+        let key = input::normalize_non_terminal_vertical_key(self.state.mode, key);
         let key_event = key.as_key_event();
         if input::modal_paste_target_active(&self.state)
             && input::is_modal_paste_shortcut(&key_event)
@@ -4472,7 +4507,7 @@ mod tests {
     }
 
     #[test]
-    fn route_client_input_q_detaches_in_persistence_mode() {
+    fn route_client_input_q_closes_workspace_picker_without_detaching() {
         let mut app = test_app();
         app.state.workspaces = vec![Workspace::test_new("test")];
         app.state.active = Some(0);
@@ -4487,8 +4522,8 @@ mod tests {
         app.route_client_input(q_bytes);
 
         assert!(
-            app.state.detach_requested,
-            "q should detach in persistence mode"
+            !app.state.detach_requested,
+            "q must not detach from the picker"
         );
         assert_eq!(
             app.state.mode,

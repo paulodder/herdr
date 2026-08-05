@@ -14,6 +14,10 @@ use super::{
 
 const PROC_PGRP_ONLY: u32 = 2;
 const SERVER_NOFILE_LIMIT_TARGET: libc::rlim_t = 8192;
+
+pub(crate) fn handoff_import_executable() -> std::io::Result<PathBuf> {
+    std::env::current_exe()
+}
 const CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
 
 pub(crate) fn should_draw_host_cursor_by_default() -> bool {
@@ -526,6 +530,9 @@ fn kern_procargs2(pid: u32) -> Option<Vec<u8>> {
     }
 }
 
+// Kept as the native clipboard backend for callers that cannot emit OSC 52;
+// the current terminal client deliberately uses OSC 52 instead.
+#[allow(dead_code)]
 pub fn write_clipboard(bytes: &[u8]) -> bool {
     run_clipboard_command(
         &ClipboardCommand {
@@ -778,6 +785,8 @@ fn run_notification_command(mut command: Command) -> std::io::Result<bool> {
     Ok(status.success())
 }
 
+// Part of the retained native clipboard backend above.
+#[allow(dead_code)]
 fn run_clipboard_command(command: &ClipboardCommand, bytes: &[u8]) -> bool {
     let mut child = match Command::new(command.program)
         .args(command.args)

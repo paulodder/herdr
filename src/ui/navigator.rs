@@ -93,7 +93,14 @@ fn render_search(app: &AppState, frame: &mut Frame, area: Rect) {
             "search panes",
             Style::default().fg(p.overlay0),
         )),
-        None => spans.push(Span::styled(query.to_string(), Style::default().fg(p.text))),
+        None => spans.push(Span::styled(
+            if app.navigator.search_focused {
+                app.navigator.query_input.with_cursor(query)
+            } else {
+                query.to_string()
+            },
+            Style::default().fg(p.text),
+        )),
     }
     spans.push(Span::styled(
         format!(

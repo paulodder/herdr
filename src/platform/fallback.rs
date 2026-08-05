@@ -6,6 +6,10 @@ use super::{ClipboardImage, ForegroundJob, Signal};
 /// Unsupported platform stub.
 pub fn raise_server_nofile_limit() {}
 
+pub(crate) fn handoff_import_executable() -> std::io::Result<PathBuf> {
+    std::env::current_exe()
+}
+
 pub(crate) fn should_draw_host_cursor_by_default() -> bool {
     false
 }
@@ -77,6 +81,8 @@ pub fn process_exists(_pid: u32) -> bool {
 }
 
 /// Unsupported platform stub.
+// Kept in parity with the native platform clipboard backends.
+#[allow(dead_code)]
 pub fn write_clipboard(_bytes: &[u8]) -> bool {
     false
 }

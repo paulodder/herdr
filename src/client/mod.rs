@@ -790,6 +790,59 @@ fn do_handshake(
     }
 }
 
+const LIVE_HANDOFF_RECONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn reconnect_after_live_handoff(
+    requested_encoding: RenderEncoding,
+    direct_attach_requested: bool,
+    attach_request: Option<&(String, bool)>,
+    kitty_graphics_enabled: bool,
+) -> Result<(LocalStream, RenderEncoding), ClientError> {
+    let socket_path = client_socket_path();
+    let deadline = std::time::Instant::now() + LIVE_HANDOFF_RECONNECT_TIMEOUT;
+
+    loop {
+        let retry_error = match crate::ipc::connect_local_stream(&socket_path) {
+            Ok(mut stream) => {
+                let (cols, rows, cell_width_px, cell_height_px) =
+                    current_terminal_geometry(kitty_graphics_enabled);
+                match do_handshake(
+                    &mut stream,
+                    cols,
+                    rows,
+                    cell_width_px,
+                    cell_height_px,
+                    requested_encoding,
+                    direct_attach_requested,
+                ) {
+                    Ok(encoding) => {
+                        if let Some((terminal_id, takeover)) = attach_request {
+                            write_to_server(
+                                &mut stream,
+                                &ClientMessage::AttachTerminal {
+                                    terminal_id: terminal_id.clone(),
+                                    takeover: *takeover,
+                                },
+                            )
+                            .map_err(ClientError::ConnectionLost)?;
+                        }
+                        return Ok((stream, encoding));
+                    }
+                    Err(err @ ClientError::HandshakeRejected { .. })
+                    | Err(err @ ClientError::Protocol(_)) => return Err(err),
+                    Err(err) => err,
+                }
+            }
+            Err(err) => ClientError::ConnectionFailed(err),
+        };
+
+        if std::time::Instant::now() >= deadline {
+            return Err(retry_error);
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Client event loop
 // ---------------------------------------------------------------------------
@@ -805,9 +858,12 @@ enum ClientLoopEvent {
     /// Terminal resize detected.
     Resize(u16, u16, u32, u32),
     /// Server message received.
-    ServerMessage(ServerMessage),
+    ServerMessage {
+        connection_id: u64,
+        message: ServerMessage,
+    },
     /// Server reader thread exited (connection lost).
-    ServerDisconnected,
+    ServerDisconnected { connection_id: u64 },
     /// Timer tick.
     Timer,
 }
@@ -1169,10 +1225,10 @@ fn run_client_with_mode(
         }
     };
 
-    if let Some((terminal_id, takeover)) = attach_request {
+    if let Some((terminal_id, takeover)) = &attach_request {
         let attach = ClientMessage::AttachTerminal {
-            terminal_id,
-            takeover,
+            terminal_id: terminal_id.clone(),
+            takeover: *takeover,
         };
         if let Err(err) = write_to_server(&mut stream, &attach) {
             eprintln!("herdr: failed to request terminal attach: {err}");
@@ -1230,7 +1286,9 @@ fn run_client_with_mode(
             rows,
             should_quit,
             loop_config,
+            requested_encoding,
             negotiated_encoding,
+            attach_request,
             attach_escape,
         )
         .await
@@ -1274,7 +1332,9 @@ async fn run_client_loop(
     rows: u16,
     should_quit: Arc<AtomicBool>,
     config: ClientLoopConfig,
+    requested_encoding: RenderEncoding,
     negotiated_encoding: RenderEncoding,
+    attach_request: Option<(String, bool)>,
     attach_escape: Option<AttachEscapeState>,
 ) -> Result<(), ClientError> {
     #[cfg(windows)]
@@ -1335,6 +1395,7 @@ async fn run_client_loop(
     let server_read_quit = should_quit.clone();
     let server_read_tx = event_tx.clone();
     let read_stream = stream.try_clone().map_err(ClientError::ConnectionFailed)?;
+    let mut active_connection_id = 1_u64;
     std::thread::spawn(move || {
         let max_frame_size = if kitty_graphics_enabled {
             MAX_GRAPHICS_FRAME_SIZE
@@ -1346,6 +1407,7 @@ async fn run_client_loop(
             server_read_tx,
             &server_read_quit,
             max_frame_size,
+            1,
         );
     });
 
@@ -1501,98 +1563,155 @@ async fn run_client_loop(
                     return Err(ClientError::ConnectionLost(e));
                 }
             }
-            ClientLoopEvent::ServerMessage(msg) => match msg {
-                ServerMessage::Frame(frame_data) => {
-                    let frame_data = if state.draw_host_cursor {
-                        render_ansi::frame_with_drawn_cursor(frame_data)
-                    } else {
-                        frame_data
-                    };
-                    let encoded = if state.draw_host_cursor {
-                        state
-                            .blit_encoder
-                            .encode_with_suppressed_visible_cursor(&frame_data, false)
-                    } else {
-                        state.blit_encoder.encode(&frame_data, false)
-                    };
-                    let mut stdout = io::stdout();
-                    let graphics = if state.kitty_graphics_enabled {
-                        frame_data.graphics.as_slice()
-                    } else {
-                        &[]
-                    };
-                    let _ =
-                        write_encoded_frame_with_graphics(&mut stdout, &encoded.bytes, graphics);
-                    let _ = stdout.flush();
-                    state.blit_encoder.commit(frame_data, encoded);
+            ClientLoopEvent::ServerMessage {
+                connection_id,
+                message,
+            } => {
+                if connection_id != active_connection_id {
+                    continue;
                 }
-                ServerMessage::Terminal(frame) => {
-                    if state.kitty_graphics_enabled && contains_kitty_graphics_bytes(&frame.bytes) {
-                        record_received_kitty_graphics(&frame.bytes);
-                    }
-                    let mut stdout = io::stdout();
-                    let _ = stdout.write_all(&frame.bytes);
-                    let _ = stdout.flush();
-                }
-                ServerMessage::Graphics { bytes } => {
-                    if state.kitty_graphics_enabled {
-                        record_received_kitty_graphics(&bytes);
+                match message {
+                    ServerMessage::Frame(frame_data) => {
+                        let frame_data = if state.draw_host_cursor {
+                            render_ansi::frame_with_drawn_cursor(frame_data)
+                        } else {
+                            frame_data
+                        };
+                        let encoded = if state.draw_host_cursor {
+                            state
+                                .blit_encoder
+                                .encode_with_suppressed_visible_cursor(&frame_data, false)
+                        } else {
+                            state.blit_encoder.encode(&frame_data, false)
+                        };
                         let mut stdout = io::stdout();
-                        let _ = stdout.write_all(&bytes);
+                        let graphics = if state.kitty_graphics_enabled {
+                            frame_data.graphics.as_slice()
+                        } else {
+                            &[]
+                        };
+                        let _ = write_encoded_frame_with_graphics(
+                            &mut stdout,
+                            &encoded.bytes,
+                            graphics,
+                        );
+                        let _ = stdout.flush();
+                        state.blit_encoder.commit(frame_data, encoded);
+                    }
+                    ServerMessage::Terminal(frame) => {
+                        if state.kitty_graphics_enabled
+                            && contains_kitty_graphics_bytes(&frame.bytes)
+                        {
+                            record_received_kitty_graphics(&frame.bytes);
+                        }
+                        let mut stdout = io::stdout();
+                        let _ = stdout.write_all(&frame.bytes);
                         let _ = stdout.flush();
                     }
-                }
-                ServerMessage::ServerShutdown { reason } => {
-                    return Err(ClientError::ServerShutdown { reason });
-                }
-                ServerMessage::Notify {
-                    kind,
-                    message,
-                    body,
-                } => {
-                    handle_notify(kind, &message, body.as_deref(), &state.sound_config);
-                }
-                ServerMessage::Clipboard { data } => {
-                    forward_clipboard(&data);
-                    let _ = io::stdout().flush();
-                }
-                ServerMessage::WindowTitle { title } => {
-                    write_window_title(title.as_deref());
-                    let _ = io::stdout().flush();
-                }
-                ServerMessage::ReloadSoundConfig => {
-                    reload_local_client_config(
-                        &mut state.sound_config,
-                        &mut state.redraw_on_focus_gained,
-                        &mut state.draw_host_cursor,
-                        #[cfg(unix)]
-                        &mut state.remote_image_paste_key,
-                    );
-                }
-                ServerMessage::MouseCapture { enabled } => {
-                    let desired = enabled;
-                    if desired != state.mouse_capture_active {
-                        set_mouse_capture(desired).map_err(ClientError::ConnectionFailed)?;
-                        #[cfg(windows)]
-                        if windows_vti_input_backend_enabled() {
-                            let _ = enable_windows_virtual_terminal_input();
+                    ServerMessage::Graphics { bytes } => {
+                        if state.kitty_graphics_enabled {
+                            record_received_kitty_graphics(&bytes);
+                            let mut stdout = io::stdout();
+                            let _ = stdout.write_all(&bytes);
+                            let _ = stdout.flush();
                         }
-                        state.mouse_capture_active = desired;
-                        host_mouse_capture_active.store(desired, Ordering::Release);
+                    }
+                    ServerMessage::ServerShutdown { reason } => {
+                        if reason.as_deref() == Some(crate::protocol::LIVE_HANDOFF_RECONNECT_REASON)
+                        {
+                            let (reconnected_stream, reconnected_encoding) =
+                                reconnect_after_live_handoff(
+                                    requested_encoding,
+                                    attach_request.is_some(),
+                                    attach_request.as_ref(),
+                                    state.kitty_graphics_enabled,
+                                )?;
+                            active_connection_id = active_connection_id.wrapping_add(1);
+                            let read_stream = reconnected_stream
+                                .try_clone()
+                                .map_err(ClientError::ConnectionFailed)?;
+                            let server_read_tx = event_tx.clone();
+                            let server_read_quit = should_quit.clone();
+                            let max_frame_size = if state.kitty_graphics_enabled {
+                                MAX_GRAPHICS_FRAME_SIZE
+                            } else {
+                                MAX_FRAME_SIZE
+                            };
+                            let connection_id = active_connection_id;
+                            std::thread::spawn(move || {
+                                server_reader_thread(
+                                    read_stream,
+                                    server_read_tx,
+                                    &server_read_quit,
+                                    max_frame_size,
+                                    connection_id,
+                                );
+                            });
+                            write_stream = reconnected_stream;
+                            write_stream
+                                .set_nonblocking(false)
+                                .map_err(ClientError::ConnectionFailed)?;
+                            state.request_full_redraw();
+                            info!(
+                                ?reconnected_encoding,
+                                "client reconnected after live handoff"
+                            );
+                            continue;
+                        }
+                        return Err(ClientError::ServerShutdown { reason });
+                    }
+                    ServerMessage::Notify {
+                        kind,
+                        message,
+                        body,
+                    } => {
+                        handle_notify(kind, &message, body.as_deref(), &state.sound_config);
+                    }
+                    ServerMessage::Clipboard { data } => {
+                        forward_clipboard(&data);
+                        let _ = io::stdout().flush();
+                    }
+                    ServerMessage::WindowTitle { title } => {
+                        write_window_title(title.as_deref());
+                        let _ = io::stdout().flush();
+                    }
+                    ServerMessage::ReloadSoundConfig => {
+                        reload_local_client_config(
+                            &mut state.sound_config,
+                            &mut state.redraw_on_focus_gained,
+                            &mut state.draw_host_cursor,
+                            #[cfg(unix)]
+                            &mut state.remote_image_paste_key,
+                        );
+                    }
+                    ServerMessage::MouseCapture { enabled } => {
+                        let desired = enabled;
+                        if desired != state.mouse_capture_active {
+                            set_mouse_capture(desired).map_err(ClientError::ConnectionFailed)?;
+                            #[cfg(windows)]
+                            if windows_vti_input_backend_enabled() {
+                                let _ = enable_windows_virtual_terminal_input();
+                            }
+                            state.mouse_capture_active = desired;
+                            host_mouse_capture_active.store(desired, Ordering::Release);
+                        }
+                    }
+                    ServerMessage::PrefixInputSource { active } => {
+                        if active {
+                            prefix_input_source.switch_to_ascii();
+                        } else {
+                            prefix_input_source.restore();
+                        }
+                    }
+                    ServerMessage::Welcome { .. } => {
+                        debug!("received unexpected Welcome in main loop");
                     }
                 }
-                ServerMessage::PrefixInputSource { active } => {
-                    if active {
-                        prefix_input_source.switch_to_ascii();
-                    } else {
-                        prefix_input_source.restore();
-                    }
+            }
+            ClientLoopEvent::ServerDisconnected { connection_id } => {
+                if connection_id != active_connection_id {
+                    continue;
                 }
-                ServerMessage::Welcome { .. } => {
-                    debug!("received unexpected Welcome in main loop");
-                }
-            },
-            ClientLoopEvent::ServerDisconnected => {
                 return Err(ClientError::ConnectionLost(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "server closed connection",
@@ -1621,13 +1740,14 @@ fn server_reader_thread(
     event_tx: tokio::sync::mpsc::Sender<ClientLoopEvent>,
     should_quit: &Arc<AtomicBool>,
     max_frame_size: usize,
+    connection_id: u64,
 ) {
     // Ensure the read stream is in blocking mode to avoid WouldBlock errors
     // from read_exact inside read_message. The stream should already be
     // blocking after handshake, but we enforce it here as a safety measure.
     if stream.set_nonblocking(false).is_err() {
         // If we can't set blocking mode, the stream is likely broken.
-        let _ = event_tx.blocking_send(ClientLoopEvent::ServerDisconnected);
+        let _ = event_tx.blocking_send(ClientLoopEvent::ServerDisconnected { connection_id });
         return;
     }
 
@@ -1639,7 +1759,10 @@ fn server_reader_thread(
         match protocol::read_message(&mut stream, max_frame_size) {
             Ok(msg) => {
                 if event_tx
-                    .blocking_send(ClientLoopEvent::ServerMessage(msg))
+                    .blocking_send(ClientLoopEvent::ServerMessage {
+                        connection_id,
+                        message: msg,
+                    })
                     .is_err()
                 {
                     break; // Main loop gone.
@@ -1647,7 +1770,8 @@ fn server_reader_thread(
             }
             Err(protocol::FramingError::UnexpectedEof) => {
                 // Server closed connection.
-                let _ = event_tx.blocking_send(ClientLoopEvent::ServerDisconnected);
+                let _ =
+                    event_tx.blocking_send(ClientLoopEvent::ServerDisconnected { connection_id });
                 break;
             }
             Err(protocol::FramingError::Io(err)) if err.kind() == io::ErrorKind::WouldBlock => {
@@ -1658,7 +1782,8 @@ fn server_reader_thread(
             }
             Err(err) => {
                 warn!(err = %err, "server read error");
-                let _ = event_tx.blocking_send(ClientLoopEvent::ServerDisconnected);
+                let _ =
+                    event_tx.blocking_send(ClientLoopEvent::ServerDisconnected { connection_id });
                 break;
             }
         }
@@ -1934,14 +2059,24 @@ fn decode_clipboard_payload(data: &str) -> Option<Vec<u8>> {
     base64::engine::general_purpose::STANDARD.decode(data).ok()
 }
 
+fn forwarded_clipboard_osc52(data: &str) -> Option<Vec<u8>> {
+    let bytes = decode_clipboard_payload(data)?;
+    Some(crate::selection::osc52_sequence(&bytes).into_bytes())
+}
+
 /// Forwards a clipboard write from the server to the local client clipboard.
 fn forward_clipboard(data: &str) {
-    let Some(bytes) = decode_clipboard_payload(data) else {
+    let Some(sequence) = forwarded_clipboard_osc52(data) else {
         warn!("received invalid clipboard payload from server");
         return;
     };
 
-    crate::selection::write_osc52_bytes(&bytes);
+    // The app client owns terminal stdout, so use OSC 52 directly here. Both
+    // client and monolithic modes must keep clipboard-owner processes such as
+    // wl-copy/xclip out of their input/render loops.
+    let mut stdout = io::stdout();
+    let _ = stdout.write_all(&sequence);
+    let _ = stdout.flush();
 }
 
 fn window_title_osc(title: Option<&str>) -> Vec<u8> {
@@ -2931,14 +3066,12 @@ mod tests {
     }
 
     #[test]
-    fn forward_clipboard_uses_local_clipboard_path() {
-        unsafe {
-            std::env::set_var("SSH_CONNECTION", "1 2 3 4");
-        }
-        forward_clipboard("dGVzdA==");
-        unsafe {
-            std::env::remove_var("SSH_CONNECTION");
-        }
+    fn forwarded_clipboard_uses_direct_osc52_sequence() {
+        assert_eq!(
+            forwarded_clipboard_osc52("dGVzdA==").as_deref(),
+            Some(b"\x1b]52;c;dGVzdA==\x07".as_slice())
+        );
+        assert_eq!(forwarded_clipboard_osc52("not base64"), None);
     }
 
     #[test]

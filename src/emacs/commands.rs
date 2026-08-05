@@ -114,8 +114,13 @@ pub enum EmacsBuiltin {
     // Dispatcher
     UniversalArgument,
     ExecuteExtendedCommand,
+    Feedback,
+    HerdrOnboarding,
+    InterruptProcess,
     KeyboardQuit,
+    OpenAtPoint,
     QuotedInsert,
+    RefreshHerdr,
     // Tab reordering (spec §3.8): herdr has a tab.move API but no
     // NavigateAction for it, so these are builtins.
     MoveTabLeft,
@@ -131,6 +136,7 @@ pub enum EmacsBuiltin {
     BackwardWord,
     MoveBeginningOfLine,
     MoveEndOfLine,
+    RecenterTopBottom,
     ScrollUp,
     ScrollDown,
     BeginningOfBuffer,
@@ -147,9 +153,11 @@ pub enum EmacsBuiltin {
     YankPop,
     // Minibuffer editing
     DeleteBackwardChar,
+    DeleteForwardChar,
+    KillBeginningOfLine,
     KillLine,
     BackwardKillWord,
-    MinibufferComplete,
+    MarkWholeInput,
     ExitMinibuffer,
     // Incremental search editing
     IsearchExit,
@@ -168,6 +176,7 @@ pub const BUILTIN_NAMES: &[(EmacsBuiltin, &str)] = &[
     (EmacsBuiltin::BackwardWord, "backward-word"),
     (EmacsBuiltin::BeginningOfBuffer, "beginning-of-buffer"),
     (EmacsBuiltin::DeleteBackwardChar, "delete-backward-char"),
+    (EmacsBuiltin::DeleteForwardChar, "delete-forward-char"),
     (EmacsBuiltin::DescribeBindings, "describe-bindings"),
     (EmacsBuiltin::DescribeKey, "describe-key"),
     (EmacsBuiltin::EndOfBuffer, "end-of-buffer"),
@@ -181,9 +190,12 @@ pub const BUILTIN_NAMES: &[(EmacsBuiltin, &str)] = &[
     ),
     (EmacsBuiltin::ExitMinibuffer, "exit-minibuffer"),
     (EmacsBuiltin::ExitTextMode, "exit-text-mode"),
+    (EmacsBuiltin::Feedback, "feedback"),
     (EmacsBuiltin::ForwardChar, "forward-char"),
     (EmacsBuiltin::ForwardWord, "forward-word"),
     (EmacsBuiltin::GotoLine, "goto-line"),
+    (EmacsBuiltin::HerdrOnboarding, "herdr-onboarding"),
+    (EmacsBuiltin::InterruptProcess, "interrupt-process"),
     (EmacsBuiltin::IsearchBackward, "isearch-backward"),
     (EmacsBuiltin::IsearchDeleteChar, "isearch-delete-char"),
     (EmacsBuiltin::IsearchExit, "isearch-exit"),
@@ -194,17 +206,21 @@ pub const BUILTIN_NAMES: &[(EmacsBuiltin, &str)] = &[
         "isearch-previous-history",
     ),
     (EmacsBuiltin::KeyboardQuit, "keyboard-quit"),
+    (EmacsBuiltin::KillBeginningOfLine, "kill-beginning-of-line"),
     (EmacsBuiltin::KillLine, "kill-line"),
     (EmacsBuiltin::KillRegion, "kill-region"),
     (EmacsBuiltin::KillRingSave, "kill-ring-save"),
-    (EmacsBuiltin::MinibufferComplete, "minibuffer-complete"),
+    (EmacsBuiltin::MarkWholeInput, "mark-whole-input"),
     (EmacsBuiltin::MoveTabLeft, "move-tab-left"),
     (EmacsBuiltin::MoveTabRight, "move-tab-right"),
     (EmacsBuiltin::MoveBeginningOfLine, "move-beginning-of-line"),
     (EmacsBuiltin::MoveEndOfLine, "move-end-of-line"),
     (EmacsBuiltin::NextLine, "next-line"),
+    (EmacsBuiltin::OpenAtPoint, "open-at-point"),
     (EmacsBuiltin::PreviousLine, "previous-line"),
     (EmacsBuiltin::QuotedInsert, "quoted-insert"),
+    (EmacsBuiltin::RecenterTopBottom, "recenter-top-bottom"),
+    (EmacsBuiltin::RefreshHerdr, "refresh-herdr"),
     (EmacsBuiltin::ScrollDown, "scroll-down"),
     (EmacsBuiltin::ScrollUp, "scroll-up"),
     (EmacsBuiltin::SetMark, "set-mark-command"),
@@ -243,8 +259,13 @@ impl EmacsBuiltin {
         match self {
             Self::UniversalArgument
             | Self::ExecuteExtendedCommand
+            | Self::Feedback
+            | Self::HerdrOnboarding
+            | Self::InterruptProcess
             | Self::KeyboardQuit
+            | Self::OpenAtPoint
             | Self::QuotedInsert
+            | Self::RefreshHerdr
             | Self::MoveTabLeft
             | Self::MoveTabRight
             | Self::TextMode
@@ -259,6 +280,7 @@ impl EmacsBuiltin {
             | Self::BackwardWord
             | Self::MoveBeginningOfLine
             | Self::MoveEndOfLine
+            | Self::RecenterTopBottom
             | Self::ScrollUp
             | Self::ScrollDown
             | Self::BeginningOfBuffer
@@ -272,9 +294,11 @@ impl EmacsBuiltin {
                 MapSlot::Both
             }
             Self::DeleteBackwardChar
+            | Self::DeleteForwardChar
+            | Self::KillBeginningOfLine
             | Self::KillLine
             | Self::BackwardKillWord
-            | Self::MinibufferComplete
+            | Self::MarkWholeInput
             | Self::ExitMinibuffer => MapSlot::Minibuffer,
             Self::IsearchExit
             | Self::IsearchDeleteChar
@@ -426,6 +450,16 @@ const DEFAULT_GLOBAL_BINDINGS: &[(&str, EmacsCommand)] = &[
     ("C-x n", EmacsCommand::Herdr(NavigateAction::NextTab)),
     ("C-x p", EmacsCommand::Herdr(NavigateAction::PreviousTab)),
     ("C-x k", EmacsCommand::Herdr(NavigateAction::CloseTab)),
+    ("C-x t", EmacsCommand::Herdr(NavigateAction::RenameTab)),
+    ("C-c t", EmacsCommand::Herdr(NavigateAction::RenameTab)),
+    ("M-n", EmacsCommand::Herdr(NavigateAction::NextAgent)),
+    ("M-p", EmacsCommand::Herdr(NavigateAction::PreviousAgent)),
+    ("C-M-n", EmacsCommand::Herdr(NavigateAction::NextWorkspace)),
+    ("C-M-o", EmacsCommand::Builtin(EmacsBuiltin::OpenAtPoint)),
+    (
+        "C-M-p",
+        EmacsCommand::Herdr(NavigateAction::PreviousWorkspace),
+    ),
     (
         "C-x w",
         EmacsCommand::Herdr(NavigateAction::WorkspacePicker),
@@ -437,8 +471,20 @@ const DEFAULT_GLOBAL_BINDINGS: &[(&str, EmacsCommand)] = &[
     ("M-[", EmacsCommand::Builtin(EmacsBuiltin::MoveTabLeft)),
     ("M-]", EmacsCommand::Builtin(EmacsBuiltin::MoveTabRight)),
     ("C-x [", EmacsCommand::Builtin(EmacsBuiltin::TextMode)),
+    (
+        "C-c C-c",
+        EmacsCommand::Builtin(EmacsBuiltin::InterruptProcess),
+    ),
     ("C-q", EmacsCommand::Builtin(EmacsBuiltin::QuotedInsert)),
     ("C-g", EmacsCommand::Builtin(EmacsBuiltin::KeyboardQuit)),
+    (
+        "C-x ?",
+        EmacsCommand::Builtin(EmacsBuiltin::DescribeBindings),
+    ),
+    (
+        "M-x",
+        EmacsCommand::Builtin(EmacsBuiltin::ExecuteExtendedCommand),
+    ),
     ("C-y", EmacsCommand::Builtin(EmacsBuiltin::Yank)),
     ("M-y", EmacsCommand::Builtin(EmacsBuiltin::YankPop)),
     ("C-s", EmacsCommand::Builtin(EmacsBuiltin::IsearchForward)),
@@ -457,6 +503,10 @@ const DEFAULT_TEXT_BINDINGS: &[(&str, EmacsCommand)] = &[
         EmacsCommand::Builtin(EmacsBuiltin::MoveBeginningOfLine),
     ),
     ("C-e", EmacsCommand::Builtin(EmacsBuiltin::MoveEndOfLine)),
+    (
+        "C-l",
+        EmacsCommand::Builtin(EmacsBuiltin::RecenterTopBottom),
+    ),
     ("C-v", EmacsCommand::Builtin(EmacsBuiltin::ScrollUp)),
     ("M-v", EmacsCommand::Builtin(EmacsBuiltin::ScrollDown)),
     (
@@ -478,8 +528,40 @@ const DEFAULT_TEXT_BINDINGS: &[(&str, EmacsCommand)] = &[
     ("ESC", EmacsCommand::Builtin(EmacsBuiltin::ExitTextMode)),
 ];
 
-/// Filled in by Task 8 (minibuffer) and Task 10 (help).
-const DEFAULT_MINIBUFFER_BINDINGS: &[(&str, EmacsCommand)] = &[];
+/// The minibuffer's local map. `C-g` lives in the global map and reaches the
+/// minibuffer by fallthrough.
+const DEFAULT_MINIBUFFER_BINDINGS: &[(&str, EmacsCommand)] = &[
+    ("RET", EmacsCommand::Builtin(EmacsBuiltin::ExitMinibuffer)),
+    (
+        "DEL",
+        EmacsCommand::Builtin(EmacsBuiltin::DeleteBackwardChar),
+    ),
+    ("C-k", EmacsCommand::Builtin(EmacsBuiltin::KillLine)),
+    (
+        "C-u",
+        EmacsCommand::Builtin(EmacsBuiltin::KillBeginningOfLine),
+    ),
+    (
+        "C-d",
+        EmacsCommand::Builtin(EmacsBuiltin::DeleteForwardChar),
+    ),
+    ("C-w", EmacsCommand::Builtin(EmacsBuiltin::BackwardKillWord)),
+    (
+        "M-DEL",
+        EmacsCommand::Builtin(EmacsBuiltin::BackwardKillWord),
+    ),
+    (
+        "C-a",
+        EmacsCommand::Builtin(EmacsBuiltin::MoveBeginningOfLine),
+    ),
+    ("C-e", EmacsCommand::Builtin(EmacsBuiltin::MoveEndOfLine)),
+    ("C-f", EmacsCommand::Builtin(EmacsBuiltin::ForwardChar)),
+    ("C-b", EmacsCommand::Builtin(EmacsBuiltin::BackwardChar)),
+    ("M-f", EmacsCommand::Builtin(EmacsBuiltin::ForwardWord)),
+    ("M-b", EmacsCommand::Builtin(EmacsBuiltin::BackwardWord)),
+    ("M-h", EmacsCommand::Builtin(EmacsBuiltin::MarkWholeInput)),
+    ("C-y", EmacsCommand::Builtin(EmacsBuiltin::Yank)),
+];
 
 const DEFAULT_ISEARCH_BINDINGS: &[(&str, EmacsCommand)] = &[
     ("RET", EmacsCommand::Builtin(EmacsBuiltin::IsearchExit)),
@@ -671,10 +753,20 @@ mod tests {
             ("C-x n", herdr(NavigateAction::NextTab)),
             ("C-x p", herdr(NavigateAction::PreviousTab)),
             ("C-x k", herdr(NavigateAction::CloseTab)),
+            ("C-x t", herdr(NavigateAction::RenameTab)),
+            ("C-c t", herdr(NavigateAction::RenameTab)),
+            ("C-c C-c", builtin(EmacsBuiltin::InterruptProcess)),
+            ("M-n", herdr(NavigateAction::NextAgent)),
+            ("M-p", herdr(NavigateAction::PreviousAgent)),
+            ("C-M-n", herdr(NavigateAction::NextWorkspace)),
+            ("C-M-o", builtin(EmacsBuiltin::OpenAtPoint)),
+            ("C-M-p", herdr(NavigateAction::PreviousWorkspace)),
             ("C-x w", herdr(NavigateAction::WorkspacePicker)),
             ("C-x [", builtin(EmacsBuiltin::TextMode)),
             ("C-q", builtin(EmacsBuiltin::QuotedInsert)),
             ("C-g", builtin(EmacsBuiltin::KeyboardQuit)),
+            ("M-x", builtin(EmacsBuiltin::ExecuteExtendedCommand)),
+            ("C-x ?", builtin(EmacsBuiltin::DescribeBindings)),
             ("C-y", builtin(EmacsBuiltin::Yank)),
             ("M-y", builtin(EmacsBuiltin::YankPop)),
         ];
@@ -692,6 +784,33 @@ mod tests {
     }
 
     #[test]
+    fn minibuffer_map_binds_editing_and_submission() {
+        let (keymaps, _) = build_keymaps(&Default::default());
+        for (seq, command) in [
+            ("RET", EmacsBuiltin::ExitMinibuffer),
+            ("DEL", EmacsBuiltin::DeleteBackwardChar),
+            ("C-k", EmacsBuiltin::KillLine),
+            ("C-w", EmacsBuiltin::BackwardKillWord),
+            ("C-a", EmacsBuiltin::MoveBeginningOfLine),
+            ("C-e", EmacsBuiltin::MoveEndOfLine),
+        ] {
+            assert_eq!(
+                keymaps.lookup(MapContext::Minibuffer, &parse_key_seq(seq).unwrap()),
+                Lookup::Bound(builtin(command)),
+                "minibuffer {seq}"
+            );
+        }
+        assert_eq!(
+            EmacsCommand::from_name("feedback"),
+            Some(builtin(EmacsBuiltin::Feedback))
+        );
+        assert_eq!(
+            EmacsCommand::from_name("herdr-onboarding"),
+            Some(builtin(EmacsBuiltin::HerdrOnboarding))
+        );
+    }
+
+    #[test]
     fn default_text_keymap_binds_motions_and_region() {
         let (keymaps, _) = build_keymaps(&Default::default());
         let cases = [
@@ -703,6 +822,7 @@ mod tests {
             ("M-b", EmacsBuiltin::BackwardWord),
             ("C-a", EmacsBuiltin::MoveBeginningOfLine),
             ("C-e", EmacsBuiltin::MoveEndOfLine),
+            ("C-l", EmacsBuiltin::RecenterTopBottom),
             ("C-v", EmacsBuiltin::ScrollUp),
             ("M-v", EmacsBuiltin::ScrollDown),
             ("M-<", EmacsBuiltin::BeginningOfBuffer),

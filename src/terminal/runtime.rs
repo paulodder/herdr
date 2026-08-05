@@ -351,6 +351,17 @@ impl TerminalRuntime {
         self.0.text_row(row)
     }
 
+    pub(crate) fn logical_text_at_point(
+        &self,
+        point: crate::pane::TerminalTextPoint,
+    ) -> Option<crate::pane::TerminalLogicalTextAtPoint> {
+        self.0.logical_text_at_point(point)
+    }
+
+    pub(crate) fn hyperlink_uri_at(&self, point: crate::pane::TerminalTextPoint) -> Option<String> {
+        self.0.hyperlink_uri_at(point)
+    }
+
     pub fn read_text_range(&self, start: (u16, u32), end: (u16, u32)) -> Option<String> {
         self.0.read_text_range(start, end)
     }

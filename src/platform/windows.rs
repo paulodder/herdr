@@ -453,6 +453,9 @@ pub fn process_exists(pid: u32) -> bool {
     ok && exit_code == STILL_ACTIVE
 }
 
+// Kept as the native clipboard backend for callers that cannot emit OSC 52;
+// the current terminal client deliberately uses OSC 52 instead.
+#[allow(dead_code)]
 pub fn write_clipboard(bytes: &[u8]) -> bool {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return false;

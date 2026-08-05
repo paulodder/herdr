@@ -66,11 +66,19 @@ The full keymap and the binding syntax live in the [keybinding reference](/docs/
 
 Press `prefix+[` to enter copy mode for the focused pane. Use `h/j/k/l`, tmux-style `w/b/e`, `{`/`}`, `PageUp`/`PageDown`, `ctrl+b`/`ctrl+f`, and `ctrl+u`/`ctrl+d` to move. Press `/` or `?` for forward or backward literal search, then `n` or `N` to repeat in the same or opposite direction. Search is case-insensitive unless the query contains an uppercase letter. Use `v` or Space to start a selection, `y` or Enter to copy it, and `q` or Esc to leave without copying. Esc clears an active selection or search before exiting. Copy mode does not pause the pane process: output remains live, follows at the bottom, and stays pinned when you navigate into history. The configured prefix keeps its normal meaning in copy mode; with the default prefix, `ctrl+b` enters prefix mode instead of paging up, so use a different prefix if you want `ctrl+b` for copy-mode page-up. Mouse drag-select copies without entering copy mode at all.
 
-## Emacs TEXT mode search
+## Emacs tour
 
-With the optional `[emacs] enabled = true` layer, press `ctrl+x [` to enter the read-only TEXT mode over a pane's full scrollback. `ctrl+s` and `ctrl+r` start forward or backward incremental search; they can also be used directly from a live pane, which enters TEXT mode automatically. Typing updates the matches and point immediately, and uppercase characters make the query case-sensitive.
+With the optional `[emacs] enabled = true` layer, open the sidebar menu and choose **Emacs tour**, or run `M-x herdr-onboarding`. The three-page tour explains Herdr's workspace, tab, pane, and agent hierarchy; teaches the primary Emacs navigation chords; and makes clear that every mouse interaction remains available. Replay it whenever you need a refresher.
+
+## Emacs TEXT mode
+
+With the optional `[emacs] enabled = true` layer, press `ctrl+x [` to enter the read-only TEXT mode over a pane's full scrollback. Press `ctrl+l` repeatedly to place point in the middle, at the top, and at the bottom of the viewport; another command resets the cycle. `ctrl+s` and `ctrl+r` start forward or backward incremental search; they can also be used directly from a live pane, which enters TEXT mode automatically. Typing updates the matches and point immediately, and uppercase characters make the query case-sensitive.
 
 Press `ctrl+s` or `ctrl+r` again to move through matches in either direction. Enter or Esc accepts the current match and leaves you in TEXT mode; `ctrl+g` aborts and restores the point where search began. `ctrl+s ctrl+s` reuses the latest query, while `alt+p` and `alt+n` browse older and newer search queries. Press `q` or Esc after accepting search to leave TEXT mode.
+
+Press `ctrl+alt+o` to open the target at point. Herdr recognizes OSC 8 links, visible `http://` and `https://` URLs, existing paths relative to the pane's working directory, quoted paths, directories, and `path:line:column` references. An active TEXT-mode region is used as the exact target. URLs open in EWW; filesystem targets open in a temporary terminal `emacsclient` frame. Herdr connects to your default Emacs server and starts `emacs --daemon` when needed, so buffers survive after the temporary frame closes.
+
+The terminal Emacs frame owns its complete keyboard: `ctrl+x`, `ctrl+b`, search keys, Page Up, and configured Herdr shortcuts all reach Emacs. Use the mouse to leave the pane, or close the client frame from Emacs with `ctrl+x ctrl+c`; Herdr then restores the previous pane and zoom state. The `emacsclient` executable must be available on the machine running the Herdr session, including the remote machine for `herdr --remote`.
 
 ## Change anything
 

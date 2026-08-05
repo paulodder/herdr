@@ -5,6 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
     state::{WorktreeCreateState, WorktreeOpenEntry, WorktreeOpenState, WorktreeRemoveState},
+    text_input::{action_for_key, TextInputAction, TextInputState},
     App, Mode,
 };
 #[cfg(test)]
@@ -110,6 +111,12 @@ impl App {
         self.state.selected = ws_idx;
         self.state.name_input = branch.clone();
         self.state.name_input_replace_on_type = true;
+        self.state.name_input_edit = TextInputState::at_end(&self.state.name_input);
+        self.state.name_input_edit.apply(
+            &mut self.state.name_input,
+            TextInputAction::SelectAll,
+            "",
+        );
         self.state.worktree_create = Some(WorktreeCreateState {
             source_workspace_id,
             source_checkout_path,
@@ -228,6 +235,7 @@ impl App {
             entries,
             selected: 0,
             query: String::new(),
+            query_input: crate::app::text_input::TextInputState::default(),
             search_focused: false,
             error: None,
         });
@@ -236,6 +244,9 @@ impl App {
 
     pub(crate) fn handle_worktree_create_key(&mut self, key: KeyEvent) {
         match key.code {
+            KeyCode::Char('g') if key.modifiers == KeyModifiers::CONTROL => {
+                self.close_worktree_create_dialog();
+            }
             KeyCode::Esc => {
                 if self
                     .state
@@ -248,12 +259,15 @@ impl App {
                 self.close_worktree_create_dialog();
             }
             KeyCode::Enter => self.submit_worktree_create_via_api(),
-            KeyCode::Backspace => {
-                if self.state.name_input_replace_on_type {
-                    self.state.name_input.clear();
-                    self.state.name_input_replace_on_type = false;
-                } else {
-                    self.state.name_input.pop();
+            _ if action_for_key(key).is_some() => {
+                self.state.name_input_replace_on_type = false;
+                let yank = self.state.text_input_yank.clone();
+                if let Some(killed) = action_for_key(key).and_then(|action| {
+                    self.state
+                        .name_input_edit
+                        .apply(&mut self.state.name_input, action, &yank)
+                }) {
+                    self.state.text_input_yank = killed;
                 }
                 self.sync_worktree_branch_from_input();
             }
@@ -268,14 +282,19 @@ impl App {
         if self.state.name_input_replace_on_type {
             self.state.name_input.clear();
             self.state.name_input_replace_on_type = false;
+            self.state.name_input_edit.reset();
         }
-        self.state.name_input.push_str(text);
+        self.state
+            .name_input_edit
+            .insert_str(&mut self.state.name_input, text);
         self.sync_worktree_branch_from_input();
     }
 
     pub(crate) fn handle_worktree_open_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Esc => {
+            KeyCode::Esc | KeyCode::Char('g')
+                if key.code == KeyCode::Esc || key.modifiers == KeyModifiers::CONTROL =>
+            {
                 self.state.worktree_open = None;
                 self.state.mode = if self.state.active.is_some() {
                     Mode::Terminal
@@ -296,10 +315,11 @@ impl App {
             KeyCode::Char('/') => {
                 if let Some(open) = &mut self.state.worktree_open {
                     if open.search_focused {
-                        open.query.push('/');
+                        open.query_input.insert_str(&mut open.query, "/");
                         open.normalize_selection();
                     } else {
                         open.search_focused = true;
+                        open.query_input.move_to_end(&open.query);
                     }
                 }
             }
@@ -314,15 +334,20 @@ impl App {
             {
                 self.insert_worktree_open_search_text(&ch.to_string());
             }
-            KeyCode::Backspace
-                if self
-                    .state
-                    .worktree_open
-                    .as_ref()
-                    .is_some_and(|open| open.search_focused) =>
+            _ if self
+                .state
+                .worktree_open
+                .as_ref()
+                .is_some_and(|open| open.search_focused)
+                && action_for_key(key).is_some() =>
             {
+                let yank = self.state.text_input_yank.clone();
                 if let Some(open) = &mut self.state.worktree_open {
-                    open.query.pop();
+                    if let Some(killed) = action_for_key(key)
+                        .and_then(|action| open.query_input.apply(&mut open.query, action, &yank))
+                    {
+                        self.state.text_input_yank = killed;
+                    }
                     open.normalize_selection();
                 }
             }
@@ -338,7 +363,7 @@ impl App {
         if !open.search_focused {
             return;
         }
-        open.query.push_str(text);
+        open.query_input.insert_str(&mut open.query, text);
         open.normalize_selection();
     }
 
@@ -424,6 +449,7 @@ impl App {
                     entries: vec![entry],
                     selected: 0,
                     query: String::new(),
+                    query_input: crate::app::text_input::TextInputState::default(),
                     search_focused: false,
                     error: Some(format!("failed to open worktree: {err}")),
                 });
@@ -1192,6 +1218,7 @@ mod tests {
             ],
             selected: 0,
             query: String::new(),
+            query_input: crate::app::text_input::TextInputState::default(),
             search_focused: true,
             error: None,
         });
@@ -1216,6 +1243,7 @@ mod tests {
             entries: Vec::new(),
             selected: 0,
             query: String::new(),
+            query_input: crate::app::text_input::TextInputState::default(),
             search_focused: false,
             error: None,
         });
@@ -1256,6 +1284,7 @@ mod tests {
             }],
             selected: 0,
             query: String::new(),
+            query_input: crate::app::text_input::TextInputState::default(),
             search_focused: false,
             error: None,
         });
@@ -1306,6 +1335,7 @@ mod tests {
             }],
             selected: 0,
             query: String::new(),
+            query_input: crate::app::text_input::TextInputState::default(),
             search_focused: false,
             error: None,
         });
@@ -1352,6 +1382,7 @@ mod tests {
             }],
             selected: 0,
             query: String::new(),
+            query_input: crate::app::text_input::TextInputState::default(),
             search_focused: false,
             error: None,
         });
@@ -1417,6 +1448,7 @@ mod tests {
             ],
             selected: 0,
             query: String::new(),
+            query_input: crate::app::text_input::TextInputState::default(),
             search_focused: false,
             error: None,
         });
@@ -1641,6 +1673,7 @@ mod tests {
             }],
             selected: 0,
             query: String::new(),
+            query_input: crate::app::text_input::TextInputState::default(),
             search_focused: false,
             error: None,
         });

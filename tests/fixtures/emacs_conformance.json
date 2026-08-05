@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "reference": {
+    "implementation": "GNU Emacs",
+    "emacs_version": "30.2",
+    "profile": "emacs -Q, fundamental-mode, read-only buffer, transient-mark-mode"
+  },
+  "cases": [
+    {
+      "name": "character-line-and-word-motion",
+      "text": "alpha one\nbravo six\ncharlie\ndelta\necho\nfoxtrot\ngolf\nhotel\nindia\njuliet",
+      "start": { "row": 0, "col": 0 },
+      "keys": "C-f C-f C-n C-e M-b",
+      "comparison": "exact",
+      "emacs": {
+        "point": { "row": 1, "col": 6 },
+        "mark": null,
+        "mark_active": false,
+        "kill_ring_head": null
+      }
+    },
+    {
+      "name": "character-motion-crosses-newline",
+      "text": "alpha one\nbravo six\ncharlie\ndelta\necho\nfoxtrot\ngolf\nhotel\nindia\njuliet",
+      "start": { "row": 0, "col": 9 },
+      "keys": "C-f C-b C-f",
+      "comparison": "exact",
+      "emacs": {
+        "point": { "row": 1, "col": 0 },
+        "mark": null,
+        "mark_active": false,
+        "kill_ring_head": null
+      }
+    },
+    {
+      "name": "buffer-boundaries",
+      "text": "alpha one\nbravo six\ncharlie\ndelta\necho\nfoxtrot\ngolf\nhotel\nindia\njuliet",
+      "start": { "row": 3, "col": 2 },
+      "keys": "M-< M->",
+      "comparison": "known-deviation",
+      "reason": "Herdr's buffer-boundary motions do not yet push the old point to the mark ring.",
+      "emacs": {
+        "point": { "row": 9, "col": 6 },
+        "mark": { "row": 0, "col": 0 },
+        "mark_active": false,
+        "kill_ring_head": null
+      },
+      "herdr": {
+        "point": { "row": 9, "col": 6 },
+        "mark": null,
+        "mark_active": false,
+        "kill_ring_head": null
+      }
+    },
+    {
+      "name": "exchange-point-and-mark",
+      "text": "alpha one\nbravo six\ncharlie\ndelta\necho\nfoxtrot\ngolf\nhotel\nindia\njuliet",
+      "start": { "row": 1, "col": 2 },
+      "keys": "C-SPC C-e C-x C-x",
+      "comparison": "exact",
+      "emacs": {
+        "point": { "row": 1, "col": 2 },
+        "mark": { "row": 1, "col": 9 },
+        "mark_active": true,
+        "kill_ring_head": null
+      }
+    },
+    {
+      "name": "copy-region-to-kill-ring",
+      "text": "alpha one\nbravo six\ncharlie\ndelta\necho\nfoxtrot\ngolf\nhotel\nindia\njuliet",
+      "start": { "row": 0, "col": 0 },
+      "keys": "C-SPC C-f C-f M-w",
+      "comparison": "exact",
+      "emacs": {
+        "point": { "row": 0, "col": 2 },
+        "mark": { "row": 0, "col": 0 },
+        "mark_active": false,
+        "kill_ring_head": "al"
+      }
+    },
+    {
+      "name": "successive-forward-word",
+      "text": "alpha one\nbravo six\ncharlie\ndelta\necho\nfoxtrot\ngolf\nhotel\nindia\njuliet",
+      "start": { "row": 1, "col": 0 },
+      "keys": "M-f M-f",
+      "comparison": "exact",
+      "emacs": {
+        "point": { "row": 1, "col": 9 },
+        "mark": null,
+        "mark_active": false,
+        "kill_ring_head": null
+      }
+    },
+    {
+      "name": "goto-line-prompt",
+      "text": "alpha one\nbravo six\ncharlie\ndelta\necho\nfoxtrot\ngolf\nhotel\nindia\njuliet",
+      "start": { "row": 0, "col": 4 },
+      "keys": "M-g g 4 RET",
+      "comparison": "known-deviation",
+      "reason": "Herdr's goto-line prompt does not yet push the origin to the mark ring.",
+      "emacs": {
+        "point": { "row": 3, "col": 0 },
+        "mark": { "row": 0, "col": 4 },
+        "mark_active": false,
+        "kill_ring_head": null
+      },
+      "herdr": {
+        "point": { "row": 3, "col": 0 },
+        "mark": null,
+        "mark_active": false,
+        "kill_ring_head": null
+      }
+    },
+    {
+      "name": "vertical-motion-goal-column",
+      "text": "abcdef\nx\nabcdef\ndelta\necho\nfoxtrot\ngolf\nhotel\nindia\njuliet",
+      "start": { "row": 0, "col": 5 },
+      "keys": "C-n C-n",
+      "comparison": "known-deviation",
+      "reason": "Herdr does not yet preserve Emacs's goal column across a shorter line.",
+      "emacs": {
+        "point": { "row": 2, "col": 5 },
+        "mark": null,
+        "mark_active": false,
+        "kill_ring_head": null
+      },
+      "herdr": {
+        "point": { "row": 2, "col": 1 },
+        "mark": null,
+        "mark_active": false,
+        "kill_ring_head": null
+      }
+    }
+  ]
+}

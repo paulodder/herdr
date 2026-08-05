@@ -836,6 +836,11 @@ impl Terminal {
         grid_ref_hyperlink_uri(&grid_ref)
     }
 
+    pub(crate) fn screen_hyperlink_uri(&self, x: u16, y: u32) -> Result<Option<String>, Error> {
+        let grid_ref = self.grid_ref(ghostty_screen_point(x, y))?;
+        grid_ref_hyperlink_uri(&grid_ref)
+    }
+
     fn grid_ref(&self, point: ffi::GhosttyPoint) -> Result<ffi::GhosttyGridRef, Error> {
         let mut grid_ref = ffi::GhosttyGridRef {
             size: mem::size_of::<ffi::GhosttyGridRef>(),

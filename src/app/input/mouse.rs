@@ -2344,6 +2344,7 @@ mod tests {
             ],
             selected: 0,
             query: String::new(),
+            query_input: crate::app::text_input::TextInputState::default(),
             search_focused: false,
             error: None,
         }

@@ -71,7 +71,11 @@ pub(super) fn render_rename_overlay(app: &AppState, frame: &mut Frame, area: Rec
     let input_rect = Rect::new(rows[2].x, rows[2].y, rows[2].width, 1);
     frame.render_widget(Clear, input_rect);
     frame.render_widget(
-        Paragraph::new(format!(" {}█", app.name_input)).style(
+        Paragraph::new(format!(
+            " {}",
+            app.name_input_edit.with_cursor(&app.name_input)
+        ))
+        .style(
             Style::default()
                 .fg(app.palette.text)
                 .bg(app.palette.surface0),
@@ -267,7 +271,11 @@ pub(super) fn render_new_linked_worktree_overlay(app: &AppState, frame: &mut Fra
     let input_rect = Rect::new(rows[2].x, rows[2].y, rows[2].width, 1);
     frame.render_widget(Clear, input_rect);
     frame.render_widget(
-        Paragraph::new(format!(" {}█", app.name_input)).style(
+        Paragraph::new(format!(
+            " {}",
+            app.name_input_edit.with_cursor(&app.name_input)
+        ))
+        .style(
             Style::default()
                 .fg(app.palette.text)
                 .bg(app.palette.surface0),
@@ -581,7 +589,11 @@ fn render_open_worktree_search(
         ));
     } else {
         spans.push(Span::styled(
-            open.query.clone(),
+            if open.search_focused {
+                open.query_input.with_cursor(&open.query)
+            } else {
+                open.query.clone()
+            },
             Style::default().fg(app.palette.text),
         ));
     }

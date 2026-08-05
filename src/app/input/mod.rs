@@ -49,7 +49,7 @@ mod terminal;
 pub(crate) use self::{
     modal::{
         handle_global_menu_key, handle_keybind_help_key, handle_navigator_key,
-        insert_navigator_search_text, insert_rename_input_text,
+        insert_keybind_help_search_text, insert_navigator_search_text, insert_rename_input_text,
     },
     navigate::{
         terminal_direct_indexed_navigation_action, terminal_direct_non_indexed_navigation_action,
@@ -72,6 +72,7 @@ use super::App;
 
 impl App {
     pub(super) async fn handle_key(&mut self, key: TerminalKey) {
+        let key = normalize_non_terminal_vertical_key(self.state.mode, key);
         let key_event = key.as_key_event();
         if modal_paste_target_active(&self.state) && is_modal_paste_shortcut(&key_event) {
             if let Some(text) = crate::platform::read_clipboard_text() {
@@ -113,6 +114,20 @@ impl App {
     }
 
     pub(super) async fn handle_paste(&mut self, text: String) {
+        if let Some(minibuffer) = self.state.emacs.minibuffer.as_mut() {
+            minibuffer.insert_str(&text);
+            return;
+        }
+        let emacs_text_mode_focused = self.state.emacs.enabled
+            && self
+                .state
+                .active
+                .and_then(|ws_idx| self.state.workspaces.get(ws_idx)?.focused_pane_id())
+                .is_some_and(|focused| self.state.emacs.owns_pane_cursor(focused));
+        if emacs_text_mode_focused {
+            self.state.emacs.echo = Some("Buffer is read-only".to_string());
+            return;
+        }
         if self.state.mode != Mode::Terminal {
             self.paste_into_active_text_input(&text);
             return;
@@ -157,6 +172,10 @@ impl App {
                 insert_navigator_search_text(&mut self.state, &self.terminal_runtimes, text);
                 true
             }
+            Mode::KeybindHelp => {
+                insert_keybind_help_search_text(&mut self.state, text);
+                true
+            }
             Mode::Copy => {
                 let Some(prompt) = self
                     .state
@@ -176,6 +195,32 @@ impl App {
     }
 
     pub(crate) fn handle_onboarding_key(&mut self, key: KeyEvent) {
+        if let Some(page) = self.state.emacs_onboarding_page {
+            match key.code {
+                KeyCode::Esc => {
+                    self.state.emacs_onboarding_page = None;
+                    modal::leave_modal(&mut self.state);
+                }
+                KeyCode::Char('g') if key.modifiers == KeyModifiers::CONTROL => {
+                    self.state.emacs_onboarding_page = None;
+                    modal::leave_modal(&mut self.state);
+                }
+                KeyCode::Left | KeyCode::Char('h') => {
+                    self.state.emacs_onboarding_page = Some(page.saturating_sub(1));
+                }
+                KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+                    if page + 1 < crate::ui::EMACS_ONBOARDING_PAGE_COUNT {
+                        self.state.emacs_onboarding_page = Some(page + 1);
+                    } else {
+                        self.state.emacs_onboarding_page = None;
+                        modal::leave_modal(&mut self.state);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match key.code {
             KeyCode::Right | KeyCode::Char('l') => self.open_settings_from_onboarding(),
             _ => {
@@ -508,6 +553,70 @@ impl App {
     }
 }
 
+/// Give every non-terminal Herdr surface Emacs-style vertical navigation.
+///
+/// This normalization intentionally happens after the Emacs interceptor in
+/// headless mode and never applies to `Mode::Terminal`, so live panes still
+/// receive the original control bytes and Emacs text mode keeps its own
+/// `next-line`/`previous-line` implementation.
+pub(crate) fn normalize_non_terminal_vertical_key(mode: Mode, mut key: TerminalKey) -> TerminalKey {
+    if mode != Mode::Terminal && key.modifiers == KeyModifiers::CONTROL {
+        let arrow = match key.code {
+            KeyCode::Char('n') => Some(KeyCode::Down),
+            KeyCode::Char('p') => Some(KeyCode::Up),
+            _ => None,
+        };
+        if let Some(arrow) = arrow {
+            key.code = arrow;
+            key.modifiers = KeyModifiers::empty();
+            key.shifted_codepoint = None;
+        }
+    }
+    key
+}
+
+#[cfg(test)]
+mod vertical_key_alias_tests {
+    use super::*;
+    use crossterm::event::KeyEventKind;
+
+    #[test]
+    fn c_n_and_c_p_become_arrows_only_outside_terminal_mode() {
+        let c_n = TerminalKey::new(KeyCode::Char('n'), KeyModifiers::CONTROL)
+            .with_kind(KeyEventKind::Repeat);
+        let c_p = TerminalKey::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
+
+        assert_eq!(
+            normalize_non_terminal_vertical_key(Mode::KeybindHelp, c_n),
+            TerminalKey::new(KeyCode::Down, KeyModifiers::empty()).with_kind(KeyEventKind::Repeat)
+        );
+        assert_eq!(
+            normalize_non_terminal_vertical_key(Mode::Copy, c_p),
+            TerminalKey::new(KeyCode::Up, KeyModifiers::empty())
+        );
+        assert_eq!(
+            normalize_non_terminal_vertical_key(Mode::Terminal, c_n),
+            c_n
+        );
+    }
+
+    #[test]
+    fn other_control_keys_and_modified_n_are_unchanged() {
+        for key in [
+            TerminalKey::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            TerminalKey::new(
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        ] {
+            assert_eq!(
+                normalize_non_terminal_vertical_key(Mode::Settings, key),
+                key
+            );
+        }
+    }
+}
+
 pub(crate) fn is_modal_paste_shortcut(key: &KeyEvent) -> bool {
     if !matches!(key.code, KeyCode::Char('v' | 'V')) {
         return false;
@@ -534,6 +643,7 @@ pub(crate) fn modal_paste_target_active(state: &AppState) -> bool {
             .as_ref()
             .is_some_and(|open| open.search_focused),
         Mode::Navigator => state.navigator.search_focused,
+        Mode::KeybindHelp => true,
         Mode::Copy => state
             .copy_mode
             .as_ref()
@@ -719,6 +829,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn c_n_and_c_p_follow_arrow_navigation_in_non_terminal_ui() {
+        let mut app = test_app();
+        modal::open_global_menu(&mut app.state);
+
+        app.handle_key(TerminalKey::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(app.state.global_menu.highlighted, 1);
+
+        app.handle_key(TerminalKey::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(app.state.global_menu.highlighted, 0);
+    }
+
+    #[tokio::test]
+    async fn emacs_onboarding_walks_pages_and_closes() {
+        let mut app = test_app();
+        modal::open_emacs_onboarding(&mut app.state);
+
+        assert_eq!(app.state.mode, Mode::Onboarding);
+        assert_eq!(app.state.emacs_onboarding_page, Some(0));
+
+        app.handle_key(TerminalKey::new(KeyCode::Right, KeyModifiers::empty()))
+            .await;
+        assert_eq!(app.state.emacs_onboarding_page, Some(1));
+
+        app.handle_key(TerminalKey::new(KeyCode::Left, KeyModifiers::empty()))
+            .await;
+        assert_eq!(app.state.emacs_onboarding_page, Some(0));
+
+        for _ in 0..crate::ui::EMACS_ONBOARDING_PAGE_COUNT {
+            app.handle_key(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()))
+                .await;
+        }
+        assert_eq!(app.state.emacs_onboarding_page, None);
+        assert_eq!(app.state.mode, Mode::Navigate);
+    }
+
+    #[tokio::test]
+    async fn emacs_onboarding_accepts_emacs_quit() {
+        let mut app = test_app();
+        modal::open_emacs_onboarding(&mut app.state);
+
+        app.handle_key(TerminalKey::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+            .await;
+
+        assert_eq!(app.state.emacs_onboarding_page, None);
+        assert_eq!(app.state.mode, Mode::Navigate);
+    }
+
+    #[test]
+    fn headless_non_terminal_dispatch_applies_c_n_alias() {
+        let mut app = test_app();
+        app.state.emacs.enabled = false;
+        modal::open_global_menu(&mut app.state);
+
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Key(TerminalKey::new(
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+            ))],
+            false,
+        );
+
+        assert_eq!(app.state.global_menu.highlighted, 1);
+    }
+
+    #[tokio::test]
     async fn paste_routes_to_rename_modal_input() {
         let mut app = test_app();
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("test")];
@@ -765,6 +942,18 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn paste_routes_to_keybind_help_search() {
+        let mut app = test_app();
+        app.state.mode = Mode::KeybindHelp;
+        app.state.keybind_help.scroll = 5;
+
+        app.handle_paste("forward-char\n".into()).await;
+
+        assert_eq!(app.state.keybind_help.query, "forward-char");
+        assert_eq!(app.state.keybind_help.scroll, 0);
+    }
+
     #[test]
     fn modal_paste_shortcut_matches_platform_primary_v() {
         #[cfg(target_os = "macos")]
@@ -801,5 +990,8 @@ mod tests {
 
         state.mode = Mode::ConfirmClose;
         assert!(!modal_paste_target_active(&state));
+
+        state.mode = Mode::KeybindHelp;
+        assert!(modal_paste_target_active(&state));
     }
 }

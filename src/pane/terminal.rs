@@ -57,6 +57,12 @@ pub(crate) struct TerminalTextPoint {
     pub col: u16,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TerminalLogicalTextAtPoint {
+    pub text: String,
+    pub point_byte: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TerminalTextMatch {
     pub start: TerminalTextPoint,
@@ -413,6 +419,17 @@ impl PaneTerminal {
         self.ghostty.text_row(row)
     }
 
+    pub(crate) fn logical_text_at_point(
+        &self,
+        point: TerminalTextPoint,
+    ) -> Option<TerminalLogicalTextAtPoint> {
+        self.ghostty.logical_text_at_point(point)
+    }
+
+    pub(crate) fn hyperlink_uri_at(&self, point: TerminalTextPoint) -> Option<String> {
+        self.ghostty.hyperlink_uri_at(point)
+    }
+
     pub fn read_text_range(&self, start: (u16, u32), end: (u16, u32)) -> Option<String> {
         self.ghostty.read_text_range(start, end)
     }
@@ -677,6 +694,33 @@ impl RetainedTextBuffer {
         }
 
         Self { cols, lines, atoms }
+    }
+
+    fn logical_text_at_point(
+        &self,
+        point: TerminalTextPoint,
+    ) -> Option<TerminalLogicalTextAtPoint> {
+        for line in &self.lines {
+            if let Some(span) = line.spans.iter().find(|span| {
+                span.start.row == point.row
+                    && span.start.col <= point.col
+                    && point.col <= span.end.col
+            }) {
+                return Some(TerminalLogicalTextAtPoint {
+                    text: line.text.clone(),
+                    point_byte: span.byte_start,
+                });
+            }
+            if let Some(span) = line.spans.iter().rev().find(|span| {
+                span.end.row == point.row && span.end.col.saturating_add(1) == point.col
+            }) {
+                return Some(TerminalLogicalTextAtPoint {
+                    text: line.text.clone(),
+                    point_byte: span.byte_end,
+                });
+            }
+        }
+        None
     }
 
     fn search(
@@ -1747,6 +1791,28 @@ impl GhosttyPaneTerminal {
                 .ok()
                 .map(|line| line.trim_end().to_string())
         })
+    }
+
+    pub(crate) fn logical_text_at_point(
+        &self,
+        point: TerminalTextPoint,
+    ) -> Option<TerminalLogicalTextAtPoint> {
+        let core = self.core.lock().ok()?;
+        let cols = core.terminal.cols().ok()?;
+        let rows = core.terminal.screen_text_rows().ok()?;
+        RetainedTextBuffer::new_search(cols, rows, 0).logical_text_at_point(point)
+    }
+
+    pub(crate) fn hyperlink_uri_at(&self, point: TerminalTextPoint) -> Option<String> {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|core| {
+                core.terminal
+                    .screen_hyperlink_uri(point.col, point.row)
+                    .ok()
+            })
+            .flatten()
     }
 
     /// Emacs layer seam (fork): plain text between two inclusive
@@ -2975,6 +3041,28 @@ mod tests {
         assert_eq!(matches[0].start, TerminalTextPoint { row: 0, col: 3 });
         assert_eq!(matches[0].end, TerminalTextPoint { row: 1, col: 0 });
         assert!(search_primary(&buffer, "hab", true).is_empty());
+    }
+
+    #[test]
+    fn retained_logical_text_maps_points_across_soft_wraps() {
+        let buffer = RetainedTextBuffer::new(
+            5,
+            vec![
+                text_row("src/m".chars().map(|ch| text_cell(&ch.to_string())), true),
+                text_row("ain.rs".chars().map(|ch| text_cell(&ch.to_string())), false),
+            ],
+        );
+
+        let first = buffer
+            .logical_text_at_point(TerminalTextPoint { row: 0, col: 1 })
+            .unwrap();
+        let second = buffer
+            .logical_text_at_point(TerminalTextPoint { row: 1, col: 2 })
+            .unwrap();
+        assert_eq!(first.text, "src/main.rs");
+        assert_eq!(second.text, "src/main.rs");
+        assert_eq!(&first.text[first.point_byte..first.point_byte + 1], "r");
+        assert_eq!(&second.text[second.point_byte..second.point_byte + 1], "n");
     }
 
     #[test]
