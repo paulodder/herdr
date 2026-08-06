@@ -51,6 +51,9 @@ pub enum ResponseResult {
     SessionSnapshot {
         snapshot: Box<SessionSnapshot>,
     },
+    ProcessSpawned {
+        pid: u32,
+    },
     WorkspaceInfo {
         workspace: WorkspaceInfo,
     },

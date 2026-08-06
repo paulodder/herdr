@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 17,
+  "protocol": 16,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -2571,6 +2571,26 @@
           ],
           "type": "object"
         },
+        "PaneSetRestoreCommandParams": {
+          "properties": {
+            "argv": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id"
+          ],
+          "type": "object"
+        },
         "PaneSplitParams": {
           "properties": {
             "cwd": {
@@ -3137,6 +3157,30 @@
               ]
             }
           },
+          "type": "object"
+        },
+        "ServerSpawnDetachedParams": {
+          "properties": {
+            "argv": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "output_path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "argv",
+            "output_path"
+          ],
           "type": "object"
         },
         "SplitDirection": {
@@ -3922,6 +3966,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/ServerLiveHandoffParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "server.spawn_detached",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ServerSpawnDetachedParams"
             }
           },
           "required": [
@@ -4770,6 +4830,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PaneRenameParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.set_restore_command",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneSetRestoreCommandParams"
             }
           },
           "required": [
@@ -7854,6 +7930,24 @@
               "required": [
                 "type",
                 "snapshot"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "pid": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "process_spawned",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pid"
               ],
               "type": "object"
             },

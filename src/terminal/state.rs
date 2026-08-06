@@ -98,6 +98,7 @@ pub struct TerminalState {
     pub last_agent_state_change_seq: Option<u64>,
     pub revision: u64,
     pub launch_argv: Option<Vec<String>>,
+    pub restore_argv: Option<Vec<String>>,
     pub respawn_shell_on_exit: bool,
     recent_agent_process_exit_at: Option<Instant>,
     pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
@@ -128,6 +129,7 @@ impl TerminalState {
             last_agent_state_change_seq: None,
             revision: 0,
             launch_argv: None,
+            restore_argv: None,
             respawn_shell_on_exit: false,
             recent_agent_process_exit_at: None,
             pending_agent_resume_plan: None,
@@ -158,6 +160,11 @@ impl TerminalState {
 
     pub fn with_launch_argv(mut self, argv: Vec<String>) -> Self {
         self.launch_argv = Some(argv);
+        self
+    }
+
+    pub fn with_restore_argv(mut self, argv: Vec<String>) -> Self {
+        self.restore_argv = Some(argv);
         self
     }
 
@@ -1324,6 +1331,7 @@ impl TerminalState {
         self.state = AgentState::Unknown;
         self.last_agent_state_change_seq = None;
         self.launch_argv = None;
+        self.restore_argv = None;
         self.respawn_shell_on_exit = false;
         self.recent_agent_process_exit_at = None;
         self.pending_agent_resume_plan = None;

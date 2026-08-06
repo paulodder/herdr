@@ -9,9 +9,9 @@ use crate::api::schema::{
     PaneProcessInfo, PaneProcessInfoParams, PaneProcessInfoProcess, PaneReadParams, PaneReadResult,
     PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
     PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
-    PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams,
-    PaneSwapReason, PaneSwapResult, PaneTarget, PaneZoomMode, PaneZoomParams, PaneZoomReason,
-    PaneZoomResult, ReadFormat, ReadSource, ResponseResult,
+    PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSetRestoreCommandParams,
+    PaneSplitParams, PaneSwapParams, PaneSwapReason, PaneSwapResult, PaneTarget, PaneZoomMode,
+    PaneZoomParams, PaneZoomReason, PaneZoomResult, ReadFormat, ReadSource, ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::App;
@@ -1213,6 +1213,36 @@ impl App {
         encode_success(id, ResponseResult::PaneInfo { pane })
     }
 
+    pub(super) fn handle_pane_set_restore_command(
+        &mut self,
+        id: String,
+        params: PaneSetRestoreCommandParams,
+    ) -> String {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let argv = match validate_restore_argv(params.argv) {
+            Ok(argv) => argv,
+            Err(message) => return encode_error(id, "invalid_restore_command", message),
+        };
+        let Some(terminal_id) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.terminal_id(pane_id))
+            .cloned()
+        else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        terminal.restore_argv = argv;
+        self.state.mark_session_dirty();
+        let pane = self.pane_info(ws_idx, pane_id).unwrap();
+        encode_success(id, ResponseResult::PaneInfo { pane })
+    }
+
     pub(super) fn handle_pane_read(&mut self, id: String, params: PaneReadParams) -> String {
         let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
@@ -1695,6 +1725,25 @@ fn normalize_state_labels(
         .collect()
 }
 
+fn validate_restore_argv(argv: Option<Vec<String>>) -> Result<Option<Vec<String>>, &'static str> {
+    let Some(argv) = argv else {
+        return Ok(None);
+    };
+    if argv.is_empty() {
+        return Err("restore command argv must not be empty");
+    }
+    if argv.len() > 64 {
+        return Err("restore command may contain at most 64 arguments");
+    }
+    if argv.iter().any(|arg| arg.is_empty() || arg.contains('\0')) {
+        return Err("restore command arguments must be non-empty and contain no NUL bytes");
+    }
+    if argv.iter().map(String::len).sum::<usize>() > 16 * 1024 {
+        return Err("restore command may contain at most 16384 bytes");
+    }
+    Ok(Some(argv))
+}
+
 fn pane_not_found(id: String, pane_id: &str) -> String {
     encode_error(id, "pane_not_found", format!("pane {pane_id} not found"))
 }
@@ -1949,6 +1998,51 @@ mod tests {
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
         (app, public_pane_id)
+    }
+
+    #[test]
+    fn pane_restore_command_can_be_set_and_cleared() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let argv = vec!["remote-bridge".into(), "--terminal".into(), "term_1".into()];
+
+        let response = app.handle_pane_set_restore_command(
+            "set".into(),
+            PaneSetRestoreCommandParams {
+                pane_id: pane_id.clone(),
+                argv: Some(argv.clone()),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(internal_pane_id)
+            .unwrap()
+            .clone();
+        assert_eq!(app.state.terminals[&terminal_id].restore_argv, Some(argv));
+
+        let response = app.handle_pane_set_restore_command(
+            "clear".into(),
+            PaneSetRestoreCommandParams {
+                pane_id,
+                argv: None,
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(app.state.terminals[&terminal_id].restore_argv.is_none());
+    }
+
+    #[test]
+    fn pane_restore_command_rejects_empty_argv() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let response = app.handle_pane_set_restore_command(
+            "set".into(),
+            PaneSetRestoreCommandParams {
+                pane_id,
+                argv: Some(Vec::new()),
+            },
+        );
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "invalid_restore_command");
     }
 
     #[tokio::test]

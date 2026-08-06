@@ -110,6 +110,13 @@ fn server_command() -> Command {
     Command::new("server")
         .about("Run or control the headless server")
         .subcommand(Command::new("stop").about("Stop the running server"))
+        .subcommand(
+            Command::new("spawn-detached")
+                .about("Spawn a detached host process through the server")
+                .arg(path_option("cwd", "PATH"))
+                .arg(path_option("output", "PATH"))
+                .arg(required("argv", "ARGV").num_args(1..).last(true)),
+        )
         .subcommand(Command::new("reload-config").about("Reload config in the running server"))
         .subcommand(
             Command::new("agent-manifests")
@@ -302,6 +309,17 @@ fn agent_command() -> Command {
                 .arg(Arg::new("name").value_name("NAME"))
                 .arg(flag("clear")),
         )
+        .subcommand(
+            Command::new("set-restore-command")
+                .about("Set the argv used to restore a pane after server restart")
+                .arg(required("pane_id", "PANE_ID"))
+                .arg(required("argv", "ARGV").num_args(1..).last(true)),
+        )
+        .subcommand(id_command(
+            "clear-restore-command",
+            "pane_id",
+            "Clear a pane restore command",
+        ))
         .subcommand(id_command("focus", "target", "Focus an agent"))
         .subcommand(
             Command::new("wait")

@@ -294,6 +294,32 @@ fn pane_send_input_defaults_to_empty_text_and_keys() {
 }
 
 #[test]
+fn detached_spawn_and_pane_restore_requests_round_trip() {
+    let spawn = Request {
+        id: "spawn".into(),
+        method: Method::ServerSpawnDetached(ServerSpawnDetachedParams {
+            argv: vec!["worker".into(), "--once".into()],
+            cwd: Some("/tmp".into()),
+            output_path: "/tmp/worker.log".into(),
+        }),
+    };
+    let encoded = serde_json::to_string(&spawn).unwrap();
+    let decoded: Request = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, spawn);
+
+    let restore = Request {
+        id: "restore".into(),
+        method: Method::PaneSetRestoreCommand(PaneSetRestoreCommandParams {
+            pane_id: "w1:p1".into(),
+            argv: Some(vec!["remote-bridge".into(), "term_1".into()]),
+        }),
+    };
+    let encoded = serde_json::to_string(&restore).unwrap();
+    let decoded: Request = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, restore);
+}
+
+#[test]
 fn pane_wait_for_output_defaults_strip_ansi_to_true() {
     let json = r#"
     {

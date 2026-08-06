@@ -489,6 +489,7 @@ fn restore_tab(
         let saved_label = saved_pane.and_then(|p| p.label.clone());
         let saved_agent_name = saved_pane.and_then(|p| p.agent_name.clone());
         let saved_launch_argv = saved_pane.and_then(|p| p.launch_argv.clone());
+        let saved_restore_argv = saved_pane.and_then(|p| p.restore_argv.clone());
         let saved_agent_session = saved_pane.and_then(|p| p.agent_session.as_ref());
         let saved_history =
             old_id.and_then(|old_id| history.and_then(|history| history.panes.get(old_id)));
@@ -576,6 +577,20 @@ fn restore_tab(
                     runtime_context.render_notify.clone(),
                     runtime_context.render_dirty.clone(),
                 )
+            } else if let Some(argv) = saved_restore_argv.as_deref() {
+                TerminalRuntime::spawn_argv_command(
+                    *id,
+                    rows,
+                    cols,
+                    cwd.clone(),
+                    argv,
+                    &launch_env,
+                    runtime_context.scrollback_limit_bytes,
+                    crate::terminal_theme::TerminalTheme::default(),
+                    runtime_context.events.clone(),
+                    runtime_context.render_notify.clone(),
+                    runtime_context.render_dirty.clone(),
+                )
             } else {
                 TerminalRuntime::spawn_with_initial_history(
                     *id,
@@ -594,7 +609,21 @@ fn restore_tab(
             }
 
             #[cfg(not(unix))]
-            {
+            if let Some(argv) = saved_restore_argv.as_deref() {
+                TerminalRuntime::spawn_argv_command(
+                    *id,
+                    rows,
+                    cols,
+                    cwd.clone(),
+                    argv,
+                    &launch_env,
+                    runtime_context.scrollback_limit_bytes,
+                    crate::terminal_theme::TerminalTheme::default(),
+                    runtime_context.events.clone(),
+                    runtime_context.render_notify.clone(),
+                    runtime_context.render_dirty.clone(),
+                )
+            } else {
                 TerminalRuntime::spawn_with_initial_history(
                     *id,
                     rows,
@@ -620,6 +649,9 @@ fn restore_tab(
                     if let Some(argv) = saved_launch_argv {
                         terminal = terminal.with_launch_argv(argv).with_respawn_shell_on_exit();
                     }
+                }
+                if let Some(argv) = saved_restore_argv {
+                    terminal = terminal.with_restore_argv(argv);
                 }
                 if let Some(label) = saved_label {
                     terminal.set_manual_label(label);
@@ -1182,6 +1214,7 @@ mod tests {
                                 value: "opencode-session".into(),
                             }),
                             launch_argv: None,
+                            restore_argv: None,
                         },
                     )]),
                     zoomed: false,
@@ -1261,6 +1294,7 @@ mod tests {
                                 agent_name: None,
                                 agent_session: None,
                                 launch_argv: None,
+                                restore_argv: None,
                             },
                         ),
                         (
@@ -1271,6 +1305,7 @@ mod tests {
                                 agent_name: None,
                                 agent_session: None,
                                 launch_argv: None,
+                                restore_argv: None,
                             },
                         ),
                     ]),
@@ -1323,6 +1358,7 @@ mod tests {
                     agent_name: None,
                     agent_session: None,
                     launch_argv: None,
+                    restore_argv: None,
                 },
             )
         };
@@ -1337,6 +1373,7 @@ mod tests {
                 value: "codex-session".into(),
             }),
             launch_argv: None,
+            restore_argv: None,
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -1491,6 +1528,7 @@ mod tests {
                                 value: "codex-session".into(),
                             }),
                             launch_argv: None,
+                            restore_argv: None,
                         },
                     )]),
                     zoomed: false,
@@ -1652,6 +1690,7 @@ mod tests {
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
+                restore_argv: None,
             },
         );
         let history = SessionHistorySnapshot {

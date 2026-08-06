@@ -1,4 +1,6 @@
-use crate::api::schema::{EmptyParams, Method, Request, ServerLiveHandoffParams};
+use crate::api::schema::{
+    EmptyParams, Method, Request, ServerLiveHandoffParams, ServerSpawnDetachedParams,
+};
 
 pub(super) fn run_server_command(args: &[String]) -> std::io::Result<Option<i32>> {
     let Some(subcommand) = args.first().map(|arg| arg.as_str()) else {
@@ -8,6 +10,7 @@ pub(super) fn run_server_command(args: &[String]) -> std::io::Result<Option<i32>
     match subcommand {
         "stop" => server_stop(&args[1..]).map(Some),
         "live-handoff" => server_live_handoff(&args[1..]).map(Some),
+        "spawn-detached" => server_spawn_detached(&args[1..]).map(Some),
         "--handoff-import" => Ok(None),
         "reload-config" => server_reload_config(&args[1..]).map(Some),
         "agent-manifests" => server_agent_manifests(&args[1..]).map(Some),
@@ -37,6 +40,57 @@ fn server_stop(args: &[String]) -> std::io::Result<i32> {
             Ok(1)
         }
     }
+}
+
+fn server_spawn_detached(args: &[String]) -> std::io::Result<i32> {
+    let mut cwd = None;
+    let mut output_path = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--cwd" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --cwd");
+                    return Ok(2);
+                };
+                cwd = Some(value.clone());
+                index += 2;
+            }
+            "--output" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --output");
+                    return Ok(2);
+                };
+                output_path = Some(value.clone());
+                index += 2;
+            }
+            "--" => {
+                index += 1;
+                break;
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                return Ok(2);
+            }
+        }
+    }
+    let Some(output_path) = output_path else {
+        eprintln!("usage: herdr server spawn-detached [--cwd PATH] --output PATH -- <argv...>");
+        return Ok(2);
+    };
+    let argv = args[index..].to_vec();
+    if argv.is_empty() {
+        eprintln!("usage: herdr server spawn-detached [--cwd PATH] --output PATH -- <argv...>");
+        return Ok(2);
+    }
+    super::print_response(&super::send_request(&Request {
+        id: "cli:server:spawn-detached".into(),
+        method: Method::ServerSpawnDetached(ServerSpawnDetachedParams {
+            argv,
+            cwd,
+            output_path,
+        }),
+    })?)
 }
 
 fn server_reload_config(args: &[String]) -> std::io::Result<i32> {
@@ -255,6 +309,7 @@ fn print_server_help() {
     eprintln!("  herdr server                run as headless server");
     eprintln!("  herdr server stop           stop the running server via the API socket");
     eprintln!("  herdr server live-handoff   hand off live panes to a new local server");
+    eprintln!("  herdr server spawn-detached [--cwd PATH] --output PATH -- <argv...>");
     eprintln!("  herdr server reload-config  reload config.toml in the running server");
     eprintln!("  herdr server agent-manifests [--json]  show agent detection manifest status");
     eprintln!("  herdr server update-agent-manifests [--json]  fetch and reload agent detection manifests");

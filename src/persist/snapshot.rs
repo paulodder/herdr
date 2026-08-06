@@ -107,6 +107,8 @@ pub struct PaneSnapshot {
     pub agent_session: Option<PaneAgentSessionSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_argv: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_argv: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -338,6 +340,11 @@ fn capture_tab(
             .get(id)
             .and_then(|pane| terminals.get(&pane.attached_terminal_id))
             .and_then(|terminal| terminal.launch_argv.clone());
+        let restore_argv = tab
+            .panes
+            .get(id)
+            .and_then(|pane| terminals.get(&pane.attached_terminal_id))
+            .and_then(|terminal| terminal.restore_argv.clone());
         let agent_session =
             tab.panes
                 .get(id)
@@ -370,6 +377,7 @@ fn capture_tab(
                 agent_name,
                 agent_session,
                 launch_argv,
+                restore_argv,
             },
         );
     }
@@ -612,6 +620,7 @@ mod tests {
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
+                restore_argv: None,
             },
         );
         panes.insert(
@@ -622,6 +631,7 @@ mod tests {
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
+                restore_argv: None,
             },
         );
 
@@ -978,6 +988,22 @@ mod tests {
     }
 
     #[test]
+    fn capture_contract_preserves_pane_restore_command() {
+        let mut state = state_with_workspaces(&["remote"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].terminal_id(root).unwrap().clone();
+        let restore_argv = vec!["remote-bridge".into(), "--terminal".into(), "term_1".into()];
+        state.terminals.get_mut(&terminal_id).unwrap().restore_argv = Some(restore_argv.clone());
+
+        let snapshot = capture_from_state(&state);
+
+        assert_eq!(
+            snapshot.workspaces[0].tabs[0].panes[&root.raw()].restore_argv,
+            Some(restore_argv)
+        );
+    }
+
+    #[test]
     fn capture_contract_tracks_workspace_identity_and_pane_cwds() {
         let mut state = state_with_workspaces(&["one"]);
         let root = state.workspaces[0].tabs[0].root_pane;
@@ -1178,6 +1204,7 @@ mod tests {
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
+                restore_argv: None,
             },
         );
         panes.insert(
@@ -1190,6 +1217,7 @@ mod tests {
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
+                restore_argv: None,
             },
         );
 

@@ -1,5 +1,7 @@
+use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -300,7 +302,80 @@ fn handle_request(
             r#"{"id":"","error":{"code":"internal_error","message":"failed to encode response"}}"#
                 .to_string()
         }),
+        Method::ServerSpawnDetached(params) => spawn_detached_process(request.id, params),
         _ => dispatch_to_app(request, api_tx),
+    }
+}
+
+fn spawn_detached_process(
+    id: String,
+    params: crate::api::schema::ServerSpawnDetachedParams,
+) -> String {
+    let error = |code: &str, message: String| {
+        serde_json::to_string(&ErrorResponse {
+            id: id.clone(),
+            error: ErrorBody {
+                code: code.into(),
+                message,
+            },
+        })
+        .unwrap_or_else(|_| "{}".into())
+    };
+    if params.argv.is_empty()
+        || params.argv.len() > 64
+        || params
+            .argv
+            .iter()
+            .any(|arg| arg.is_empty() || arg.contains('\0'))
+        || params.argv.iter().map(String::len).sum::<usize>() > 16 * 1024
+    {
+        return error(
+            "invalid_spawn_argv",
+            "detached process argv is empty or exceeds supported limits".into(),
+        );
+    }
+    let output_path = PathBuf::from(&params.output_path);
+    if !output_path.is_absolute() {
+        return error(
+            "invalid_output_path",
+            "detached process output path must be absolute".into(),
+        );
+    }
+    let stdout = match OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&output_path)
+    {
+        Ok(file) => file,
+        Err(err) => return error("output_open_failed", err.to_string()),
+    };
+    let stderr = match stdout.try_clone() {
+        Ok(file) => file,
+        Err(err) => return error("output_clone_failed", err.to_string()),
+    };
+    let mut command = Command::new(&params.argv[0]);
+    command.args(&params.argv[1..]);
+    if let Some(cwd) = params.cwd {
+        command.current_dir(cwd);
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+    crate::platform::detach_server_daemon_command(&mut command);
+    match command.spawn() {
+        Ok(mut child) => {
+            let pid = child.id();
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            serde_json::to_string(&SuccessResponse {
+                id,
+                result: ResponseResult::ProcessSpawned { pid },
+            })
+            .unwrap_or_else(|_| "{}".into())
+        }
+        Err(err) => error("spawn_failed", err.to_string()),
     }
 }
 
@@ -309,6 +384,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::Ping(_) => "ping",
         Method::ServerStop(_) => "server.stop",
         Method::ServerLiveHandoff(_) => "server.live_handoff",
+        Method::ServerSpawnDetached(_) => "server.spawn_detached",
         Method::ServerReloadConfig(_) => "server.reload_config",
         Method::ServerAgentManifests(_) => "server.agent_manifests",
         Method::ServerReloadAgentManifests(_) => "server.reload_agent_manifests",
@@ -362,6 +438,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::PaneGet(_) => "pane.get",
         Method::PaneFocus(_) => "pane.focus",
         Method::PaneRename(_) => "pane.rename",
+        Method::PaneSetRestoreCommand(_) => "pane.set_restore_command",
         Method::PaneSendText(_) => "pane.send_text",
         Method::PaneSendKeys(_) => "pane.send_keys",
         Method::PaneSendInput(_) => "pane.send_input",
@@ -958,6 +1035,33 @@ mod tests {
         let parsed: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed.id, "req_1");
         assert!(matches!(parsed.result, ResponseResult::Pong { .. }));
+    }
+
+    #[test]
+    fn detached_process_is_spawned_with_captured_output() {
+        let output_path = unique_test_path("spawn-detached-output");
+        let response = spawn_detached_process(
+            "spawn".into(),
+            crate::api::schema::ServerSpawnDetachedParams {
+                argv: vec!["/bin/sh".into(), "-c".into(), "printf ready".into()],
+                cwd: Some("/tmp".into()),
+                output_path: output_path.display().to_string(),
+            },
+        );
+        let parsed: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(
+            parsed.result,
+            ResponseResult::ProcessSpawned { pid } if pid > 0
+        ));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if fs::read_to_string(&output_path).is_ok_and(|output| output == "ready") {
+                let _ = fs::remove_file(&output_path);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("detached process did not write expected output");
     }
 
     #[test]

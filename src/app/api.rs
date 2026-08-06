@@ -858,6 +858,16 @@ impl App {
                 };
                 return serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
             }
+            Method::ServerSpawnDetached(_) => {
+                let response = ErrorResponse {
+                    id: request.id,
+                    error: ErrorBody {
+                        code: "unsupported_in_app_mode".into(),
+                        message: "detached process spawning requires the headless server".into(),
+                    },
+                };
+                return serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
+            }
             Method::ServerReloadConfig(_) => {
                 let report = self.reload_config();
                 SuccessResponse {
@@ -994,6 +1004,9 @@ impl App {
             Method::PaneGet(target) => return self.handle_pane_get(request.id, target),
             Method::PaneFocus(target) => return self.handle_pane_focus(request.id, target),
             Method::PaneRename(params) => return self.handle_pane_rename(request.id, params),
+            Method::PaneSetRestoreCommand(params) => {
+                return self.handle_pane_set_restore_command(request.id, params);
+            }
             Method::PaneRead(params) => return self.handle_pane_read(request.id, params),
             Method::PaneReportAgent(params) => {
                 return self.handle_pane_report_agent(request.id, params);

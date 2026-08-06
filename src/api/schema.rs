@@ -49,6 +49,8 @@ pub enum Method {
     ServerStop(EmptyParams),
     #[serde(rename = "server.live_handoff")]
     ServerLiveHandoff(ServerLiveHandoffParams),
+    #[serde(rename = "server.spawn_detached")]
+    ServerSpawnDetached(ServerSpawnDetachedParams),
     #[serde(rename = "server.reload_config")]
     ServerReloadConfig(EmptyParams),
     #[serde(rename = "server.agent_manifests")]
@@ -155,6 +157,8 @@ pub enum Method {
     PaneFocus(PaneTarget),
     #[serde(rename = "pane.rename")]
     PaneRename(PaneRenameParams),
+    #[serde(rename = "pane.set_restore_command")]
+    PaneSetRestoreCommand(PaneSetRestoreCommandParams),
     #[serde(rename = "pane.send_text")]
     PaneSendText(PaneSendTextParams),
     #[serde(rename = "pane.send_keys")]

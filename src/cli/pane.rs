@@ -3,9 +3,9 @@ use crate::api::schema::{
     PaneLayoutParams, PaneListParams, PaneMoveDestination, PaneMoveParams, PaneNeighborParams,
     PaneProcessInfoParams, PaneReadParams, PaneReleaseAgentParams, PaneRenameParams,
     PaneReportAgentParams, PaneReportAgentSessionParams, PaneReportMetadataParams,
-    PaneResizeParams, PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSplitParams,
-    PaneSwapParams, PaneTarget, PaneZoomMode, PaneZoomParams, ReadFormat, ReadSource, Request,
-    SplitDirection,
+    PaneResizeParams, PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams,
+    PaneSetRestoreCommandParams, PaneSplitParams, PaneSwapParams, PaneTarget, PaneZoomMode,
+    PaneZoomParams, ReadFormat, ReadSource, Request, SplitDirection,
 };
 
 pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
@@ -27,6 +27,8 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "zoom" => pane_zoom(&args[1..]),
         "read" => pane_read(&args[1..]),
         "rename" => pane_rename(&args[1..]),
+        "set-restore-command" => pane_set_restore_command(&args[1..]),
+        "clear-restore-command" => pane_clear_restore_command(&args[1..]),
         "split" => pane_split(&args[1..]),
         "swap" => pane_swap(&args[1..]),
         "move" => pane_move(&args[1..]),
@@ -941,6 +943,36 @@ fn pane_run(args: &[String]) -> std::io::Result<i32> {
     }))
 }
 
+fn pane_set_restore_command(args: &[String]) -> std::io::Result<i32> {
+    let Some(raw_pane_id) = args.first() else {
+        eprintln!("usage: herdr pane set-restore-command <pane_id> -- <argv...>");
+        return Ok(2);
+    };
+    if args.get(1).map(String::as_str) != Some("--") || args.len() < 3 {
+        eprintln!("usage: herdr pane set-restore-command <pane_id> -- <argv...>");
+        return Ok(2);
+    }
+    super::send_ok_request(Method::PaneSetRestoreCommand(PaneSetRestoreCommandParams {
+        pane_id: super::normalize_pane_id(raw_pane_id),
+        argv: Some(args[2..].to_vec()),
+    }))
+}
+
+fn pane_clear_restore_command(args: &[String]) -> std::io::Result<i32> {
+    let Some(raw_pane_id) = args.first() else {
+        eprintln!("usage: herdr pane clear-restore-command <pane_id>");
+        return Ok(2);
+    };
+    if args.len() != 1 {
+        eprintln!("usage: herdr pane clear-restore-command <pane_id>");
+        return Ok(2);
+    }
+    super::send_ok_request(Method::PaneSetRestoreCommand(PaneSetRestoreCommandParams {
+        pane_id: super::normalize_pane_id(raw_pane_id),
+        argv: None,
+    }))
+}
+
 fn pane_report_agent(args: &[String]) -> std::io::Result<i32> {
     let Some(raw_pane_id) = args.first() else {
         eprintln!("usage: herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--seq N] [--agent-session-id ID] [--agent-session-path PATH]");
@@ -1435,6 +1467,8 @@ fn print_pane_help() {
     eprintln!("  herdr pane release-agent <pane_id> --source ID --agent LABEL [--seq N]");
     eprintln!("  herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--state-label STATUS=TEXT] [--clear-state-labels] [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]");
     eprintln!("  herdr pane run <pane_id> <command>");
+    eprintln!("  herdr pane set-restore-command <pane_id> -- <argv...>");
+    eprintln!("  herdr pane clear-restore-command <pane_id>");
 }
 
 #[cfg(test)]

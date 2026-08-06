@@ -52,6 +52,7 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::PaneResize(_)
             | Method::PaneFocus(_)
             | Method::PaneRename(_)
+            | Method::PaneSetRestoreCommand(_)
             | Method::PaneReportAgent(_)
             | Method::PaneReportAgentSession(_)
             | Method::PaneReportMetadata(_)
