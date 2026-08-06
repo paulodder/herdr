@@ -161,6 +161,17 @@ fn workspace_command() -> Command {
                 .arg(required("label", "LABEL").num_args(1..)),
         )
         .subcommand(
+            Command::new("set-terminal-launcher")
+                .about("Set the argv used for new workspace terminals")
+                .arg(required("workspace_id", "WORKSPACE_ID"))
+                .arg(required("argv", "ARGV").num_args(1..).last(true)),
+        )
+        .subcommand(id_command(
+            "clear-terminal-launcher",
+            "workspace_id",
+            "Restore the default shell for new workspace terminals",
+        ))
+        .subcommand(
             Command::new("report-metadata")
                 .about("Report display-only workspace metadata")
                 .arg(required("workspace_id", "WORKSPACE_ID"))

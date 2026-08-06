@@ -69,25 +69,46 @@ impl App {
         let default_shell = self.state.default_shell.clone();
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
         let host_terminal_theme = self.state.host_terminal_theme;
-        let extra_env = match super::env::normalize_launch_env(env) {
+        let mut extra_env = match super::env::normalize_launch_env(env) {
             Ok(env) => env,
             Err((code, message)) => return encode_error(id, &code, message),
         };
+        let terminal_launcher = self.state.workspaces[ws_idx].terminal_launcher_argv.clone();
+        if terminal_launcher.is_some() {
+            extra_env.push(("HERDR_LAUNCH_PROTOCOL".into(), "1".into()));
+            extra_env.push(("HERDR_LAUNCH_KIND".into(), "tab".into()));
+            extra_env.push((
+                "HERDR_LAUNCH_REQUESTED_CWD".into(),
+                cwd.display().to_string(),
+            ));
+        }
         let result = self
             .state
             .workspaces
             .get_mut(ws_idx)
             .ok_or_else(|| std::io::Error::other("workspace disappeared"))
             .and_then(|ws| {
-                ws.create_tab(
-                    rows,
-                    cols,
-                    cwd,
-                    scrollback_limit_bytes,
-                    host_terminal_theme,
-                    crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode),
-                    extra_env,
-                )
+                if let Some(argv) = terminal_launcher.as_deref() {
+                    ws.create_tab_argv_command(
+                        rows,
+                        cols,
+                        cwd,
+                        argv,
+                        extra_env,
+                        scrollback_limit_bytes,
+                        host_terminal_theme,
+                    )
+                } else {
+                    ws.create_tab(
+                        rows,
+                        cols,
+                        cwd,
+                        scrollback_limit_bytes,
+                        host_terminal_theme,
+                        crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode),
+                        extra_env,
+                    )
+                }
             });
         match result {
             Ok((tab_idx, terminal, runtime)) => {
@@ -420,6 +441,44 @@ mod tests {
             crate::worktree::canonical_or_original(created_cwd),
             crate::worktree::canonical_or_original(&cached_cwd)
         );
+        shutdown_test_runtimes(&mut app);
+    }
+
+    #[tokio::test]
+    async fn tab_create_uses_workspace_terminal_launcher() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        let mut workspace = Workspace::test_new("remote");
+        let launcher = vec![exiting_test_command().into()];
+        workspace.terminal_launcher_argv = Some(launcher.clone());
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let response = app.handle_tab_create(
+            "req".into(),
+            TabCreateParams {
+                workspace_id: None,
+                cwd: None,
+                focus: false,
+                label: None,
+                env: Default::default(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::TabCreated { root_pane, .. } = success.result else {
+            panic!("expected tab created");
+        };
+        let terminal = app
+            .state
+            .terminals
+            .iter()
+            .find(|(id, _)| id.to_string() == root_pane.terminal_id)
+            .map(|(_, terminal)| terminal)
+            .unwrap();
+        assert_eq!(terminal.launch_argv.as_ref(), Some(&launcher));
         shutdown_test_runtimes(&mut app);
     }
 }

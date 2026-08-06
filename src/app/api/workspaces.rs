@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, ResponseResult, WorkspaceCreateParams,
-    WorkspaceMoveParams, WorkspaceRenameParams, WorkspaceReportMetadataParams, WorkspaceTarget,
+    WorkspaceMoveParams, WorkspaceRenameParams, WorkspaceReportMetadataParams,
+    WorkspaceSetTerminalLauncherParams, WorkspaceTarget,
 };
 use crate::app::App;
 
@@ -10,6 +11,31 @@ use super::super::api_helpers::{normalize_metadata_source, normalize_metadata_tt
 use super::responses::{encode_error, encode_success};
 
 impl App {
+    pub(super) fn handle_workspace_set_terminal_launcher(
+        &mut self,
+        id: String,
+        params: WorkspaceSetTerminalLauncherParams,
+    ) -> String {
+        let Some(index) = self.parse_workspace_id(&params.workspace_id) else {
+            return workspace_not_found(id, &params.workspace_id);
+        };
+        let argv = match validate_terminal_launcher_argv(params.argv) {
+            Ok(argv) => argv,
+            Err(message) => return encode_error(id, "invalid_terminal_launcher", message),
+        };
+        let Some(workspace) = self.state.workspaces.get_mut(index) else {
+            return workspace_not_found(id, &params.workspace_id);
+        };
+        workspace.terminal_launcher_argv = argv;
+        self.schedule_session_save();
+        encode_success(
+            id,
+            ResponseResult::WorkspaceInfo {
+                workspace: self.workspace_info(index),
+            },
+        )
+    }
+
     pub(super) fn handle_workspace_list(&mut self, id: String) -> String {
         encode_success(
             id,
@@ -269,6 +295,27 @@ impl App {
     }
 }
 
+fn validate_terminal_launcher_argv(
+    argv: Option<Vec<String>>,
+) -> Result<Option<Vec<String>>, &'static str> {
+    let Some(argv) = argv else {
+        return Ok(None);
+    };
+    if argv.is_empty() {
+        return Err("terminal launcher argv must not be empty");
+    }
+    if argv.len() > 64 {
+        return Err("terminal launcher argv may contain at most 64 arguments");
+    }
+    if argv.iter().any(|arg| arg.is_empty() || arg.contains('\0')) {
+        return Err("terminal launcher arguments must be non-empty and contain no NUL bytes");
+    }
+    if argv.iter().map(String::len).sum::<usize>() > 16 * 1024 {
+        return Err("terminal launcher argv may contain at most 16384 bytes");
+    }
+    Ok(Some(argv))
+}
+
 fn workspace_not_found(id: String, workspace_id: &str) -> String {
     encode_error(
         id,
@@ -281,6 +328,72 @@ fn workspace_not_found(id: String, workspace_id: &str) -> String {
 mod tests {
     use super::*;
     use crate::{api::schema::SuccessResponse, config::Config, workspace::Workspace};
+
+    #[test]
+    fn terminal_launcher_can_be_set_and_cleared() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("remote")];
+        let workspace_id = app.public_workspace_id(0);
+        let argv = vec!["remote-launcher".into(), "--host".into(), "example".into()];
+
+        let response = app.handle_workspace_set_terminal_launcher(
+            "set".into(),
+            WorkspaceSetTerminalLauncherParams {
+                workspace_id: workspace_id.clone(),
+                argv: Some(argv.clone()),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::WorkspaceInfo { workspace } = success.result else {
+            panic!("expected workspace info");
+        };
+        assert_eq!(workspace.terminal_launcher_argv, Some(argv));
+
+        let response = app.handle_workspace_set_terminal_launcher(
+            "clear".into(),
+            WorkspaceSetTerminalLauncherParams {
+                workspace_id,
+                argv: None,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::WorkspaceInfo { workspace } = success.result else {
+            panic!("expected workspace info");
+        };
+        assert_eq!(workspace.terminal_launcher_argv, None);
+    }
+
+    #[test]
+    fn terminal_launcher_rejects_empty_argv_without_mutating_workspace() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("remote")];
+        let workspace_id = app.public_workspace_id(0);
+
+        let response = app.handle_workspace_set_terminal_launcher(
+            "set".into(),
+            WorkspaceSetTerminalLauncherParams {
+                workspace_id,
+                argv: Some(Vec::new()),
+            },
+        );
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "invalid_terminal_launcher");
+        assert_eq!(app.state.workspaces[0].terminal_launcher_argv, None);
+    }
 
     // `new_cwd = follow` must anchor on the focused pane for every creation
     // surface. Splits and tabs already do; a new workspace must follow the

@@ -46,7 +46,7 @@ impl App {
         let Some((ws_idx, target_pane_id)) = target else {
             return encode_error(id, "pane_not_found", "pane not found");
         };
-        let extra_env = match super::env::normalize_launch_env(params.env) {
+        let mut extra_env = match super::env::normalize_launch_env(params.env) {
             Ok(env) => env,
             Err((code, message)) => return encode_error(id, &code, message),
         };
@@ -59,16 +59,67 @@ impl App {
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
         let host_terminal_theme = self.state.host_terminal_theme;
         let previous_focus = self.state.current_pane_focus_target();
+        let source_public_pane_id = self
+            .public_pane_id(ws_idx, target_pane_id)
+            .unwrap_or_else(|| target_pane_id.raw().to_string());
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return encode_error(id, "pane_not_found", "pane not found");
         };
-        let direction = match params.direction {
+        let direction = match params.direction.clone() {
             crate::api::schema::SplitDirection::Right => ratatui::layout::Direction::Horizontal,
             crate::api::schema::SplitDirection::Down => ratatui::layout::Direction::Vertical,
         };
+        let terminal_launcher = ws.terminal_launcher_argv.clone();
+        if terminal_launcher.is_some() {
+            extra_env.push(("HERDR_LAUNCH_PROTOCOL".into(), "1".into()));
+            extra_env.push(("HERDR_LAUNCH_KIND".into(), "split".into()));
+            extra_env.push(("HERDR_LAUNCH_SOURCE_PANE_ID".into(), source_public_pane_id));
+            extra_env.push((
+                "HERDR_LAUNCH_DIRECTION".into(),
+                match params.direction {
+                    crate::api::schema::SplitDirection::Right => "right",
+                    crate::api::schema::SplitDirection::Down => "down",
+                }
+                .into(),
+            ));
+            if let Some(ratio) = params.ratio {
+                extra_env.push(("HERDR_LAUNCH_RATIO".into(), ratio.to_string()));
+            }
+            if let Some(cwd) = split_cwd.as_ref() {
+                extra_env.push((
+                    "HERDR_LAUNCH_REQUESTED_CWD".into(),
+                    cwd.display().to_string(),
+                ));
+            }
+        }
         let shell_config = crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode);
-        let split_result = match params.ratio {
-            Some(ratio) => ws.split_pane_with_ratio(
+        let split_result = match (terminal_launcher.as_deref(), params.ratio) {
+            (Some(argv), Some(ratio)) => ws.split_pane_argv_command_with_ratio(
+                target_pane_id,
+                direction,
+                ratio,
+                rows,
+                cols,
+                split_cwd,
+                argv,
+                extra_env,
+                scrollback_limit_bytes,
+                host_terminal_theme,
+                params.focus,
+            ),
+            (Some(argv), None) => ws.split_pane_argv_command(
+                target_pane_id,
+                direction,
+                rows,
+                cols,
+                split_cwd,
+                argv,
+                extra_env,
+                scrollback_limit_bytes,
+                host_terminal_theme,
+                params.focus,
+            ),
+            (None, Some(ratio)) => ws.split_pane_with_ratio(
                 target_pane_id,
                 direction,
                 ratio,
@@ -81,7 +132,7 @@ impl App {
                 extra_env,
                 params.focus,
             ),
-            None => ws.split_pane(
+            (None, None) => ws.split_pane(
                 target_pane_id,
                 direction,
                 rows,
@@ -1875,6 +1926,7 @@ fn invalid_agent(id: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{exiting_test_command, shutdown_test_runtimes};
     use super::*;
     use crate::{
         api::schema::{ErrorResponse, SplitDirection, SuccessResponse},
@@ -1897,6 +1949,40 @@ mod tests {
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
         (app, public_pane_id)
+    }
+
+    #[tokio::test]
+    async fn pane_split_uses_workspace_terminal_launcher() {
+        let (mut app, source_pane_id) = app_with_test_workspace();
+        let launcher = vec![exiting_test_command().into()];
+        app.state.workspaces[0].terminal_launcher_argv = Some(launcher.clone());
+
+        let response = app.handle_pane_split(
+            "split".into(),
+            PaneSplitParams {
+                workspace_id: None,
+                target_pane_id: Some(source_pane_id),
+                direction: SplitDirection::Right,
+                ratio: None,
+                cwd: None,
+                focus: false,
+                env: Default::default(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneInfo { pane } = success.result else {
+            panic!("expected pane info");
+        };
+        let terminal = app
+            .state
+            .terminals
+            .iter()
+            .find(|(id, _)| id.to_string() == pane.terminal_id)
+            .map(|(_, terminal)| terminal)
+            .unwrap();
+        assert_eq!(terminal.launch_argv.as_ref(), Some(&launcher));
+        shutdown_test_runtimes(&mut app);
     }
 
     fn app_with_send_key_runtime(

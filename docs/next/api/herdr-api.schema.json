@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 16,
+  "protocol": 17,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -1050,6 +1050,15 @@
               "format": "uint",
               "minimum": 0,
               "type": "integer"
+            },
+            "terminal_launcher_argv": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
             },
             "tokens": {
               "additionalProperties": {
@@ -3696,6 +3705,26 @@
           ],
           "type": "object"
         },
+        "WorkspaceSetTerminalLauncherParams": {
+          "properties": {
+            "argv": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id"
+          ],
+          "type": "object"
+        },
         "WorkspaceTarget": {
           "properties": {
             "workspace_id": {
@@ -4085,6 +4114,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/WorkspaceRenameParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "workspace.set_terminal_launcher",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkspaceSetTerminalLauncherParams"
             }
           },
           "required": [
@@ -8949,6 +8994,15 @@
               "format": "uint",
               "minimum": 0,
               "type": "integer"
+            },
+            "terminal_launcher_argv": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
             },
             "tokens": {
               "additionalProperties": {

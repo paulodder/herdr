@@ -27,6 +27,7 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::WorkspaceCreate(_)
             | Method::WorkspaceFocus(_)
             | Method::WorkspaceRename(_)
+            | Method::WorkspaceSetTerminalLauncher(_)
             | Method::WorkspaceMove(_)
             | Method::WorkspaceReportMetadata(_)
             | Method::WorkspaceClose(_)

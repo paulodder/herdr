@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::api::schema::{
     Method, WorkspaceCreateParams, WorkspaceRenameParams, WorkspaceReportMetadataParams,
+    WorkspaceSetTerminalLauncherParams,
 };
 
 pub(super) fn run_workspace_command(args: &[String]) -> std::io::Result<i32> {
@@ -16,6 +17,8 @@ pub(super) fn run_workspace_command(args: &[String]) -> std::io::Result<i32> {
         "get" => workspace_get(&args[1..]),
         "focus" => workspace_focus(&args[1..]),
         "rename" => workspace_rename(&args[1..]),
+        "set-terminal-launcher" => workspace_set_terminal_launcher(&args[1..]),
+        "clear-terminal-launcher" => workspace_clear_terminal_launcher(&args[1..]),
         "report-metadata" => workspace_report_metadata(&args[1..]),
         "close" => workspace_close(&args[1..]),
         "help" | "--help" | "-h" => {
@@ -139,6 +142,36 @@ fn workspace_rename(args: &[String]) -> std::io::Result<i32> {
     })
 }
 
+fn workspace_set_terminal_launcher(args: &[String]) -> std::io::Result<i32> {
+    let Some(raw_workspace_id) = args.first() else {
+        eprintln!("usage: herdr workspace set-terminal-launcher <workspace_id> -- <argv...>");
+        return Ok(2);
+    };
+    if args.get(1).map(String::as_str) != Some("--") || args.len() < 3 {
+        eprintln!("usage: herdr workspace set-terminal-launcher <workspace_id> -- <argv...>");
+        return Ok(2);
+    }
+    super::runtime::workspace_set_terminal_launcher(WorkspaceSetTerminalLauncherParams {
+        workspace_id: super::normalize_workspace_id(raw_workspace_id),
+        argv: Some(args[2..].to_vec()),
+    })
+}
+
+fn workspace_clear_terminal_launcher(args: &[String]) -> std::io::Result<i32> {
+    let Some(raw_workspace_id) = args.first() else {
+        eprintln!("usage: herdr workspace clear-terminal-launcher <workspace_id>");
+        return Ok(2);
+    };
+    if args.len() != 1 {
+        eprintln!("usage: herdr workspace clear-terminal-launcher <workspace_id>");
+        return Ok(2);
+    }
+    super::runtime::workspace_set_terminal_launcher(WorkspaceSetTerminalLauncherParams {
+        workspace_id: super::normalize_workspace_id(raw_workspace_id),
+        argv: None,
+    })
+}
+
 fn workspace_report_metadata(args: &[String]) -> std::io::Result<i32> {
     let Some(raw_workspace_id) = args.first() else {
         eprintln!("usage: herdr workspace report-metadata <workspace_id> --source ID [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]");
@@ -244,6 +277,8 @@ fn print_workspace_help() {
     eprintln!("  herdr workspace get <workspace_id>");
     eprintln!("  herdr workspace focus <workspace_id>");
     eprintln!("  herdr workspace rename <workspace_id> <label>");
+    eprintln!("  herdr workspace set-terminal-launcher <workspace_id> -- <argv...>");
+    eprintln!("  herdr workspace clear-terminal-launcher <workspace_id>");
     eprintln!("  herdr workspace report-metadata <workspace_id> --source ID [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]");
     eprintln!("  herdr workspace close <workspace_id>");
 }

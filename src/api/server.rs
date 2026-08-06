@@ -321,6 +321,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::WorkspaceGet(_) => "workspace.get",
         Method::WorkspaceFocus(_) => "workspace.focus",
         Method::WorkspaceRename(_) => "workspace.rename",
+        Method::WorkspaceSetTerminalLauncher(_) => "workspace.set_terminal_launcher",
         Method::WorkspaceMove(_) => "workspace.move",
         Method::WorkspaceReportMetadata(_) => "workspace.report_metadata",
         Method::WorkspaceClose(_) => "workspace.close",

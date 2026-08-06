@@ -120,6 +120,8 @@ herdr workspace create [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--focus] [
 herdr workspace get <workspace_id>
 herdr workspace focus <workspace_id>
 herdr workspace rename <workspace_id> <label>
+herdr workspace set-terminal-launcher <workspace_id> -- <argv...>
+herdr workspace clear-terminal-launcher <workspace_id>
 herdr workspace report-metadata <workspace_id> --source ID [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]
 herdr workspace close <workspace_id>
 ```
@@ -129,6 +131,13 @@ Create a workspace without stealing focus:
 ```bash
 herdr workspace create --cwd ~/project --label api --no-focus
 ```
+
+Integrations can set a workspace terminal launcher to replace the default shell
+for future ordinary tabs and splits. Herdr executes argv directly and supplies
+`HERDR_LAUNCH_PROTOCOL=1`, `HERDR_LAUNCH_KIND=tab|split`, and split source,
+direction, ratio, and requested-cwd context through `HERDR_LAUNCH_*` variables.
+Agent, plugin, and explicit layout commands are unaffected. Clear the launcher
+to restore normal shell creation.
 
 ## Worktrees
 

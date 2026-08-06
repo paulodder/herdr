@@ -116,6 +116,8 @@ herdr workspace create [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--focus] [
 herdr workspace get <workspace_id>
 herdr workspace focus <workspace_id>
 herdr workspace rename <workspace_id> <label>
+herdr workspace set-terminal-launcher <workspace_id> -- <argv...>
+herdr workspace clear-terminal-launcher <workspace_id>
 herdr workspace report-metadata <workspace_id> --source ID [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]
 herdr workspace close <workspace_id>
 ```
@@ -125,6 +127,8 @@ herdr workspace close <workspace_id>
 ```bash
 herdr workspace create --cwd ~/project --label api --no-focus
 ```
+
+インテグレーションはワークスペースのターミナルランチャーを設定し、今後作成される通常のタブや分割でデフォルトシェルを置き換えられます。Herdr は argv を直接実行し、`HERDR_LAUNCH_PROTOCOL=1`、`HERDR_LAUNCH_KIND=tab|split`、および分割元・方向・比率・要求された cwd のコンテキストを `HERDR_LAUNCH_*` 変数で渡します。エージェント、プラグイン、明示的なレイアウトコマンドには影響しません。ランチャーをクリアすると通常のシェル作成に戻ります。
 
 ## Worktree
 

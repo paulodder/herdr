@@ -2,6 +2,26 @@ use std::collections::HashMap;
 
 use super::*;
 
+#[test]
+fn workspace_terminal_launcher_request_round_trips() {
+    let request = Request {
+        id: "launcher".into(),
+        method: Method::WorkspaceSetTerminalLauncher(WorkspaceSetTerminalLauncherParams {
+            workspace_id: "w1".into(),
+            argv: Some(vec![
+                "remote-launcher".into(),
+                "--host".into(),
+                "example".into(),
+            ]),
+        }),
+    };
+
+    let json = serde_json::to_string(&request).unwrap();
+    assert!(json.contains("\"method\":\"workspace.set_terminal_launcher\""));
+    let restored: Request = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, request);
+}
+
 fn protocol_schema_entry<T: schemars::JsonSchema>(name: &str) -> serde_json::Value {
     let mut schema = serde_json::to_value(schemars::schema_for!(T)).unwrap();
     rewrite_schema_refs(&mut schema, name);
@@ -596,6 +616,7 @@ fn worktree_request_and_response_round_trip() {
                 tab_count: 1,
                 active_tab_id: "w_1:1".into(),
                 agent_status: AgentStatus::Unknown,
+                terminal_launcher_argv: None,
                 tokens: HashMap::new(),
                 worktree: Some(WorkspaceWorktreeInfo {
                     repo_key: "/repo/herdr/.git".into(),
@@ -682,6 +703,7 @@ fn worktree_lifecycle_events_round_trip() {
         tab_count: 1,
         active_tab_id: "w_2:1".into(),
         agent_status: AgentStatus::Unknown,
+        terminal_launcher_argv: None,
         tokens: HashMap::new(),
         worktree: Some(WorkspaceWorktreeInfo {
             repo_key: "/repo/herdr/.git".into(),

@@ -73,6 +73,8 @@ pub enum Method {
     WorkspaceFocus(WorkspaceTarget),
     #[serde(rename = "workspace.rename")]
     WorkspaceRename(WorkspaceRenameParams),
+    #[serde(rename = "workspace.set_terminal_launcher")]
+    WorkspaceSetTerminalLauncher(WorkspaceSetTerminalLauncherParams),
     #[serde(rename = "workspace.move")]
     WorkspaceMove(WorkspaceMoveParams),
     #[serde(rename = "workspace.report_metadata")]

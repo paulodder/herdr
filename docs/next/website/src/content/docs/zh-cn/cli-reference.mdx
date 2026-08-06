@@ -116,6 +116,8 @@ herdr workspace create [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--focus] [
 herdr workspace get <workspace_id>
 herdr workspace focus <workspace_id>
 herdr workspace rename <workspace_id> <label>
+herdr workspace set-terminal-launcher <workspace_id> -- <argv...>
+herdr workspace clear-terminal-launcher <workspace_id>
 herdr workspace report-metadata <workspace_id> --source ID [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]
 herdr workspace close <workspace_id>
 ```
@@ -125,6 +127,8 @@ herdr workspace close <workspace_id>
 ```bash
 herdr workspace create --cwd ~/project --label api --no-focus
 ```
+
+集成可以设置工作区终端启动器,用它替代今后普通标签页和分屏中的默认 shell。Herdr 直接执行 argv,并通过 `HERDR_LAUNCH_*` 变量提供 `HERDR_LAUNCH_PROTOCOL=1`、`HERDR_LAUNCH_KIND=tab|split` 以及分屏来源、方向、比例和请求 cwd 的上下文。代理、插件和显式布局命令不受影响。清除启动器即可恢复普通 shell 创建。
 
 ## Worktree
 
