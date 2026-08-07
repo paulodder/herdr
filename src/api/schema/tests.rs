@@ -60,6 +60,7 @@ fn protocol_schema_document() -> serde_json::Value {
             "success_response": protocol_schema_entry::<SuccessResponse>("success_response"),
             "error_response": protocol_schema_entry::<ErrorResponse>("error_response"),
             "event": protocol_schema_entry::<EventEnvelope>("event"),
+            "sequenced_event": protocol_schema_entry::<SequencedEventEnvelope>("sequenced_event"),
             "subscription_event": protocol_schema_entry::<SubscriptionEventEnvelope>("subscription_event"),
         },
     })
@@ -571,6 +572,12 @@ fn success_response_round_trips() {
             capabilities: Some(ServerCapabilities {
                 live_handoff: true,
                 detached_server_daemon: true,
+                session_watch: true,
+            }),
+            identity: Some(RuntimeIdentity {
+                server_id: "server_1".into(),
+                session_id: "session_1".into(),
+                session_name: "default".into(),
             }),
         },
     };
@@ -596,7 +603,13 @@ fn session_snapshot_request_and_response_round_trip() {
         result: ResponseResult::SessionSnapshot {
             snapshot: Box::new(SessionSnapshot {
                 version: "0.1.2".into(),
-                protocol: 16,
+                protocol: 17,
+                identity: RuntimeIdentity {
+                    server_id: "server_1".into(),
+                    session_id: "session_1".into(),
+                    session_name: "default".into(),
+                },
+                event_cursor: 42,
                 focused_workspace_id: None,
                 focused_tab_id: None,
                 focused_pane_id: None,
@@ -612,6 +625,36 @@ fn session_snapshot_request_and_response_round_trip() {
     assert!(json.contains("\"type\":\"session_snapshot\""));
     let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
     assert_eq!(restored, response);
+}
+
+#[test]
+fn session_watch_request_and_event_round_trip() {
+    let request = Request {
+        id: "req_watch".into(),
+        method: Method::SessionWatch(SessionWatchParams {
+            after_cursor: Some(41),
+        }),
+    };
+    let json = serde_json::to_string(&request).unwrap();
+    assert!(json.contains("\"method\":\"session.watch\""));
+    assert!(json.contains("\"after_cursor\":41"));
+    let restored: Request = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, request);
+
+    let event = SequencedEventEnvelope {
+        cursor: 42,
+        event: EventEnvelope {
+            event: EventKind::WorkspaceClosed,
+            data: EventData::WorkspaceClosed {
+                workspace_id: "w_1".into(),
+                workspace: None,
+            },
+        },
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert!(json.contains("\"cursor\":42"));
+    let restored: SequencedEventEnvelope = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, event);
 }
 
 #[test]

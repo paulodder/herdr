@@ -2475,6 +2475,44 @@ impl HeadlessServer {
             return true;
         }
 
+        if let Some(request) = self.app.state.request_federation_attach.take() {
+            let endpoint_id = request.endpoint_id;
+            let (focus_kind, resource_id) = request
+                .resource
+                .map(|resource| {
+                    let kind = match resource.kind {
+                        crate::federation::FederatedResourceKind::Workspace => {
+                            protocol::FederationFocusKind::Workspace
+                        }
+                        crate::federation::FederatedResourceKind::Tab => {
+                            protocol::FederationFocusKind::Tab
+                        }
+                        crate::federation::FederatedResourceKind::Pane
+                        | crate::federation::FederatedResourceKind::Terminal
+                        | crate::federation::FederatedResourceKind::Agent => {
+                            protocol::FederationFocusKind::Pane
+                        }
+                    };
+                    (Some(kind), Some(resource.resource_id))
+                })
+                .unwrap_or((None, None));
+            self.send_client_graphics_cleanup(client_id);
+            self.send_to_client(
+                client_id,
+                ServerMessage::FederationAttach {
+                    endpoint_id,
+                    target: request.target,
+                    session: request.session,
+                    focus_kind,
+                    resource_id,
+                },
+            );
+            if let Some(client) = self.clients.get_mut(&client_id) {
+                client.writer = None;
+            }
+            return false;
+        }
+
         if self.app.state.detach_requested {
             self.app.state.detach_requested = false;
             info!(client_id, "client detach requested via keybind");
@@ -3947,6 +3985,7 @@ fn is_keybinding_config_diagnostic(diagnostic: &str) -> bool {
 pub fn run_server() -> io::Result<()> {
     init_logging();
     crate::platform::raise_server_nofile_limit();
+    crate::runtime_identity::current()?;
 
     let args: Vec<String> = std::env::args().collect();
     if args.get(2).map(String::as_str) == Some("--handoff-import") {
@@ -4065,6 +4104,7 @@ fn take_startup_cwd() -> Option<PathBuf> {
 
 #[cfg(unix)]
 fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> {
+    crate::runtime_identity::current()?;
     let loaded_config = config::Config::load();
     let mut received = crate::server::handoff::receive(socket_path, token)?;
     crate::server::handoff::log_import_result(received.manifest.panes.len());

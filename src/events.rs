@@ -54,6 +54,8 @@ pub struct WorktreeRemoveResult {
 /// An event from a background task to the main loop.
 #[derive(Debug)]
 pub enum AppEvent {
+    /// A configured federation endpoint connected, changed, or disconnected.
+    FederationUpdated(Box<crate::federation::EndpointState>),
     /// A pane's child process exited.
     PaneDied { pane_id: PaneId },
     /// Fallback detector state changed in a pane.

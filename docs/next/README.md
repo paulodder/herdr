@@ -133,6 +133,12 @@ herdr --remote ssh://you@yourserver:2222
 
 Remote attach adds fallback SSH keepalives and connection reuse by default while preserving your own SSH config. Set `[remote].manage_ssh_config = false` to use plain `ssh`.
 
+Personal federation can keep several authoritative Herdr sessions in one
+navigator. Add `[[federation.endpoints]]` entries for hosts such as Tana or an
+STL server, then use `herdr federation list` to verify connectivity. Remote
+rows attach to the owning Herdr natively; the home server does not create proxy
+PTYs for them.
+
 Direct attach connects your current terminal to one server-owned terminal:
 
 ```bash

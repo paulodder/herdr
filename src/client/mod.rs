@@ -239,6 +239,14 @@ pub enum ClientError {
     ConnectionLost(io::Error),
     /// Protocol error (framing, deserialization).
     Protocol(protocol::FramingError),
+    /// The home server asked this client to attach to an authoritative remote endpoint.
+    FederationAttach {
+        endpoint_id: String,
+        target: String,
+        session: String,
+        focus_kind: Option<protocol::FederationFocusKind>,
+        resource_id: Option<String>,
+    },
 }
 
 impl std::fmt::Display for ClientError {
@@ -295,6 +303,14 @@ impl std::fmt::Display for ClientError {
             ClientError::Protocol(err) => {
                 write!(f, "protocol error: {err}")
             }
+            ClientError::FederationAttach {
+                endpoint_id,
+                target,
+                ..
+            } => write!(
+                f,
+                "switching to federation endpoint {endpoint_id} ({target})"
+            ),
         }
     }
 }
@@ -1297,6 +1313,19 @@ fn run_client_with_mode(
     // Restore the terminal before printing any final status message.
     drop(terminal_guard);
 
+    if let Err(ClientError::FederationAttach {
+        endpoint_id,
+        target,
+        session,
+        focus_kind,
+        resource_id,
+    }) = result
+    {
+        rt.shutdown_timeout(Duration::from_millis(100));
+        crate::logging::shutdown("client");
+        return launch_federation_attach(endpoint_id, target, session, focus_kind, resource_id);
+    }
+
     if let Err(err) = result {
         eprintln!("herdr: {err}");
         rt.shutdown_timeout(Duration::from_millis(100));
@@ -1317,6 +1346,78 @@ fn run_client_with_mode(
     rt.shutdown_timeout(Duration::from_millis(100));
     crate::logging::shutdown("client");
     Ok(())
+}
+
+fn launch_federation_attach(
+    endpoint_id: String,
+    target: String,
+    session: String,
+    focus_kind: Option<protocol::FederationFocusKind>,
+    resource_id: Option<String>,
+) -> io::Result<()> {
+    let executable = std::env::current_exe()?;
+    let remote_result = (|| -> io::Result<()> {
+        if let (Some(focus_kind), Some(resource_id)) = (focus_kind, resource_id) {
+            let method = match focus_kind {
+                protocol::FederationFocusKind::Workspace => {
+                    crate::api::schema::Method::WorkspaceFocus(
+                        crate::api::schema::WorkspaceTarget {
+                            workspace_id: resource_id,
+                        },
+                    )
+                }
+                protocol::FederationFocusKind::Tab => {
+                    crate::api::schema::Method::TabFocus(crate::api::schema::TabTarget {
+                        tab_id: resource_id,
+                    })
+                }
+                protocol::FederationFocusKind::Pane => {
+                    crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget {
+                        pane_id: resource_id,
+                    })
+                }
+            };
+            crate::federation::request(
+                &crate::config::FederationEndpointConfig {
+                    id: endpoint_id,
+                    target: target.clone(),
+                    label: None,
+                    session: session.clone(),
+                    enabled: true,
+                },
+                &crate::api::schema::Request {
+                    id: "client:federation:focus".into(),
+                    method,
+                },
+            )?;
+        }
+
+        let remote_status = std::process::Command::new(&executable)
+            .arg("--remote")
+            .arg(&target)
+            .arg("--session")
+            .arg(&session)
+            .status()?;
+        if remote_status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "remote Herdr attach exited with {remote_status}"
+            )))
+        }
+    })();
+
+    // The home attachment is the recovery path as well as the normal return
+    // path. Always attempt it, even when remote focus or SSH attachment fails.
+    let local_status = std::process::Command::new(&executable)
+        .arg("client")
+        .status()?;
+    if !local_status.success() {
+        return Err(io::Error::other(format!(
+            "local Herdr reattach exited with {local_status}"
+        )));
+    }
+    remote_result
 }
 
 /// The main client event loop.
@@ -1369,14 +1470,14 @@ async fn run_client_loop(
     let stdin_quit = should_quit.clone();
     let stdin_tx = event_tx.clone();
     let stdin_mouse_capture_active = host_mouse_capture_active.clone();
-    std::thread::spawn(move || {
+    let mut input_thread = Some(std::thread::spawn(move || {
         input::stdin_reader_loop(
             stdin_tx,
             &stdin_quit,
             will_query_host_terminal_theme,
             stdin_mouse_capture_active,
         );
-    });
+    }));
 
     if will_query_host_terminal_theme {
         query_host_terminal_theme();
@@ -1702,6 +1803,26 @@ async fn run_client_loop(
                         } else {
                             prefix_input_source.restore();
                         }
+                    }
+                    ServerMessage::FederationAttach {
+                        endpoint_id,
+                        target,
+                        session,
+                        focus_kind,
+                        resource_id,
+                    } => {
+                        should_quit.store(true, Ordering::Release);
+                        let _ = write_to_server(&mut write_stream, &ClientMessage::Detach);
+                        if let Some(input_thread) = input_thread.take() {
+                            let _ = input_thread.join();
+                        }
+                        return Err(ClientError::FederationAttach {
+                            endpoint_id,
+                            target,
+                            session,
+                            focus_kind,
+                            resource_id,
+                        });
                     }
                     ServerMessage::Welcome { .. } => {
                         debug!("received unexpected Welcome in main loop");

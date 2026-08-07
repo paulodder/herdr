@@ -115,6 +115,7 @@ impl ApiClient {
             ResponseResult::Pong {
                 version,
                 protocol,
+                identity: _,
                 capabilities,
             } => Ok(crate::api::RuntimeStatus {
                 version: Some(version),

@@ -3,6 +3,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct PingParams {}
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RuntimeIdentity {
+    pub server_id: String,
+    pub session_id: String,
+    pub session_name: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ServerLiveHandoffParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -26,4 +33,6 @@ pub struct ServerCapabilities {
     pub live_handoff: bool,
     #[serde(default)]
     pub detached_server_daemon: bool,
+    #[serde(default)]
+    pub session_watch: bool,
 }

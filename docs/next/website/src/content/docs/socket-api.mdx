@@ -99,7 +99,7 @@ Raw socket method names use dot notation:
 | Server | `ping`, `server.stop`, `server.spawn_detached`, `server.reload_config`, `server.agent_manifests`, `server.reload_agent_manifests` |
 | Notification | `notification.show` |
 | Client | `client.window_title.set`, `client.window_title.clear` |
-| Session | `session.snapshot` |
+| Session | `session.snapshot`, `session.watch` |
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.set_terminal_launcher`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
@@ -114,12 +114,32 @@ Some CLI commands are conveniences around these methods. For example, `herdr age
 
 `session.snapshot` returns a one-time bootstrap snapshot for clients that keep
 their own local runtime cache. The response includes version/protocol metadata,
+stable server/session identity, the current event cursor,
 focused workspace/tab/pane ids, workspace records, tab records, pane records,
 tab layout snapshots, and agent records. It is not a subscription; after reading
 it, subscribe to resource events and update the local cache from those events.
 Call `session.snapshot` again after reconnecting or when the local cache may be
 stale. Attached worktree provenance is included on workspace records. Full repo
 worktree discovery remains `worktree.list`.
+
+Federation clients should use `session.watch`. With no cursor, it atomically
+returns a snapshot and the cursor represented by that snapshot, then emits
+newline-delimited events with monotonically increasing `cursor` values. On
+reconnect, pass the last applied value as `after_cursor`; the server replays all
+retained events without another snapshot. If the cursor is older than the
+bounded replay window, the acknowledgement contains a replacement snapshot.
+This closes the snapshot/subscribe race without requiring clients to guess
+whether an event was lost.
+
+```json
+{"id":"watch","method":"session.watch","params":{"after_cursor":42}}
+```
+
+The initial response has `type: "session_watch_started"`, `cursor`, `resumed`,
+and an optional `snapshot`. Each following line has `cursor`, `event`, and
+`data`. Resource IDs are only server-local; federation layers must qualify them
+with the endpoint plus the snapshot's `identity.server_id` and
+`identity.session_id`.
 
 From the CLI, `herdr api snapshot` prints the live `session.snapshot` response
 as JSON for clients and agents that want a simple bootstrap command.

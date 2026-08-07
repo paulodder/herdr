@@ -73,6 +73,9 @@ fn unix_stdin_reader_loop(
     }
 
     while !should_quit.load(Ordering::Acquire) {
+        if stdin_read_ready(&reader, 100) == Some(false) {
+            continue;
+        }
         match reader.read(&mut scratch) {
             Ok(0) => break,
             Ok(n) => {

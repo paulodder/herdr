@@ -30,6 +30,7 @@ pub(super) fn command() -> Command {
         .subcommand(channel_command())
         .subcommand(server_command())
         .subcommand(api_command())
+        .subcommand(federation_command())
         .subcommand(workspace_command())
         .subcommand(worktree_command())
         .subcommand(tab_command())
@@ -143,6 +144,29 @@ fn api_command() -> Command {
                 .about("Print or write the bundled API schema")
                 .arg(json_flag())
                 .arg(path_option("output", "PATH")),
+        )
+}
+
+fn federation_command() -> Command {
+    Command::new("federation")
+        .about("Inspect and attach configured Herdr endpoints")
+        .subcommand(
+            Command::new("list")
+                .visible_alias("status")
+                .about("Show configured endpoint connection state")
+                .arg(json_flag()),
+        )
+        .subcommand(Command::new("watch").about("Stream endpoint state as NDJSON"))
+        .subcommand(
+            Command::new("attach")
+                .about("Attach to an authoritative remote Herdr")
+                .arg(required("endpoint", "ENDPOINT"))
+                .arg(option("pane", "PANE_ID")),
+        )
+        .subcommand(
+            Command::new("bridge")
+                .about("Bridge standard I/O to the local socket API")
+                .hide(true),
         )
 }
 

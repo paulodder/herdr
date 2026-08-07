@@ -107,6 +107,42 @@ manage_ssh_config = true
 
 When enabled, `herdr --remote` writes a private temporary SSH config that includes your `~/.ssh/config` and `/etc/ssh/ssh_config` first, then adds fallback `ServerAliveInterval` and `ServerAliveCountMax` values. Your own keepalive settings win. Herdr also uses a private per-attach OpenSSH control socket to reuse the first authenticated connection. Set `manage_ssh_config = false` to run remote attach through plain `ssh` without Herdr's generated config or control socket.
 
+## Federation
+
+Configure persistent Herdr sessions that should appear alongside the local
+session in the navigator:
+
+```toml
+[federation]
+enabled = true
+
+[[federation.endpoints]]
+id = "tana"
+label = "Tana"
+target = "tana"
+session = "default"
+
+[[federation.endpoints]]
+id = "stl"
+label = "STL"
+target = "stl-agents-1"
+session = "default"
+```
+
+Each endpoint is authoritative for its own PTYs and persistent session. The
+home server keeps a reconnecting `session.watch` stream over SSH and projects
+qualified remote workspace, tab, pane, and agent references into the
+navigator. Selecting a remote row makes the foreground client attach to that
+remote Herdr natively; detaching starts a fresh local client.
+
+Endpoint IDs must be unique and contain only letters, numbers, `.`, `_`, or
+`-`. `target` is an OpenSSH destination. Background federation connections use
+batch authentication, so load passphrase-protected keys into `ssh-agent`.
+
+Use `herdr federation list`, `herdr federation watch`, and
+`herdr federation attach <endpoint>` to inspect or exercise the same transport
+outside the TUI.
+
 ## Keybindings
 
 For a guided introduction to the prefix and a vetted prefix-free setup, see [Keyboard](/docs/keyboard/).

@@ -66,6 +66,7 @@ mod config;
 mod detect;
 mod emacs; // Emacs layer seam (fork): module registration
 mod events;
+mod federation;
 mod ghostty;
 mod handoff_runtime;
 mod input;
@@ -87,6 +88,7 @@ mod raw_input;
 mod release_notes;
 mod remote;
 mod render_prof;
+mod runtime_identity;
 mod selection;
 mod server;
 mod session;
@@ -369,6 +371,19 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # force keepalive or multiplexing off, it only stops herdr from adding its own.
 # manage_ssh_config = true
 
+# Personal federation keeps each remote Herdr authoritative for its own PTYs,
+# while this server projects remote workspaces and agents into the navigator.
+[federation]
+# enabled = true
+
+# Add one entry per persistent remote Herdr session.
+# [[federation.endpoints]]
+# id = "tana"
+# label = "Tana"
+# target = "tana"
+# session = "default"
+# enabled = true
+
 [experimental]
 # Allow launching herdr from inside a herdr-managed pane.
 # allow_nested = false
@@ -537,6 +552,7 @@ fn main() -> io::Result<()> {
         println!("       herdr server stop");
         println!("       herdr server reload-config");
         println!("       herdr api <subcommand> ...");
+        println!("       herdr federation <subcommand> ...");
         println!("       herdr completion <shell>");
         println!("       herdr config <subcommand> ...");
         println!("       herdr channel <subcommand> ...");
@@ -582,6 +598,10 @@ fn main() -> io::Result<()> {
             (
                 "herdr api <subcommand>",
                 "Inspect socket API metadata and live runtime state",
+            ),
+            (
+                "herdr federation <subcommand>",
+                "Inspect and attach configured Herdr endpoints",
             ),
             (
                 "herdr workspace <subcommand>",

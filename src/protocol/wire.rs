@@ -18,7 +18,7 @@ pub const LIVE_HANDOFF_RECONNECT_REASON: &str =
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 16;
+pub const PROTOCOL_VERSION: u32 = 17;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -669,6 +669,23 @@ pub enum ServerMessage {
         /// Whether the ASCII input source should be active.
         active: bool,
     },
+
+    /// Replace this local app attachment with a native attachment to one
+    /// authoritative remote Herdr session.
+    FederationAttach {
+        endpoint_id: String,
+        target: String,
+        session: String,
+        focus_kind: Option<FederationFocusKind>,
+        resource_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FederationFocusKind {
+    Workspace,
+    Tab,
+    Pane,
 }
 
 // ---------------------------------------------------------------------------
@@ -1956,6 +1973,21 @@ mod tests {
         write_message(&mut buf, &msg).unwrap();
         let decoded: ClientMessage = read_message(&mut buf.as_slice(), MAX_FRAME_SIZE).unwrap();
         assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn federation_attach_message_round_trips() {
+        let message = ServerMessage::FederationAttach {
+            endpoint_id: "tana".into(),
+            target: "tana".into(),
+            session: "default".into(),
+            focus_kind: Some(FederationFocusKind::Pane),
+            resource_id: Some("w1:p1".into()),
+        };
+        let mut bytes = Vec::new();
+        write_message(&mut bytes, &message).unwrap();
+        let decoded: ServerMessage = read_message(&mut bytes.as_slice(), MAX_FRAME_SIZE).unwrap();
+        assert_eq!(decoded, message);
     }
 
     #[test]

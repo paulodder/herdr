@@ -242,6 +242,7 @@ struct ServerStatusJson {
 struct ServerCapabilitiesJson {
     live_handoff: bool,
     detached_server_daemon: bool,
+    session_watch: bool,
 }
 
 #[derive(Serialize)]
@@ -275,6 +276,7 @@ fn server_status_json(server: &ServerRuntimeStatus) -> ServerStatusJson {
                 .map(|capabilities| ServerCapabilitiesJson {
                     live_handoff: capabilities.live_handoff,
                     detached_server_daemon: capabilities.detached_server_daemon,
+                    session_watch: capabilities.session_watch,
                 }),
             compatible: protocol.map(|value| value == crate::protocol::PROTOCOL_VERSION),
             socket: api::socket_path().display().to_string(),

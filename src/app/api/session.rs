@@ -43,8 +43,18 @@ impl App {
         }
 
         SessionSnapshot {
+            identity: crate::runtime_identity::current().unwrap_or_else(|err| {
+                tracing::error!(%err, "failed to read runtime identity for session snapshot");
+                crate::api::schema::RuntimeIdentity {
+                    server_id: "unavailable".into(),
+                    session_id: "unavailable".into(),
+                    session_name: crate::session::active_name()
+                        .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string()),
+                }
+            }),
             version: crate::build_info::version(),
             protocol: crate::protocol::PROTOCOL_VERSION,
+            event_cursor: self.event_hub.current_sequence(),
             focused_workspace_id,
             focused_tab_id,
             focused_pane_id,

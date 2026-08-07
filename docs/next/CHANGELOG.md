@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Added personal Herdr federation: stable server/session identities, atomic cursor-based `session.watch`, reconnecting SSH endpoint streams, a combined local/remote navigator, native remote attachment, and `herdr federation list|watch|attach` diagnostics.
 - Added Emacs `open-at-point` on `ctrl+alt+o`. URLs open in EWW and existing files, directories, and `path:line:column` references open in a temporary terminal `emacsclient` frame backed by the user's persistent Emacs server.
 - Added a replayable Emacs onboarding tour, available from the sidebar menu or with `M-x herdr-onboarding`, covering Herdr's hierarchy, primary navigation chords, and parallel mouse controls.
 - Emacs TEXT mode now supports `ctrl+l` recentering with the standard middle, top, and bottom cycle around point.

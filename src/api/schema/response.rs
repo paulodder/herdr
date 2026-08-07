@@ -45,11 +45,19 @@ pub enum ResponseResult {
     Pong {
         version: String,
         protocol: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity: Option<super::server::RuntimeIdentity>,
         #[serde(default)]
         capabilities: Option<ServerCapabilities>,
     },
     SessionSnapshot {
         snapshot: Box<SessionSnapshot>,
+    },
+    SessionWatchStarted {
+        cursor: u64,
+        resumed: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        snapshot: Option<Box<SessionSnapshot>>,
     },
     ProcessSpawned {
         pid: u32,

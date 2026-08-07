@@ -22,9 +22,10 @@ pub use self::{
     // Emacs layer (src/emacs/mod.rs) can name the type.
     model::{
         validated_sidebar_bounds, AgentPanelSortConfig, Config, ConfigReloadReport,
-        ConfigReloadStatus, EmacsConfig, HostCursorModeConfig, NewTerminalCwdConfig,
-        ShellModeConfig, SidebarCollapsedModeConfig, ToastClipboardPosition, ToastConfig,
-        ToastDelivery, ToastHerdrPosition, UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
+        ConfigReloadStatus, EmacsConfig, FederationConfig, FederationEndpointConfig,
+        HostCursorModeConfig, NewTerminalCwdConfig, ShellModeConfig, SidebarCollapsedModeConfig,
+        ToastClipboardPosition, ToastConfig, ToastDelivery, ToastHerdrPosition,
+        UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
     },
     sidebar::{
         AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SpaceSidebarToken,
@@ -77,6 +78,7 @@ impl Config {
             // Emacs layer seam (fork).
             .chain(self.emacs.binding_diagnostics())
             .chain(self.invalid_sidebar_bounds_diagnostic())
+            .chain(self.federation.diagnostics())
             .collect()
     }
 
@@ -130,9 +132,70 @@ impl Config {
     }
 }
 
+impl FederationConfig {
+    pub(crate) fn diagnostics(&self) -> Vec<String> {
+        let mut diagnostics = Vec::new();
+        let mut ids = std::collections::HashSet::new();
+        for (index, endpoint) in self.endpoints.iter().enumerate() {
+            let prefix = format!("federation.endpoints[{index}]");
+            if endpoint.id.is_empty()
+                || !endpoint
+                    .id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            {
+                diagnostics.push(format!(
+                    "{prefix}.id must contain only ASCII letters, numbers, '.', '_' or '-'"
+                ));
+            } else if !ids.insert(endpoint.id.as_str()) {
+                diagnostics.push(format!(
+                    "duplicate federation endpoint id {:?}",
+                    endpoint.id
+                ));
+            }
+            if endpoint.target.trim().is_empty() || endpoint.target.starts_with('-') {
+                diagnostics.push(format!(
+                    "{prefix}.target must be a non-empty OpenSSH destination that does not start with '-'"
+                ));
+            }
+            if let Err(err) = crate::session::validate_name(&endpoint.session) {
+                diagnostics.push(format!("{prefix}.session is invalid: {err}"));
+            }
+        }
+        diagnostics
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn federation_config_validates_ids_targets_sessions_and_duplicates() {
+        let config: Config = toml::from_str(
+            r#"
+[[federation.endpoints]]
+id = "tana"
+target = "tana"
+
+[[federation.endpoints]]
+id = "tana"
+target = "-bad-option"
+session = "bad/name"
+"#,
+        )
+        .unwrap();
+        let diagnostics = config.federation.diagnostics();
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("duplicate federation endpoint id")));
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("OpenSSH destination")));
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("session is invalid")));
+    }
 
     #[test]
     fn local_keybindings_profile_includes_defaults_and_excludes_commands() {

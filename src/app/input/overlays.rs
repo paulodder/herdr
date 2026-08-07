@@ -153,7 +153,13 @@ impl App {
                             .navigator_rows_from(&self.terminal_runtimes)
                             .get(idx)
                             .map(|row| (row.target.clone(), row.is_workspace));
-                        if let Some((NavigatorTarget::Workspace { .. }, true)) = target {
+                        if let Some((
+                            NavigatorTarget::Workspace { .. }
+                            | NavigatorTarget::Endpoint { .. }
+                            | NavigatorTarget::RemoteWorkspace { .. },
+                            true,
+                        )) = target
+                        {
                             if self.state.navigator_row_caret_at(mouse.column) {
                                 self.state.toggle_selected_navigator_workspace_from(
                                     &self.terminal_runtimes,

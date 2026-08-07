@@ -1026,6 +1026,18 @@
       ]
     },
     {
+      "id": "federation",
+      "title": "Federation",
+      "keys": [
+        {
+          "key": "federation.enabled",
+          "type": "boolean",
+          "default": "true",
+          "description": "Connect configured remote Herdr sessions and project them into the local navigator."
+        }
+      ]
+    },
+    {
       "id": "advanced",
       "title": "Advanced",
       "keys": [

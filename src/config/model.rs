@@ -334,6 +334,7 @@ pub struct Config {
     pub advanced: AdvancedConfig,
     pub experimental: ExperimentalConfig,
     pub remote: RemoteConfig,
+    pub federation: FederationConfig,
     // Emacs layer seam (fork):
     pub emacs: EmacsConfig,
 }
@@ -900,6 +901,51 @@ pub struct RemoteConfig {
     /// Add keepalive fallbacks and private connection reuse for `herdr --remote`.
     /// Set false to run plain ssh unchanged. Default: true.
     pub manage_ssh_config: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct FederationConfig {
+    /// Connect configured Herdr endpoints when this server starts.
+    pub enabled: bool,
+    /// Authoritative remote Herdr sessions visible through this server.
+    pub endpoints: Vec<FederationEndpointConfig>,
+}
+
+impl Default for FederationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            endpoints: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct FederationEndpointConfig {
+    /// Stable local name used in federated resource references.
+    pub id: String,
+    /// OpenSSH destination, for example `tana` or `user@host`.
+    pub target: String,
+    /// Human-readable navigator label. Defaults to `id`.
+    pub label: Option<String>,
+    /// Named Herdr session on the remote host.
+    pub session: String,
+    /// Disable one endpoint without deleting its configuration.
+    pub enabled: bool,
+}
+
+impl Default for FederationEndpointConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            target: String::new(),
+            label: None,
+            session: crate::session::DEFAULT_SESSION_NAME.to_string(),
+            enabled: true,
+        }
+    }
 }
 
 impl Default for RemoteConfig {

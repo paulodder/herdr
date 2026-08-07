@@ -798,6 +798,21 @@ impl Mode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NavigatorTarget {
+    Endpoint {
+        endpoint_id: String,
+    },
+    RemoteWorkspace {
+        endpoint_id: String,
+        workspace_id: String,
+    },
+    RemoteTab {
+        endpoint_id: String,
+        tab_id: String,
+    },
+    RemotePane {
+        endpoint_id: String,
+        pane_id: String,
+    },
     Workspace {
         ws_idx: usize,
     },
@@ -821,6 +836,7 @@ pub(crate) struct NavigatorRow {
     pub status: AgentState,
     pub seen: bool,
     pub is_current: bool,
+    pub is_endpoint: bool,
     pub is_workspace: bool,
     pub is_tab: bool,
     pub expanded: bool,
@@ -1315,9 +1331,19 @@ pub(crate) struct PaneFocusTarget {
     pub pane_id: PaneId,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FederationAttachRequest {
+    pub endpoint_id: String,
+    pub target: String,
+    pub session: String,
+    pub resource: Option<crate::federation::FederatedResourceRef>,
+}
+
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
 pub struct AppState {
+    /// Latest authoritative projections from configured remote Herdr sessions.
+    pub(crate) federation: std::collections::BTreeMap<String, crate::federation::EndpointState>,
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
     /// Terminal ids whose size is currently owned by a direct attach client.
@@ -1351,6 +1377,8 @@ pub struct AppState {
     /// Set when the headless server should ask attached clients to reload
     /// their client-local sound config from disk.
     pub request_client_config_reload: bool,
+    /// Ask the foreground thin client to attach natively to a remote Herdr session.
+    pub(crate) request_federation_attach: Option<FederationAttachRequest>,
     /// Set when UI interaction requested a clipboard write that must be
     /// handled by the outer App/event loop instead of directly from AppState.
     pub request_clipboard_write: Option<Vec<u8>>,
@@ -1692,6 +1720,7 @@ impl AppState {
     /// Create an AppState for testing — no channels, no PTYs.
     pub fn test_new() -> Self {
         Self {
+            federation: std::collections::BTreeMap::new(),
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
@@ -1716,6 +1745,7 @@ impl AppState {
             request_reload_config: false,
             request_live_handoff: false,
             request_client_config_reload: false,
+            request_federation_attach: None,
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,

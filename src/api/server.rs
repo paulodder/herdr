@@ -66,6 +66,7 @@ pub fn start_server(
         Some(ServerCapabilities {
             live_handoff: crate::platform::capabilities().live_handoff,
             detached_server_daemon: crate::platform::current_process_is_detached_server_daemon(),
+            session_watch: true,
         }),
     )
 }
@@ -200,6 +201,28 @@ fn handle_connection(
             }
             result
         }
+        Method::SessionWatch(params) => {
+            let result = stream_session_watch(
+                stream,
+                request_id.clone(),
+                params,
+                api_tx,
+                event_hub,
+                running,
+            );
+            match &result {
+                Ok(()) => crate::logging::api_request_completed(
+                    &request_id,
+                    method,
+                    "stream_closed",
+                    changes_ui,
+                ),
+                Err(err) => {
+                    crate::logging::api_request_failed(&request_id, method, &err.to_string())
+                }
+            }
+            result
+        }
         Method::EventsWait(params) => {
             let Some(response) = wait_for_event(
                 request_id.clone(),
@@ -295,6 +318,7 @@ fn handle_request(
             result: ResponseResult::Pong {
                 version: crate::build_info::version(),
                 protocol: crate::protocol::PROTOCOL_VERSION,
+                identity: crate::runtime_identity::current().ok(),
                 capabilities,
             },
         })
@@ -450,6 +474,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::PaneReleaseAgent(_) => "pane.release_agent",
         Method::PaneClose(_) => "pane.close",
         Method::EventsSubscribe(_) => "events.subscribe",
+        Method::SessionWatch(_) => "session.watch",
         Method::EventsWait(_) => "events.wait",
         Method::PaneWaitForOutput(_) => "pane.wait_for_output",
         Method::IntegrationInstall(_) => "integration.install",
@@ -729,6 +754,90 @@ fn stream_subscriptions(
     }
 }
 
+fn stream_session_watch(
+    mut stream: LocalStream,
+    request_id: String,
+    params: crate::api::schema::SessionWatchParams,
+    api_tx: &ApiRequestSender,
+    event_hub: &EventHub,
+    running: &Arc<AtomicBool>,
+) -> std::io::Result<()> {
+    let resumable_cursor = params
+        .after_cursor
+        .filter(|cursor| event_hub.can_replay_after(*cursor));
+    let (cursor, resumed, snapshot) = if let Some(cursor) = resumable_cursor {
+        (cursor, true, None)
+    } else {
+        let response = dispatch_to_app(
+            Request {
+                id: format!("{request_id}:snapshot"),
+                method: Method::SessionSnapshot(crate::api::schema::EmptyParams::default()),
+            },
+            api_tx,
+        );
+        let value: serde_json::Value = serde_json::from_str(&response).map_err(|err| {
+            std::io::Error::other(format!("failed to decode session snapshot response: {err}"))
+        })?;
+        if value.get("error").is_some() {
+            write_text_line_allow_disconnect(&mut stream, &response)?;
+            return Ok(());
+        }
+        let success: SuccessResponse = serde_json::from_value(value).map_err(|err| {
+            std::io::Error::other(format!("failed to decode session snapshot: {err}"))
+        })?;
+        let ResponseResult::SessionSnapshot { snapshot } = success.result else {
+            return Err(std::io::Error::other(
+                "session snapshot returned an unexpected response",
+            ));
+        };
+        (snapshot.event_cursor, false, Some(snapshot))
+    };
+
+    if let Err(err) = write_json_line(
+        &mut stream,
+        &SuccessResponse {
+            id: request_id,
+            result: ResponseResult::SessionWatchStarted {
+                cursor,
+                resumed,
+                snapshot,
+            },
+        },
+    ) {
+        if is_connection_closed_error(&err) {
+            return Ok(());
+        }
+        return Err(err);
+    }
+
+    let mut last_cursor = cursor;
+    loop {
+        if should_stop_connection(&mut stream, running)? {
+            return Ok(());
+        }
+        let Some(events) = event_hub.events_after_checked(last_cursor) else {
+            // Close the stream rather than silently skipping evicted events.
+            // The federation watcher reconnects with `last_cursor`, receives
+            // a fresh snapshot, and resumes from that atomic baseline.
+            return Ok(());
+        };
+        for (event_cursor, event) in events {
+            let envelope = crate::api::schema::SequencedEventEnvelope {
+                cursor: event_cursor,
+                event,
+            };
+            if let Err(err) = write_json_line(&mut stream, &envelope) {
+                if is_connection_closed_error(&err) {
+                    return Ok(());
+                }
+                return Err(err);
+            }
+            last_cursor = event_cursor;
+        }
+        std::thread::sleep(CONNECTION_POLL_INTERVAL);
+    }
+}
+
 fn write_text_line(stream: &mut LocalStream, value: &str) -> std::io::Result<()> {
     stream.write_all(value.as_bytes())?;
     stream.write_all(b"\n")?;
@@ -841,7 +950,7 @@ mod tests {
     use super::*;
     use interprocess::local_socket::traits::Listener as _;
     use std::collections::HashMap;
-    use std::io::{BufRead, BufReader};
+    use std::io::Read;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
     use std::sync::{Mutex, OnceLock};
@@ -861,10 +970,15 @@ mod tests {
     }
 
     fn read_line(stream: &mut LocalStream) -> String {
-        let mut reader = BufReader::new(stream);
-        let mut line = String::new();
-        reader.read_line(&mut line).unwrap();
-        line
+        let mut line = Vec::new();
+        let mut byte = [0_u8; 1];
+        loop {
+            stream.read_exact(&mut byte).unwrap();
+            line.push(byte[0]);
+            if byte[0] == b'\n' {
+                return String::from_utf8(line).unwrap();
+            }
+        }
     }
 
     fn local_stream_pair(name: &str) -> (LocalStream, LocalStream, PathBuf) {
@@ -931,6 +1045,64 @@ mod tests {
                         .unwrap(),
                     other => panic!("unexpected request: {other:?}"),
                 }
+            }
+        });
+        (api_tx, responder)
+    }
+
+    fn session_snapshot(event_cursor: u64) -> crate::api::schema::SessionSnapshot {
+        crate::api::schema::SessionSnapshot {
+            identity: crate::api::schema::RuntimeIdentity {
+                server_id: "server_1".into(),
+                session_id: "session_1".into(),
+                session_name: "default".into(),
+            },
+            version: "0.7.3".into(),
+            protocol: crate::protocol::PROTOCOL_VERSION,
+            event_cursor,
+            focused_workspace_id: None,
+            focused_tab_id: None,
+            focused_pane_id: None,
+            workspaces: Vec::new(),
+            tabs: Vec::new(),
+            panes: Vec::new(),
+            layouts: Vec::new(),
+            agents: Vec::new(),
+        }
+    }
+
+    fn workspace_closed_event(index: usize) -> crate::api::schema::EventEnvelope {
+        crate::api::schema::EventEnvelope {
+            event: crate::api::schema::EventKind::WorkspaceClosed,
+            data: crate::api::schema::EventData::WorkspaceClosed {
+                workspace_id: format!("w_{index}"),
+                workspace: None,
+            },
+        }
+    }
+
+    fn spawn_snapshot_responder(
+        event_cursor: u64,
+        event_during_snapshot: Option<(EventHub, crate::api::schema::EventEnvelope)>,
+    ) -> (ApiRequestSender, std::thread::JoinHandle<()>) {
+        let (api_tx, mut api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        let responder = std::thread::spawn(move || {
+            while let Some(msg) = api_rx.blocking_recv() {
+                assert!(matches!(msg.request.method, Method::SessionSnapshot(_)));
+                if let Some((event_hub, event)) = &event_during_snapshot {
+                    event_hub.push(event.clone());
+                }
+                msg.respond_to
+                    .send(
+                        serde_json::to_string(&SuccessResponse {
+                            id: msg.request.id,
+                            result: ResponseResult::SessionSnapshot {
+                                snapshot: Box::new(session_snapshot(event_cursor)),
+                            },
+                        })
+                        .unwrap(),
+                    )
+                    .unwrap();
             }
         });
         (api_tx, responder)
@@ -1029,6 +1201,7 @@ mod tests {
             Some(ServerCapabilities {
                 live_handoff: true,
                 detached_server_daemon: true,
+                session_watch: true,
             }),
         );
 
@@ -1270,5 +1443,121 @@ mod tests {
         let result = done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(result.is_ok());
         server_thread.join().unwrap();
+    }
+
+    #[test]
+    fn session_watch_delivers_events_that_race_with_snapshot_response() {
+        let event_hub = EventHub::default();
+        let (api_tx, responder) =
+            spawn_snapshot_responder(0, Some((event_hub.clone(), workspace_closed_event(1))));
+        let (mut client, server, _path) = local_stream_pair("api-session-watch-snapshot");
+        client
+            .write_all(br#"{"id":"watch_1","method":"session.watch","params":{}}"#)
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+
+        let running = Arc::new(AtomicBool::new(true));
+        let server_running = Arc::clone(&running);
+        let server_event_hub = event_hub.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let server_thread = std::thread::spawn(move || {
+            let result =
+                handle_connection(server, &api_tx, &server_event_hub, &server_running, None);
+            done_tx.send(result).unwrap();
+        });
+
+        let ack: serde_json::Value = serde_json::from_str(&read_line(&mut client)).unwrap();
+        assert_eq!(ack["result"]["type"], "session_watch_started");
+        assert_eq!(ack["result"]["cursor"], 0);
+        assert_eq!(ack["result"]["resumed"], false);
+        assert_eq!(ack["result"]["snapshot"]["event_cursor"], 0);
+
+        let event: serde_json::Value = serde_json::from_str(&read_line(&mut client)).unwrap();
+        assert_eq!(event["cursor"], 1);
+        assert_eq!(event["event"], "workspace_closed");
+        assert_eq!(event["data"]["workspace_id"], "w_1");
+
+        drop(client);
+        assert!(done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .is_ok());
+        server_thread.join().unwrap();
+        responder.join().unwrap();
+    }
+
+    #[test]
+    fn session_watch_replays_retained_events_without_a_snapshot() {
+        let event_hub = EventHub::default();
+        event_hub.push(workspace_closed_event(1));
+        event_hub.push(workspace_closed_event(2));
+        let (api_tx, _api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        let (mut client, server, _path) = local_stream_pair("api-session-watch-resume");
+        client
+            .write_all(br#"{"id":"watch_2","method":"session.watch","params":{"after_cursor":1}}"#)
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+
+        let running = Arc::new(AtomicBool::new(true));
+        let server_running = Arc::clone(&running);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let server_thread = std::thread::spawn(move || {
+            let result = handle_connection(server, &api_tx, &event_hub, &server_running, None);
+            done_tx.send(result).unwrap();
+        });
+
+        let ack: serde_json::Value = serde_json::from_str(&read_line(&mut client)).unwrap();
+        assert_eq!(ack["result"]["cursor"], 1);
+        assert_eq!(ack["result"]["resumed"], true);
+        assert!(ack["result"].get("snapshot").is_none());
+        let event: serde_json::Value = serde_json::from_str(&read_line(&mut client)).unwrap();
+        assert_eq!(event["cursor"], 2);
+        assert_eq!(event["data"]["workspace_id"], "w_2");
+
+        drop(client);
+        assert!(done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .is_ok());
+        server_thread.join().unwrap();
+    }
+
+    #[test]
+    fn session_watch_resnapshots_when_cursor_is_outside_replay_window() {
+        let event_hub = EventHub::default();
+        for index in 0..=EventHub::MAX_EVENTS {
+            event_hub.push(workspace_closed_event(index));
+        }
+        let cursor = event_hub.current_sequence();
+        let (api_tx, responder) = spawn_snapshot_responder(cursor, None);
+        let (mut client, server, _path) = local_stream_pair("api-session-watch-stale");
+        client
+            .write_all(br#"{"id":"watch_3","method":"session.watch","params":{"after_cursor":0}}"#)
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+
+        let running = Arc::new(AtomicBool::new(true));
+        let server_running = Arc::clone(&running);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let server_thread = std::thread::spawn(move || {
+            let result = handle_connection(server, &api_tx, &event_hub, &server_running, None);
+            done_tx.send(result).unwrap();
+        });
+
+        let ack: serde_json::Value = serde_json::from_str(&read_line(&mut client)).unwrap();
+        assert_eq!(ack["result"]["cursor"], cursor);
+        assert_eq!(ack["result"]["resumed"], false);
+        assert_eq!(ack["result"]["snapshot"]["event_cursor"], cursor);
+
+        drop(client);
+        assert!(done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .is_ok());
+        server_thread.join().unwrap();
+        responder.join().unwrap();
     }
 }

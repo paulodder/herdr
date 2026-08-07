@@ -53,7 +53,13 @@ fn render_search(app: &AppState, frame: &mut Frame, area: Rect) {
         .iter()
         .flat_map(|workspace| workspace.tabs.iter())
         .map(|tab| tab.panes.len())
-        .sum::<usize>();
+        .sum::<usize>()
+        + app
+            .federation
+            .values()
+            .filter_map(|endpoint| endpoint.snapshot.as_ref())
+            .map(|snapshot| snapshot.panes.len())
+            .sum::<usize>();
     let mut spans = vec![Span::styled(" / ", focus_style)];
     let query = app.navigator.query.trim();
     match app.navigator.state_filter {
@@ -190,7 +196,7 @@ fn render_row(app: &AppState, frame: &mut Frame, rect: Rect, row: &NavigatorRow,
         status_style.bg(p.panel_bg)
     };
 
-    let prefix = if row.is_workspace {
+    let prefix = if row.is_endpoint || row.is_workspace {
         if row.expanded {
             "▾"
         } else {
@@ -231,7 +237,7 @@ fn render_row(app: &AppState, frame: &mut Frame, rect: Rect, row: &NavigatorRow,
         let meta = truncate_end(&row.meta, meta_width.saturating_sub(2) as usize);
         let meta_style = if selected {
             base_style
-        } else if row.is_workspace || row.is_tab {
+        } else if row.is_endpoint || row.is_workspace || row.is_tab {
             Style::default().fg(p.overlay0).bg(p.panel_bg)
         } else {
             Style::default()
@@ -318,17 +324,41 @@ fn selected_detail(app: &AppState, terminal_runtimes: &TerminalRuntimeRegistry) 
     let Some(row) = rows.get(app.navigator.selected) else {
         return String::new();
     };
-    match row.target {
-        NavigatorTarget::Workspace { ws_idx } => workspace_detail(app, terminal_runtimes, ws_idx),
+    match &row.target {
+        NavigatorTarget::Endpoint { endpoint_id }
+        | NavigatorTarget::RemoteWorkspace { endpoint_id, .. }
+        | NavigatorTarget::RemoteTab { endpoint_id, .. }
+        | NavigatorTarget::RemotePane { endpoint_id, .. } => {
+            federation_detail(app, endpoint_id, row)
+        }
+        NavigatorTarget::Workspace { ws_idx } => workspace_detail(app, terminal_runtimes, *ws_idx),
         NavigatorTarget::Tab { ws_idx, tab_idx } => {
-            tab_detail(app, terminal_runtimes, ws_idx, tab_idx)
+            tab_detail(app, terminal_runtimes, *ws_idx, *tab_idx)
         }
         NavigatorTarget::Pane {
             ws_idx,
             tab_idx,
             pane_id,
-        } => pane_detail(app, terminal_runtimes, ws_idx, tab_idx, pane_id),
+        } => pane_detail(app, terminal_runtimes, *ws_idx, *tab_idx, *pane_id),
     }
+}
+
+fn federation_detail(app: &AppState, endpoint_id: &str, row: &NavigatorRow) -> String {
+    let Some(endpoint) = app.federation.get(endpoint_id) else {
+        return String::new();
+    };
+    let label = endpoint.endpoint.label.as_deref().unwrap_or(endpoint_id);
+    let mut parts = vec![label.to_string(), endpoint.endpoint.target.clone()];
+    if endpoint.endpoint.session != crate::session::DEFAULT_SESSION_NAME {
+        parts.push(format!("session: {}", endpoint.endpoint.session));
+    }
+    if !row.label.starts_with(label) {
+        parts.push(row.label.clone());
+    }
+    if !row.meta.is_empty() {
+        parts.push(row.meta.clone());
+    }
+    parts.join(" · ")
 }
 
 fn workspace_detail(

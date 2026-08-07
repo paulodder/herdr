@@ -4,11 +4,27 @@ use super::agents::AgentInfo;
 use super::panes::{PaneInfo, PaneLayoutSnapshot};
 use super::tabs::TabInfo;
 use super::workspaces::WorkspaceInfo;
+use super::{EventEnvelope, RuntimeIdentity};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct SessionWatchParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_cursor: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SequencedEventEnvelope {
+    pub cursor: u64,
+    #[serde(flatten)]
+    pub event: EventEnvelope,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionSnapshot {
+    pub identity: RuntimeIdentity,
     pub version: String,
     pub protocol: u32,
+    pub event_cursor: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focused_workspace_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

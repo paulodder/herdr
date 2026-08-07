@@ -48,6 +48,7 @@ pub fn read_runtime_status_at(
             version,
             protocol,
             capabilities,
+            identity: _,
         } => Ok(Some(RuntimeStatus {
             version: Some(version),
             protocol: Some(protocol),

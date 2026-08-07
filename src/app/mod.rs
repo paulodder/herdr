@@ -27,7 +27,7 @@ mod worktrees;
 use std::collections::{HashMap, HashSet};
 use std::future::pending;
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -109,6 +109,7 @@ pub struct App {
     pub(crate) event_rx: mpsc::Receiver<AppEvent>,
     pub(crate) api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
     pub(crate) event_hub: crate::api::EventHub,
+    pub(crate) federation_watch_generation: Arc<AtomicU64>,
     pub(crate) last_focus: Option<(usize, crate::layout::PaneId)>,
     pub(crate) no_session: bool,
     pub(crate) input_rx: Option<mpsc::Receiver<crate::raw_input::RawInputEvent>>,
@@ -528,6 +529,10 @@ impl App {
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
 
         let mut state = AppState {
+            federation: crate::federation::configured_states(&config.federation)
+                .into_iter()
+                .map(|state| (state.endpoint.id.clone(), state))
+                .collect(),
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
@@ -552,6 +557,7 @@ impl App {
             request_reload_config: false,
             request_live_handoff: false,
             request_client_config_reload: false,
+            request_federation_attach: None,
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
@@ -721,6 +727,13 @@ impl App {
                 crate::detect::manifest_update::auto_update(manifest_update_tx)
             });
         }
+        let federation_watch_generation = Arc::new(AtomicU64::new(1));
+        crate::federation::start_app_watchers(
+            &config.federation,
+            event_tx.clone(),
+            federation_watch_generation.clone(),
+            1,
+        );
 
         let last_focus = state.active.and_then(|idx| {
             state
@@ -769,6 +782,7 @@ impl App {
             suppressed_repeat_keys: HashSet::new(),
             api_rx,
             event_hub,
+            federation_watch_generation,
             last_focus,
             no_session,
             input_rx: None,
@@ -1480,6 +1494,23 @@ impl App {
 
         if !invalid_section("advanced") {
             self.state.pane_scrollback_limit_bytes = config.advanced.scrollback_limit_bytes;
+        }
+
+        if !invalid_section("federation") && config.federation.diagnostics().is_empty() {
+            let generation = self
+                .federation_watch_generation
+                .fetch_add(1, Ordering::AcqRel)
+                + 1;
+            self.state.federation = crate::federation::configured_states(&config.federation)
+                .into_iter()
+                .map(|state| (state.endpoint.id.clone(), state))
+                .collect();
+            crate::federation::start_app_watchers(
+                &config.federation,
+                self.event_tx.clone(),
+                self.federation_watch_generation.clone(),
+                generation,
+            );
         }
 
         if !invalid_section("update") {
