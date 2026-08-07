@@ -75,12 +75,7 @@ impl App {
         };
         let terminal_launcher = self.state.workspaces[ws_idx].terminal_launcher_argv.clone();
         if terminal_launcher.is_some() {
-            extra_env.push(("HERDR_LAUNCH_PROTOCOL".into(), "1".into()));
-            extra_env.push(("HERDR_LAUNCH_KIND".into(), "tab".into()));
-            extra_env.push((
-                "HERDR_LAUNCH_REQUESTED_CWD".into(),
-                cwd.display().to_string(),
-            ));
+            extra_env.extend(terminal_launcher_tab_context(&cwd, label.as_deref()));
         }
         let result = self
             .state
@@ -304,6 +299,24 @@ impl App {
     }
 }
 
+fn terminal_launcher_tab_context(
+    cwd: &std::path::Path,
+    requested_label: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut env = vec![
+        ("HERDR_LAUNCH_PROTOCOL".into(), "1".into()),
+        ("HERDR_LAUNCH_KIND".into(), "tab".into()),
+        (
+            "HERDR_LAUNCH_REQUESTED_CWD".into(),
+            cwd.display().to_string(),
+        ),
+    ];
+    if let Some(label) = requested_label {
+        env.push(("HERDR_LAUNCH_REQUESTED_LABEL".into(), label.into()));
+    }
+    env
+}
+
 fn workspace_not_found(id: String, workspace_id: &str) -> String {
     encode_error(
         id,
@@ -480,5 +493,18 @@ mod tests {
             .unwrap();
         assert_eq!(terminal.launch_argv.as_ref(), Some(&launcher));
         shutdown_test_runtimes(&mut app);
+    }
+
+    #[test]
+    fn terminal_launcher_context_preserves_requested_tab_label() {
+        let env = terminal_launcher_tab_context(
+            std::path::Path::new("/remote/repo"),
+            Some("my investigation"),
+        );
+
+        assert!(env.contains(&(
+            "HERDR_LAUNCH_REQUESTED_LABEL".into(),
+            "my investigation".into(),
+        )));
     }
 }
