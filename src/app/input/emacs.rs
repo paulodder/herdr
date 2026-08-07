@@ -1343,16 +1343,15 @@ impl App {
             return;
         };
         self.state.emacs.kill_ring.push(content.clone());
-        if self.state.emacs.clipboard_sync {
-            if self
+        if self.state.emacs.clipboard_sync
+            && self
                 .event_tx
                 .try_send(crate::events::AppEvent::ClipboardWrite {
                     content: content.into_bytes(),
                 })
                 .is_err()
-            {
-                tracing::warn!("failed to queue emacs clipboard write event");
-            }
+        {
+            tracing::warn!("failed to queue emacs clipboard write event");
         }
         if let Some(text) = self.state.emacs.text_mode.as_mut() {
             text.mark_active = false;

@@ -13,7 +13,7 @@ impl App {
         )
     }
 
-    fn session_snapshot(&self) -> SessionSnapshot {
+    pub(crate) fn session_snapshot(&self) -> SessionSnapshot {
         let focused_workspace_id = self
             .state
             .active
@@ -50,6 +50,9 @@ impl App {
                     session_id: "unavailable".into(),
                     session_name: crate::session::active_name()
                         .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string()),
+                    member_id: self.state.federation_member_id.clone(),
+                    member_target: self.state.federation_member_target.clone(),
+                    member_label: self.state.federation_member_label.clone(),
                 }
             }),
             version: crate::build_info::version(),
@@ -64,6 +67,116 @@ impl App {
             layouts,
             agents: self.collect_agent_infos(),
         }
+    }
+
+    pub(crate) fn apply_federation_directory(
+        &mut self,
+        directory: Vec<crate::federation::EndpointState>,
+    ) {
+        let mut overlay = std::collections::BTreeMap::new();
+        for mut state in directory {
+            if state.endpoint.id == self.state.federation_member_id {
+                continue;
+            }
+            if state.snapshot.is_none() {
+                if let Some(previous) = self.state.federation_client_overlay.get(&state.endpoint.id)
+                {
+                    state.snapshot = previous.snapshot.clone();
+                    state.cursor = state.cursor.or(previous.cursor);
+                }
+            }
+            let authoritative_connected = self
+                .state
+                .federation
+                .get(&state.endpoint.id)
+                .is_some_and(|current| {
+                    current.status == crate::federation::EndpointConnectionStatus::Connected
+                });
+            if !authoritative_connected {
+                overlay.insert(state.endpoint.id.clone(), state);
+            }
+        }
+        self.state.federation_client_overlay = overlay;
+    }
+
+    pub(crate) fn focus_federated_resource(
+        &mut self,
+        resource: &crate::federation::FederatedResourceRef,
+    ) -> Result<(), String> {
+        if resource.endpoint_id != self.state.federation_member_id {
+            return Err(format!(
+                "resource belongs to {}, but this member is {}",
+                resource.endpoint_id, self.state.federation_member_id
+            ));
+        }
+        let identity = crate::runtime_identity::current()
+            .map_err(|err| format!("could not verify runtime identity: {err}"))?;
+        if resource.server_id != identity.server_id || resource.session_id != identity.session_id {
+            return Err("resource refers to a replaced federation runtime".to_string());
+        }
+
+        let target = match resource.kind {
+            crate::federation::FederatedResourceKind::Workspace => self
+                .state
+                .workspaces
+                .iter()
+                .position(|workspace| workspace.id == resource.resource_id)
+                .map(|ws_idx| crate::app::state::NavigatorTarget::Workspace { ws_idx }),
+            crate::federation::FederatedResourceKind::Tab => self
+                .state
+                .workspaces
+                .iter()
+                .enumerate()
+                .find_map(|(ws_idx, workspace)| {
+                    (0..workspace.tabs.len()).find_map(|tab_idx| {
+                        let number = workspace.public_tab_number(tab_idx)?;
+                        (crate::workspace::public_tab_id_for_number(&workspace.id, number)
+                            == resource.resource_id)
+                            .then_some(crate::app::state::NavigatorTarget::Tab { ws_idx, tab_idx })
+                    })
+                }),
+            crate::federation::FederatedResourceKind::Pane
+            | crate::federation::FederatedResourceKind::Terminal
+            | crate::federation::FederatedResourceKind::Agent => self
+                .state
+                .workspaces
+                .iter()
+                .enumerate()
+                .find_map(|(ws_idx, workspace)| {
+                    workspace
+                        .tabs
+                        .iter()
+                        .enumerate()
+                        .find_map(|(tab_idx, tab)| {
+                            tab.panes.keys().find_map(|pane_id| {
+                                let number = workspace.public_pane_number(*pane_id)?;
+                                (crate::workspace::public_pane_id_for_number(&workspace.id, number)
+                                    == resource.resource_id)
+                                    .then_some(crate::app::state::NavigatorTarget::Pane {
+                                        ws_idx,
+                                        tab_idx,
+                                        pane_id: *pane_id,
+                                    })
+                            })
+                        })
+                }),
+        }
+        .ok_or_else(|| {
+            format!(
+                "federated resource {} no longer exists",
+                resource.resource_id
+            )
+        })?;
+
+        self.state
+            .focus_navigator_target(target)
+            .then_some(())
+            .ok_or_else(|| {
+                format!(
+                    "could not focus federated resource {}",
+                    resource.resource_id
+                )
+            })
     }
 }
 

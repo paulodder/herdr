@@ -507,6 +507,10 @@ impl App {
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
     ) {
+        if let Some(target) = self.state.federated_pointer_target(ws_idx, pane_id) {
+            self.state.focus_navigator_target(target);
+            return;
+        }
         let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) else {
             return;
         };

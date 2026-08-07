@@ -2685,6 +2685,7 @@ mod tests {
     #[test]
     fn update_requires_server_restart_when_target_protocol_differs_or_unknown() {
         let server = crate::api::RuntimeStatus {
+            identity: None,
             version: Some("0.5.5".to_string()),
             protocol: Some(2),
             capabilities: None,
@@ -2739,6 +2740,7 @@ mod tests {
             },
             requires_server_restart: true,
             server: crate::api::RuntimeStatus {
+                identity: None,
                 version: Some("0.6.2".to_string()),
                 protocol: Some(76),
                 capabilities: Some(crate::api::schema::ServerCapabilities {
@@ -2928,6 +2930,7 @@ mod tests {
         std::env::set_var(crate::session::SESSION_ENV_VAR, "work");
         crate::session::clear_explicit_session_for_test();
         let server = crate::api::RuntimeStatus {
+            identity: None,
             version: Some("0.5.5".to_string()),
             protocol: Some(2),
             capabilities: None,

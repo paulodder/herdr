@@ -291,6 +291,7 @@ pub(crate) enum ServerEvent {
         render_encoding: RenderEncoding,
         keybindings: Option<Box<crate::config::LiveKeybindConfig>>,
         direct_attach_requested: bool,
+        federation_candidate: bool,
         writer: ClientWriter,
     },
     /// A client sent an input message.
@@ -337,6 +338,21 @@ pub(crate) enum ServerEvent {
         rows: u16,
         cell_width_px: u32,
         cell_height_px: u32,
+    },
+    /// A retained TUI connection became the active federation member again.
+    ClientFederationActivate {
+        client_id: u64,
+        request_id: u64,
+        expected_member_id: String,
+        resource: Option<crate::federation::FederatedResourceRef>,
+        directory: Vec<crate::federation::EndpointState>,
+    },
+    /// A TUI client retained this member but switched its visible surface away.
+    ClientFederationSuspend { client_id: u64 },
+    /// A client refreshed its private global-directory overlay.
+    ClientFederationDirectoryUpdate {
+        client_id: u64,
+        directory: Vec<crate::federation::EndpointState>,
     },
     /// A client detached gracefully.
     ClientDetach { client_id: u64 },
@@ -463,6 +479,7 @@ pub(crate) fn handle_client_handshake(
         render_encoding,
         keybindings,
         direct_attach_requested,
+        federation_candidate,
     ) = match hello {
         ClientMessage::Hello {
             version,
@@ -512,6 +529,7 @@ pub(crate) fn handle_client_handshake(
                 requested_encoding,
                 keybindings,
                 launch_mode == ClientLaunchMode::TerminalAttach,
+                launch_mode == ClientLaunchMode::FederationCandidate,
             )
         }
         _ => {
@@ -566,6 +584,7 @@ pub(crate) fn handle_client_handshake(
         render_encoding,
         keybindings,
         direct_attach_requested,
+        federation_candidate,
         writer,
     });
 
@@ -717,6 +736,25 @@ fn client_read_loop(
                     rows: clamped_rows,
                     cell_width_px,
                     cell_height_px,
+                }
+            }
+            ClientMessage::FederationActivate {
+                request_id,
+                expected_member_id,
+                resource,
+                directory,
+            } => ServerEvent::ClientFederationActivate {
+                client_id,
+                request_id,
+                expected_member_id,
+                resource,
+                directory,
+            },
+            ClientMessage::FederationSuspend => ServerEvent::ClientFederationSuspend { client_id },
+            ClientMessage::FederationDirectoryUpdate { directory } => {
+                ServerEvent::ClientFederationDirectoryUpdate {
+                    client_id,
+                    directory,
                 }
             }
             ClientMessage::Detach => ServerEvent::ClientDetach { client_id },
@@ -1089,6 +1127,7 @@ new_tab = "ctrl+notakey"
                 render_encoding,
                 keybindings,
                 direct_attach_requested,
+                federation_candidate,
                 writer,
             } => {
                 assert_eq!(client_id, 42);
@@ -1097,6 +1136,7 @@ new_tab = "ctrl+notakey"
                 assert_eq!(render_encoding, RenderEncoding::TerminalAnsi);
                 assert!(keybindings.is_none());
                 assert!(!direct_attach_requested);
+                assert!(!federation_candidate);
                 drop(writer);
             }
             other => panic!("expected ClientConnected, got {other:?}"),

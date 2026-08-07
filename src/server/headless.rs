@@ -218,6 +218,11 @@ pub struct HeadlessServer {
     /// Shared pane runtime size derived from the foreground client,
     /// or MIN_COLS × MIN_ROWS when no clients are connected.
     effective_size: (u16, u16),
+    /// Last local event cursor included in a home-authoritative directory broadcast.
+    last_federation_directory_cursor: u64,
+    /// Server-owned host surface state replayed when a federation candidate is promoted.
+    client_window_title: Option<String>,
+    prefix_input_source_active: bool,
     /// Flag set when shutdown is initiated.
     shutting_down: bool,
     /// Flag set while exporting live PTYs to a replacement server.
@@ -384,6 +389,7 @@ impl HeadlessServer {
         spawn_windows_client_accept_thread(listener, should_quit.clone(), server_event_tx.clone());
 
         let server_keybindings = app_keybindings(&app);
+        let last_federation_directory_cursor = app.event_hub.current_sequence();
         let (server_config_diagnostic, server_config_diagnostic_without_keybindings) =
             server_config_diagnostic_summaries(config_diagnostics);
         #[cfg(not(unix))]
@@ -407,6 +413,9 @@ impl HeadlessServer {
             terminal_attach_owners: HashMap::new(),
             next_activity_stamp: 1,
             effective_size: (MIN_COLS, MIN_ROWS),
+            last_federation_directory_cursor,
+            client_window_title: None,
+            prefix_input_source_active: false,
             shutting_down: false,
             handoff_in_progress: false,
             #[cfg(unix)]
@@ -607,6 +616,7 @@ impl HeadlessServer {
                     }
                 }
             }
+            self.publish_local_federation_directory_if_changed();
         }
 
         // Save session on exit.
@@ -853,6 +863,7 @@ impl HeadlessServer {
 
     fn sync_foreground_client_state(&mut self) {
         let Some(client_id) = self.foreground_client_id else {
+            self.app.apply_federation_directory(Vec::new());
             self.effective_size = (MIN_COLS, MIN_ROWS);
             self.app.state.outer_terminal_focus = None;
             let server_keybindings = self.server_keybindings.clone();
@@ -862,6 +873,7 @@ impl HeadlessServer {
         };
         let Some(client) = self.clients.get(&client_id) else {
             self.foreground_client_id = None;
+            self.app.apply_federation_directory(Vec::new());
             self.effective_size = (MIN_COLS, MIN_ROWS);
             self.app.state.outer_terminal_focus = None;
             let server_keybindings = self.server_keybindings.clone();
@@ -871,6 +883,7 @@ impl HeadlessServer {
         };
 
         let terminal_size = client.terminal_size;
+        let federation_directory = client.federation_directory.clone();
         let outer_terminal_focus = client.outer_terminal_focus;
         let host_terminal_theme = client.host_terminal_theme;
         let host_terminal_appearance = client.host_terminal_appearance;
@@ -883,6 +896,7 @@ impl HeadlessServer {
             .clone();
 
         self.effective_size = terminal_size;
+        self.app.apply_federation_directory(federation_directory);
         self.app.state.outer_terminal_focus = outer_terminal_focus;
         apply_keybindings(&mut self.app, &keybindings);
         self.sync_visible_server_config_diagnostic(uses_local_keybindings);
@@ -1217,6 +1231,7 @@ impl HeadlessServer {
         self.server_config_diagnostic_without_keybindings =
             server_config_diagnostic_without_keybindings;
         self.sync_foreground_client_state();
+        self.broadcast_federation_directory();
         report
     }
 
@@ -1828,6 +1843,7 @@ impl HeadlessServer {
             None => None,
         };
         let set_title = title.is_some();
+        self.client_window_title.clone_from(&title);
         let changed = self.send_to_foreground_client(ServerMessage::WindowTitle { title });
         let reason = match (changed, set_title) {
             (true, true) => ClientWindowTitleReason::Set,
@@ -1875,6 +1891,7 @@ impl HeadlessServer {
             AppEvent::PrefixInputSource { active } => {
                 // Input-source switching is a client-local host side effect; forward it to the
                 // foreground client (which owns the real TIS switch + run-loop pump), like clipboard.
+                self.prefix_input_source_active = *active;
                 self.send_to_foreground_client(ServerMessage::PrefixInputSource {
                     active: *active,
                 });
@@ -2130,6 +2147,11 @@ impl HeadlessServer {
 
                 true
             }
+            AppEvent::FederationUpdated(_) => {
+                self.app.handle_internal_event(ev);
+                self.broadcast_federation_directory();
+                true
+            }
             _ => {
                 self.app.handle_internal_event(ev);
                 true
@@ -2274,6 +2296,60 @@ impl HeadlessServer {
             true
         } else {
             false
+        }
+    }
+
+    fn federation_directory(&self) -> Vec<crate::federation::EndpointState> {
+        let mut directory = self
+            .app
+            .state
+            .federation
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        directory.retain(|state| state.endpoint.id != self.app.state.federation_member_id);
+        directory.push(crate::federation::EndpointState {
+            endpoint: crate::config::FederationEndpointConfig {
+                id: self.app.state.federation_member_id.clone(),
+                target: self.app.state.federation_member_target.clone(),
+                label: self.app.state.federation_member_label.clone(),
+                session: crate::session::active_name()
+                    .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string()),
+                enabled: true,
+            },
+            status: crate::federation::EndpointConnectionStatus::Connected,
+            snapshot: Some(self.app.session_snapshot()),
+            cursor: Some(self.app.event_hub.current_sequence()),
+            error: None,
+        });
+        directory.sort_by(|left, right| left.endpoint.id.cmp(&right.endpoint.id));
+        directory
+    }
+
+    fn broadcast_federation_directory(&mut self) {
+        let directory = self.federation_directory();
+        self.last_federation_directory_cursor = self.app.event_hub.current_sequence();
+        let client_ids = self
+            .clients
+            .iter()
+            .filter_map(|(&client_id, client)| {
+                (matches!(client.mode, ClientConnectionMode::App) && client.writer.is_some())
+                    .then_some(client_id)
+            })
+            .collect::<Vec<_>>();
+        for client_id in client_ids {
+            self.send_to_client(
+                client_id,
+                ServerMessage::FederationDirectoryUpdate {
+                    directory: directory.clone(),
+                },
+            );
+        }
+    }
+
+    fn publish_local_federation_directory_if_changed(&mut self) {
+        if self.app.event_hub.current_sequence() != self.last_federation_directory_cursor {
+            self.broadcast_federation_directory();
         }
     }
 
@@ -2477,25 +2553,7 @@ impl HeadlessServer {
 
         if let Some(request) = self.app.state.request_federation_attach.take() {
             let endpoint_id = request.endpoint_id;
-            let (focus_kind, resource_id) = request
-                .resource
-                .map(|resource| {
-                    let kind = match resource.kind {
-                        crate::federation::FederatedResourceKind::Workspace => {
-                            protocol::FederationFocusKind::Workspace
-                        }
-                        crate::federation::FederatedResourceKind::Tab => {
-                            protocol::FederationFocusKind::Tab
-                        }
-                        crate::federation::FederatedResourceKind::Pane
-                        | crate::federation::FederatedResourceKind::Terminal
-                        | crate::federation::FederatedResourceKind::Agent => {
-                            protocol::FederationFocusKind::Pane
-                        }
-                    };
-                    (Some(kind), Some(resource.resource_id))
-                })
-                .unwrap_or((None, None));
+            let directory = self.federation_directory();
             self.send_client_graphics_cleanup(client_id);
             self.send_to_client(
                 client_id,
@@ -2503,14 +2561,11 @@ impl HeadlessServer {
                     endpoint_id,
                     target: request.target,
                     session: request.session,
-                    focus_kind,
-                    resource_id,
+                    resource: request.resource,
+                    directory,
                 },
             );
-            if let Some(client) = self.clients.get_mut(&client_id) {
-                client.writer = None;
-            }
-            return false;
+            return true;
         }
 
         if self.app.state.detach_requested {
@@ -2551,6 +2606,7 @@ impl HeadlessServer {
                 writer,
                 render_encoding,
                 direct_attach_requested,
+                federation_candidate,
             } => {
                 if self.handoff_in_progress {
                     if let Ok(message) =
@@ -2565,7 +2621,9 @@ impl HeadlessServer {
                     }
                     return false;
                 }
-                let first_app_client = !direct_attach_requested && self.app_client_count() == 0;
+                let first_app_client = !direct_attach_requested
+                    && !federation_candidate
+                    && self.app_client_count() == 0;
                 info!(
                     client_id,
                     cols,
@@ -2576,34 +2634,52 @@ impl HeadlessServer {
                     "client connected"
                 );
                 let last_activity = self.allocate_activity_stamp();
-                self.clients.insert(
-                    client_id,
-                    ClientConnection::new_with_mode(
-                        ClientConnectionMode::App,
-                        keybindings,
-                        (cols, rows),
-                        crate::kitty_graphics::HostCellSize {
-                            width_px: cell_width_px,
-                            height_px: cell_height_px,
-                        },
-                        crate::terminal_theme::TerminalTheme::default(),
-                        None,
-                        last_activity,
-                        render_encoding,
-                        direct_attach_requested,
-                        Some(writer),
-                    ),
+                let mut connection = ClientConnection::new_with_mode(
+                    ClientConnectionMode::App,
+                    keybindings,
+                    (cols, rows),
+                    crate::kitty_graphics::HostCellSize {
+                        width_px: cell_width_px,
+                        height_px: cell_height_px,
+                    },
+                    crate::terminal_theme::TerminalTheme::default(),
+                    None,
+                    last_activity,
+                    render_encoding,
+                    direct_attach_requested,
+                    Some(writer),
                 );
+                connection.suspended = federation_candidate;
+                self.clients.insert(client_id, connection);
                 if !direct_attach_requested {
+                    let identity = self.app.session_snapshot().identity;
+                    self.send_to_client(
+                        client_id,
+                        ServerMessage::FederationIdentity {
+                            member_id: self.app.state.federation_member_id.clone(),
+                            server_id: identity.server_id,
+                            session_id: identity.session_id,
+                        },
+                    );
+                    self.send_to_client(
+                        client_id,
+                        ServerMessage::FederationDirectoryUpdate {
+                            directory: self.federation_directory(),
+                        },
+                    );
+                }
+                if !direct_attach_requested && !federation_candidate {
                     self.foreground_client_id = Some(client_id);
                 }
                 if first_app_client {
                     self.app.mark_git_status_refresh_due(Instant::now());
                 }
-                self.sync_foreground_client_state();
-                self.resize_shared_runtime_to_effective_size();
-                self.nudge_handoff_panes_on_first_client_attach();
-                true
+                if !federation_candidate {
+                    self.sync_foreground_client_state();
+                    self.resize_shared_runtime_to_effective_size();
+                    self.nudge_handoff_panes_on_first_client_attach();
+                }
+                !federation_candidate
             }
             ServerEvent::ClientAttachTerminal {
                 client_id,
@@ -2718,6 +2794,92 @@ impl HeadlessServer {
                         warn!(client_id, err = %err, "failed to stage client clipboard image");
                         true
                     }
+                }
+            }
+            ServerEvent::ClientFederationActivate {
+                client_id,
+                request_id,
+                expected_member_id,
+                resource,
+                directory,
+            } => {
+                let identity = self.app.session_snapshot().identity;
+                let member_id = self.app.state.federation_member_id.clone();
+                let activation_error = if expected_member_id != member_id {
+                    Some(format!(
+                        "requested member {expected_member_id}, but receiver is {member_id}"
+                    ))
+                } else {
+                    resource
+                        .as_ref()
+                        .and_then(|resource| self.app.focus_federated_resource(resource).err())
+                };
+                let accepted = activation_error.is_none();
+                if accepted {
+                    if let Some(client) = self.clients.get_mut(&client_id) {
+                        client.federation_directory = directory;
+                        client.suspended = false;
+                        client.request_full_redraw();
+                    }
+                    self.promote_client_to_foreground(client_id);
+                    self.resize_shared_runtime_to_effective_size();
+                }
+                self.send_to_client(
+                    client_id,
+                    ServerMessage::FederationActivationResult {
+                        request_id,
+                        accepted,
+                        member_id,
+                        server_id: identity.server_id,
+                        session_id: identity.session_id,
+                        error: activation_error.clone(),
+                    },
+                );
+                if accepted {
+                    self.send_to_client(
+                        client_id,
+                        ServerMessage::WindowTitle {
+                            title: self.client_window_title.clone(),
+                        },
+                    );
+                    self.send_to_client(
+                        client_id,
+                        ServerMessage::PrefixInputSource {
+                            active: self.prefix_input_source_active,
+                        },
+                    );
+                }
+                if let Some(error) = activation_error {
+                    warn!(client_id, %error, "federated resource activation failed");
+                }
+                true
+            }
+            ServerEvent::ClientFederationSuspend { client_id } => {
+                if let Some(client) = self.clients.get_mut(&client_id) {
+                    client.suspended = true;
+                    client.render_pending = false;
+                }
+                if self.foreground_client_id == Some(client_id) {
+                    self.foreground_client_id = latest_app_client(&self.clients);
+                    self.resize_shared_runtime_to_effective_size();
+                }
+                true
+            }
+            ServerEvent::ClientFederationDirectoryUpdate {
+                client_id,
+                directory,
+            } => {
+                if let Some(client) = self.clients.get_mut(&client_id) {
+                    client.federation_directory = directory;
+                }
+                if self.foreground_client_id == Some(client_id) {
+                    self.sync_foreground_client_state();
+                    if let Some(client) = self.clients.get_mut(&client_id) {
+                        client.request_full_redraw();
+                    }
+                    true
+                } else {
+                    false
                 }
             }
             ServerEvent::ClientResize {
@@ -3420,6 +3582,12 @@ impl HeadlessServer {
         let mut broken_clients: Vec<u64> = Vec::new();
         let mut deferred_frame = false;
         for (client_id, (cols, rows), cell_size, is_foreground, mode) in render_targets {
+            let federation_directory = self
+                .clients
+                .get(&client_id)
+                .map(|client| client.federation_directory.clone())
+                .unwrap_or_default();
+            self.app.apply_federation_directory(federation_directory);
             let area = Rect::new(0, 0, cols, rows);
             let is_app_client = matches!(mode, ClientConnectionMode::App);
             let mut frame = match mode {
@@ -3658,6 +3826,7 @@ impl HeadlessServer {
                 }
             }
         }
+        self.sync_foreground_client_state();
 
         if !broken_clients.is_empty() {
             for client_id in broken_clients {
@@ -4264,6 +4433,7 @@ mod tests {
         #[cfg(windows)]
         spawn_windows_client_accept_thread(listener, should_quit.clone(), server_event_tx.clone());
         let server_keybindings = app_keybindings(&app);
+        let last_federation_directory_cursor = app.event_hub.current_sequence();
 
         HeadlessServer {
             app,
@@ -4284,6 +4454,9 @@ mod tests {
             terminal_attach_owners: HashMap::new(),
             next_activity_stamp: 1,
             effective_size: (MIN_COLS, MIN_ROWS),
+            last_federation_directory_cursor,
+            client_window_title: None,
+            prefix_input_source_active: false,
             shutting_down: false,
             handoff_in_progress: false,
             #[cfg(unix)]
@@ -4536,6 +4709,122 @@ mod tests {
         )
     }
 
+    #[test]
+    fn local_snapshot_and_endpoint_removal_publish_full_directory_updates() {
+        let mut server = test_headless_server();
+        server.app.state.federation_member_id = "x1".into();
+        server.app.state.federation_member_target = "x1".into();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("home")];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.federation.insert(
+            "tana.stl.dev".into(),
+            crate::federation::EndpointState::configured(crate::config::FederationEndpointConfig {
+                id: "tana.stl.dev".into(),
+                target: "paul@tana.tail.example".into(),
+                ..crate::config::FederationEndpointConfig::default()
+            }),
+        );
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(writer),
+            ),
+        );
+
+        server.app.event_hub.push(api::schema::EventEnvelope {
+            event: api::schema::EventKind::WorkspaceFocused,
+            data: api::schema::EventData::WorkspaceFocused {
+                workspace_id: server.app.state.workspaces[0].id.to_string(),
+            },
+        });
+        server.publish_local_federation_directory_if_changed();
+        let first = read_server_message(control_rx.recv().expect("snapshot update"));
+        let ServerMessage::FederationDirectoryUpdate { directory } = first else {
+            panic!("expected directory update, got {first:?}");
+        };
+        assert!(directory.iter().any(|state| {
+            state.endpoint.id == "x1"
+                && state
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| !snapshot.workspaces.is_empty())
+        }));
+        assert!(directory
+            .iter()
+            .any(|state| state.endpoint.id == "tana.stl.dev"));
+
+        server.app.state.federation.clear();
+        server.broadcast_federation_directory();
+        let second = read_server_message(control_rx.recv().expect("removal update"));
+        let ServerMessage::FederationDirectoryUpdate { directory } = second else {
+            panic!("expected directory update, got {second:?}");
+        };
+        assert_eq!(
+            directory
+                .iter()
+                .map(|state| state.endpoint.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["x1"]
+        );
+    }
+
+    #[test]
+    fn accepted_federation_activation_replays_title_and_prefix_surface_state() {
+        let mut server = test_headless_server();
+        server.app.state.federation_member_id = "stl-agents-1".into();
+        server.client_window_title = Some("STL agents".into());
+        server.prefix_input_source_active = true;
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        let mut client = ClientConnection::new(
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            1,
+            RenderEncoding::SemanticFrame,
+            Some(writer),
+        );
+        client.suspended = true;
+        server.clients.insert(1, client);
+
+        assert!(
+            server.handle_server_event(ServerEvent::ClientFederationActivate {
+                client_id: 1,
+                request_id: 7,
+                expected_member_id: "stl-agents-1".into(),
+                resource: None,
+                directory: Vec::new(),
+            })
+        );
+
+        assert!(matches!(
+            read_server_message(control_rx.recv().expect("activation result")),
+            ServerMessage::FederationActivationResult {
+                request_id: 7,
+                accepted: true,
+                ..
+            }
+        ));
+        assert_eq!(
+            read_server_message(control_rx.recv().expect("window title")),
+            ServerMessage::WindowTitle {
+                title: Some("STL agents".into())
+            }
+        );
+        assert_eq!(
+            read_server_message(control_rx.recv().expect("prefix input source")),
+            ServerMessage::PrefixInputSource { active: true }
+        );
+    }
+
     fn retained_test_server(
         initial_screen: &[u8],
     ) -> (
@@ -4625,6 +4914,7 @@ new_tab = "prefix+t"
             render_encoding: RenderEncoding::SemanticFrame,
             keybindings: Some(Box::new(local_keybindings)),
             direct_attach_requested: false,
+            federation_candidate: false,
             writer: writer_a,
         }));
         assert_eq!(
@@ -4649,6 +4939,7 @@ new_tab = "prefix+t"
             render_encoding: RenderEncoding::SemanticFrame,
             keybindings: None,
             direct_attach_requested: false,
+            federation_candidate: false,
             writer: writer_b,
         }));
         assert_eq!(
@@ -4689,6 +4980,7 @@ new_tab = "prefix+t"
             render_encoding: RenderEncoding::SemanticFrame,
             keybindings: Some(Box::new(local_keybindings)),
             direct_attach_requested: false,
+            federation_candidate: false,
             writer: writer_a,
         }));
         assert_eq!(server.app.state.config_diagnostic, without_keybindings);
@@ -4702,6 +4994,7 @@ new_tab = "prefix+t"
             render_encoding: RenderEncoding::SemanticFrame,
             keybindings: None,
             direct_attach_requested: false,
+            federation_candidate: false,
             writer: writer_b,
         }));
         assert_eq!(
@@ -4745,6 +5038,7 @@ next_tab = ""
             render_encoding: RenderEncoding::SemanticFrame,
             keybindings: Some(Box::new(local_keybindings)),
             direct_attach_requested: false,
+            federation_candidate: false,
             writer,
         }));
         server.app.state.mode = crate::app::Mode::Settings;
@@ -4820,6 +5114,7 @@ next_tab = ""
             render_encoding: RenderEncoding::SemanticFrame,
             keybindings: Some(Box::new(local_config.live_keybinds().unwrap())),
             direct_attach_requested: false,
+            federation_candidate: false,
             writer: writer_a,
         }));
         server.app.state.mode = crate::app::Mode::Settings;
@@ -4840,6 +5135,7 @@ next_tab = ""
             render_encoding: RenderEncoding::SemanticFrame,
             keybindings: None,
             direct_attach_requested: false,
+            federation_candidate: false,
             writer: writer_b,
         }));
         assert_eq!(
@@ -4874,6 +5170,7 @@ next_tab = ""
             render_encoding: RenderEncoding::TerminalAnsi,
             keybindings: None,
             direct_attach_requested: true,
+            federation_candidate: false,
             writer,
         }));
         assert!(server.clients.contains_key(&7));
@@ -4939,6 +5236,7 @@ next_tab = ""
             render_encoding: RenderEncoding::TerminalAnsi,
             keybindings: None,
             direct_attach_requested: true,
+            federation_candidate: false,
             writer,
         }));
         control_rx
@@ -5241,6 +5539,7 @@ next_tab = ""
             render_encoding,
             keybindings: None,
             direct_attach_requested: false,
+            federation_candidate: false,
             writer,
         }));
 
@@ -5275,6 +5574,7 @@ next_tab = ""
             render_encoding: RenderEncoding::TerminalAnsi,
             keybindings: None,
             direct_attach_requested: true,
+            federation_candidate: false,
             writer,
         }));
 
@@ -5308,6 +5608,7 @@ next_tab = ""
             render_encoding: RenderEncoding::SemanticFrame,
             keybindings: None,
             direct_attach_requested: false,
+            federation_candidate: false,
             writer,
         }));
         assert!(server.has_app_client());
@@ -5353,6 +5654,7 @@ next_tab = ""
             render_encoding: RenderEncoding::TerminalAnsi,
             keybindings: None,
             direct_attach_requested: true,
+            federation_candidate: false,
             writer,
         }));
         assert!(
@@ -6917,6 +7219,7 @@ next_tab = ""
             render_encoding: RenderEncoding::TerminalAnsi,
             keybindings: None,
             direct_attach_requested: true,
+            federation_candidate: false,
             writer,
         }));
         assert!(

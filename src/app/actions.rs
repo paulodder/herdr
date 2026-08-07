@@ -358,19 +358,33 @@ impl AppState {
         for ws in &self.workspaces {
             self.navigator.expanded_workspaces.insert(ws.id.clone());
         }
-        for endpoint in self.federation.values() {
+        let federation_workspaces = self
+            .federation_states()
+            .map(|endpoint| {
+                (
+                    endpoint.endpoint.id.clone(),
+                    endpoint
+                        .snapshot
+                        .as_ref()
+                        .map(|snapshot| {
+                            snapshot
+                                .workspaces
+                                .iter()
+                                .map(|workspace| workspace.workspace_id.clone())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (endpoint_id, workspace_ids) in federation_workspaces {
             self.navigator
                 .expanded_workspaces
-                .insert(federation_endpoint_key(&endpoint.endpoint.id));
-            if let Some(snapshot) = &endpoint.snapshot {
-                for workspace in &snapshot.workspaces {
-                    self.navigator
-                        .expanded_workspaces
-                        .insert(federation_workspace_key(
-                            &endpoint.endpoint.id,
-                            &workspace.workspace_id,
-                        ));
-                }
+                .insert(federation_endpoint_key(&endpoint_id));
+            for workspace_id in workspace_ids {
+                self.navigator
+                    .expanded_workspaces
+                    .insert(federation_workspace_key(&endpoint_id, &workspace_id));
             }
         }
 
@@ -456,7 +470,7 @@ impl AppState {
                 rows.extend(child_rows);
             }
         }
-        for endpoint in self.federation.values() {
+        for endpoint in self.federation_states() {
             rows.extend(self.federation_navigator_rows(endpoint, query_kind, &query));
         }
         rows
@@ -498,13 +512,19 @@ impl AppState {
                 search_text,
             }];
         };
+        let endpoint_available =
+            endpoint.status == crate::federation::EndpointConnectionStatus::Connected;
 
         let mut children = Vec::new();
         for workspace in &snapshot.workspaces {
+            let workspace_label = crate::metadata_tokens::location_qualified_name(
+                &workspace.label,
+                &endpoint.endpoint.id,
+            );
             let (state, seen) = agent_status_state(workspace.agent_status);
             let workspace_search = format!(
                 "{} {} {} {}",
-                label, workspace.label, endpoint.endpoint.target, endpoint.endpoint.session
+                label, workspace_label, endpoint.endpoint.target, endpoint.endpoint.session
             )
             .to_lowercase();
             let workspace_matches =
@@ -517,21 +537,24 @@ impl AppState {
             let multi_tab = tabs.len() > 1;
             let mut workspace_children = Vec::new();
             for tab in tabs {
+                let tab_label = crate::metadata_tokens::location_qualified_name(
+                    &tab.label,
+                    &endpoint.endpoint.id,
+                );
                 let panes = snapshot
                     .panes
                     .iter()
                     .filter(|pane| pane.tab_id == tab.tab_id)
                     .collect::<Vec<_>>();
                 let (tab_state, tab_seen) = agent_status_state(tab.agent_status);
-                let tab_search =
-                    format!("{label} {} {}", workspace.label, tab.label).to_lowercase();
+                let tab_search = format!("{label} {workspace_label} {tab_label}").to_lowercase();
                 let tab_matches =
                     navigator_row_matches(query_kind, query, tab_state, tab_seen, &tab_search);
                 let mut pane_rows = panes
                     .into_iter()
                     .filter_map(|pane| {
                         let (pane_state, pane_seen) = agent_status_state(pane.agent_status);
-                        let pane_label = pane
+                        let pane_base_label = pane
                             .title
                             .as_deref()
                             .or(pane.label.as_deref())
@@ -539,20 +562,27 @@ impl AppState {
                             .or(pane.agent.as_deref())
                             .unwrap_or("shell")
                             .to_string();
+                        let pane_label = pane_base_label;
                         let agent = pane
                             .display_agent
                             .as_deref()
                             .or(pane.agent.as_deref())
                             .unwrap_or("shell");
-                        let meta = if agent == "shell" {
+                        let mut meta = if agent == "shell" {
                             agent.to_string()
                         } else {
                             format!("{agent} · {}", state_label_text(pane_state, pane_seen))
                         };
+                        if !endpoint_available {
+                            meta = format!(
+                                "{} · {meta}",
+                                federation_connection_label(endpoint.status)
+                            );
+                        }
                         let search_text = format!(
                             "{label} {} {} {pane_label} {meta} {}",
-                            workspace.label,
-                            tab.label,
+                            workspace_label,
+                            tab_label,
                             pane.cwd.as_deref().unwrap_or_default()
                         )
                         .to_lowercase();
@@ -568,11 +598,11 @@ impl AppState {
                                 endpoint_id: endpoint.endpoint.id.clone(),
                                 pane_id: pane.pane_id.clone(),
                             },
-                            depth: if multi_tab { 3 } else { 2 },
+                            depth: if multi_tab { 2 } else { 1 },
                             label: pane_label,
                             meta,
                             status: pane_state,
-                            seen: pane_seen,
+                            seen: pane_seen && endpoint_available,
                             is_current: false,
                             is_endpoint: false,
                             is_workspace: false,
@@ -588,11 +618,19 @@ impl AppState {
                             endpoint_id: endpoint.endpoint.id.clone(),
                             tab_id: tab.tab_id.clone(),
                         },
-                        depth: 2,
-                        label: tab.label.clone(),
-                        meta: format!("{} panes", tab.pane_count),
+                        depth: 1,
+                        label: tab_label,
+                        meta: if endpoint_available {
+                            format!("{} panes", tab.pane_count)
+                        } else {
+                            format!(
+                                "{} · {} panes",
+                                federation_connection_label(endpoint.status),
+                                tab.pane_count
+                            )
+                        },
                         status: tab_state,
-                        seen: tab_seen,
+                        seen: tab_seen && endpoint_available,
                         is_current: false,
                         is_endpoint: false,
                         is_workspace: false,
@@ -617,11 +655,23 @@ impl AppState {
                         endpoint_id: endpoint.endpoint.id.clone(),
                         workspace_id: workspace.workspace_id.clone(),
                     },
-                    depth: 1,
-                    label: format!("{} ({})", workspace.label, workspace.pane_count),
-                    meta: state_label_text(state, seen).to_string(),
+                    depth: 0,
+                    label: workspace_label,
+                    meta: if endpoint_available {
+                        format!(
+                            "{} · {} panes",
+                            state_label_text(state, seen),
+                            workspace.pane_count
+                        )
+                    } else {
+                        format!(
+                            "{} · last snapshot · {} panes",
+                            federation_connection_label(endpoint.status),
+                            workspace.pane_count
+                        )
+                    },
                     status: state,
-                    seen,
+                    seen: seen && endpoint_available,
                     is_current: false,
                     is_endpoint: false,
                     is_workspace: true,
@@ -635,45 +685,7 @@ impl AppState {
             }
         }
 
-        let (status, seen) = aggregate_remote_status(snapshot);
-        let search_text = format!(
-            "{label} {} {}",
-            endpoint.endpoint.target, endpoint.endpoint.session
-        )
-        .to_lowercase();
-        let endpoint_matches = navigator_row_matches(query_kind, query, status, seen, &search_text);
-        if !endpoint_matches && children.is_empty() {
-            return Vec::new();
-        }
-        let expanded = !matches!(query_kind, NavigatorQueryKind::Empty)
-            || self
-                .navigator
-                .expanded_workspaces
-                .contains(&federation_endpoint_key(&endpoint.endpoint.id));
-        let mut rows = vec![NavigatorRow {
-            target: NavigatorTarget::Endpoint {
-                endpoint_id: endpoint.endpoint.id.clone(),
-            },
-            depth: 0,
-            label,
-            meta: format!(
-                "{} · {} panes",
-                federation_connection_label(endpoint.status),
-                snapshot.panes.len()
-            ),
-            status,
-            seen,
-            is_current: false,
-            is_endpoint: true,
-            is_workspace: false,
-            is_tab: false,
-            expanded,
-            search_text,
-        }];
-        if expanded {
-            rows.extend(children);
-        }
-        rows
+        children
     }
 
     fn navigator_child_rows(
@@ -772,10 +784,7 @@ impl AppState {
             let pane_number = ws.public_pane_number(pane_id).unwrap_or(0);
             let label = terminal
                 .and_then(|terminal| terminal.effective_title())
-                .or_else(|| {
-                    terminal
-                        .and_then(|terminal| terminal.manual_label.as_deref().map(str::to_string))
-                })
+                .or_else(|| terminal.and_then(|terminal| terminal.manual_display_label()))
                 .or_else(|| {
                     terminal.and_then(|terminal| terminal.agent_name.as_deref().map(str::to_string))
                 })
@@ -1041,6 +1050,24 @@ impl AppState {
                     .and_then(|ws| ws.tabs.get(tab_idx))
                     .is_some_and(|tab| tab.panes.contains_key(&pane_id))
                 {
+                    if let Some(remote_target) = self.federated_pointer_target(ws_idx, pane_id) {
+                        return self.focus_navigator_target(remote_target);
+                    }
+                    let stale_federated_pointer = self
+                        .workspaces
+                        .get(ws_idx)
+                        .and_then(|workspace| workspace.terminal_id(pane_id))
+                        .and_then(|terminal_id| self.terminals.get(terminal_id))
+                        .is_some_and(|terminal| {
+                            terminal.metadata_tokens.get("handoff_state") == Some("federated")
+                        });
+                    if stale_federated_pointer {
+                        self.emacs.echo = Some(
+                            "Moved pointer is stale; use the qualified workspace in the global navigator."
+                                .into(),
+                        );
+                        return false;
+                    }
                     self.focus_pane_in_workspace(ws_idx, pane_id);
                     self.mode = Mode::Terminal;
                     return true;
@@ -1050,16 +1077,57 @@ impl AppState {
         }
     }
 
-    fn request_federation_target(
+    pub(crate) fn federated_pointer_target(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+    ) -> Option<NavigatorTarget> {
+        let terminal_id = self.workspaces.get(ws_idx)?.terminal_id(pane_id)?;
+        let tokens = &self.terminals.get(terminal_id)?.metadata_tokens;
+        let endpoint_id = tokens.get("federation_endpoint_id")?.to_string();
+        let server_id = tokens.get("federation_server_id")?;
+        let session_id = tokens.get("federation_session_id")?;
+        let resource_id = tokens.get("federation_resource_id")?.to_string();
+        let identity = &self
+            .federation_state(&endpoint_id)?
+            .snapshot
+            .as_ref()?
+            .identity;
+        if identity.server_id != server_id || identity.session_id != session_id {
+            return None;
+        }
+        match tokens.get("federation_resource_kind")? {
+            "workspace" => Some(NavigatorTarget::RemoteWorkspace {
+                endpoint_id,
+                workspace_id: resource_id,
+            }),
+            "tab" => Some(NavigatorTarget::RemoteTab {
+                endpoint_id,
+                tab_id: resource_id,
+            }),
+            "pane" | "terminal" | "agent" => Some(NavigatorTarget::RemotePane {
+                endpoint_id,
+                pane_id: resource_id,
+            }),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn request_federation_target(
         &mut self,
         endpoint_id: &str,
         kind: crate::federation::FederatedResourceKind,
         resource_id: Option<String>,
     ) -> bool {
-        let Some(endpoint) = self.federation.get(endpoint_id) else {
+        let Some(endpoint) = self.federation_state(endpoint_id).cloned() else {
             return false;
         };
         if endpoint.status != crate::federation::EndpointConnectionStatus::Connected {
+            self.emacs.echo = Some(format!(
+                "{} is {}. Reconnect it from x1 and retry; the last snapshot remains read-only.",
+                endpoint.endpoint.id,
+                federation_connection_label(endpoint.status)
+            ));
             return false;
         }
         let resource = resource_id.and_then(|resource_id| endpoint.resource_ref(kind, resource_id));
@@ -1154,29 +1222,6 @@ fn agent_status_state(status: crate::api::schema::AgentStatus) -> (AgentState, b
         crate::api::schema::AgentStatus::Blocked => (AgentState::Blocked, true),
         crate::api::schema::AgentStatus::Unknown => (AgentState::Unknown, true),
     }
-}
-
-fn aggregate_remote_status(snapshot: &crate::api::schema::SessionSnapshot) -> (AgentState, bool) {
-    let statuses = snapshot
-        .panes
-        .iter()
-        .map(|pane| agent_status_state(pane.agent_status))
-        .collect::<Vec<_>>();
-    for state in [AgentState::Blocked, AgentState::Working] {
-        if statuses.iter().any(|(candidate, _)| *candidate == state) {
-            return (state, true);
-        }
-    }
-    if statuses
-        .iter()
-        .any(|(state, seen)| *state == AgentState::Idle && !*seen)
-    {
-        return (AgentState::Idle, false);
-    }
-    if statuses.iter().any(|(state, _)| *state == AgentState::Idle) {
-        return (AgentState::Idle, true);
-    }
-    (AgentState::Unknown, true)
 }
 
 fn launch_label(argv: Option<&Vec<String>>) -> Option<String> {
@@ -1599,8 +1644,9 @@ impl AppState {
         };
         let order = entries
             .into_iter()
-            .map(|entry| match entry {
-                crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. } => ws_idx,
+            .filter_map(|entry| match entry {
+                crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. } => Some(ws_idx),
+                crate::ui::WorkspaceListEntry::RemoteWorkspace { .. } => None,
             })
             .collect::<Vec<_>>();
         if order.is_empty() {
@@ -3522,49 +3568,61 @@ mod tests {
 
     fn add_federated_pane(state: &mut AppState) {
         let endpoint = crate::config::FederationEndpointConfig {
-            id: "tana".into(),
-            target: "tana".into(),
-            label: Some("Tana".into()),
+            id: "stl-agents-1".into(),
+            target: "stl-agents-1".into(),
+            label: Some("STL Agents".into()),
             session: "default".into(),
             enabled: true,
         };
         let snapshot = crate::api::schema::SessionSnapshot {
             identity: crate::api::schema::RuntimeIdentity {
-                server_id: "server-tana".into(),
-                session_id: "session-tana".into(),
+                server_id: "server-stl".into(),
+                session_id: "session-stl".into(),
                 session_name: "default".into(),
+                ..crate::api::schema::RuntimeIdentity::default()
             },
             version: "0.7.3".into(),
             protocol: crate::protocol::PROTOCOL_VERSION,
             event_cursor: 7,
             focused_workspace_id: Some("rw1".into()),
             focused_tab_id: Some("rt1".into()),
-            focused_pane_id: Some("rp1".into()),
+            focused_pane_id: Some("w3:pJ".into()),
             workspaces: vec![crate::api::schema::WorkspaceInfo {
                 workspace_id: "rw1".into(),
                 number: 1,
                 label: "GeoDeck".into(),
                 focused: true,
                 pane_count: 1,
-                tab_count: 1,
+                tab_count: 2,
                 active_tab_id: "rt1".into(),
                 agent_status: crate::api::schema::AgentStatus::Blocked,
                 terminal_launcher_argv: None,
                 tokens: Default::default(),
                 worktree: None,
             }],
-            tabs: vec![crate::api::schema::TabInfo {
-                tab_id: "rt1".into(),
-                workspace_id: "rw1".into(),
-                number: 1,
-                label: "main".into(),
-                focused: true,
-                pane_count: 1,
-                agent_status: crate::api::schema::AgentStatus::Blocked,
-            }],
+            tabs: vec![
+                crate::api::schema::TabInfo {
+                    tab_id: "rt1".into(),
+                    workspace_id: "rw1".into(),
+                    number: 1,
+                    label: "main".into(),
+                    focused: true,
+                    pane_count: 1,
+                    agent_status: crate::api::schema::AgentStatus::Blocked,
+                },
+                crate::api::schema::TabInfo {
+                    tab_id: "rt2".into(),
+                    workspace_id: "rw1".into(),
+                    number: 2,
+                    label: "checking@stl-agents-1".into(),
+                    focused: false,
+                    pane_count: 0,
+                    agent_status: crate::api::schema::AgentStatus::Unknown,
+                },
+            ],
             panes: vec![crate::api::schema::PaneInfo {
-                pane_id: "rp1".into(),
-                terminal_id: "terminal-rp1".into(),
+                pane_id: "w3:pJ".into(),
+                terminal_id: "terminal-w3-pJ".into(),
                 workspace_id: "rw1".into(),
                 tab_id: "rt1".into(),
                 focused: true,
@@ -3599,40 +3657,124 @@ mod tests {
     }
 
     #[test]
-    fn navigator_projects_qualified_remote_panes_and_requests_native_attach() {
+    fn navigator_qualifies_remote_workspaces_and_tabs_but_not_panes() {
         let mut state = app_with_workspaces(&["local"]);
         add_federated_pane(&mut state);
+        assert!(crate::ui::workspace_list_entries(&state)
+            .iter()
+            .any(|entry| {
+                matches!(
+                    entry,
+                    crate::ui::WorkspaceListEntry::RemoteWorkspace {
+                        endpoint_id,
+                        workspace_id,
+                    } if endpoint_id == "stl-agents-1" && workspace_id == "rw1"
+                )
+            }));
         state.open_navigator();
         let rows = state.navigator_rows();
-        assert!(rows.iter().any(|row| matches!(
-            row.target,
-            NavigatorTarget::Endpoint { ref endpoint_id } if endpoint_id == "tana"
-        )));
+        assert!(!rows
+            .iter()
+            .any(|row| matches!(row.target, NavigatorTarget::Endpoint { .. })));
         let remote_pane = rows
             .iter()
             .position(|row| {
                 matches!(
                     row.target,
                     NavigatorTarget::RemotePane { ref endpoint_id, ref pane_id }
-                        if endpoint_id == "tana" && pane_id == "rp1"
+                        if endpoint_id == "stl-agents-1" && pane_id == "w3:pJ"
                 )
             })
             .expect("remote pane row");
+        assert_eq!(rows[remote_pane].label, "federation");
+        assert!(rows.iter().any(|row| {
+            matches!(
+                row.target,
+                NavigatorTarget::RemoteWorkspace { ref endpoint_id, .. }
+                    if endpoint_id == "stl-agents-1"
+            ) && row.label == "GeoDeck@stl-agents-1"
+                && row.depth == 0
+        }));
+        assert!(rows.iter().any(|row| {
+            matches!(
+                row.target,
+                NavigatorTarget::RemoteTab { ref endpoint_id, ref tab_id }
+                    if endpoint_id == "stl-agents-1" && tab_id == "rt2"
+            ) && row.label == "checking@stl-agents-1"
+        }));
+        let remote_workspace = rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row.target,
+                    NavigatorTarget::RemoteWorkspace { ref endpoint_id, ref workspace_id }
+                        if endpoint_id == "stl-agents-1" && workspace_id == "rw1"
+                )
+            })
+            .expect("remote workspace peer row");
+        state.navigator.selected = remote_workspace;
+        assert!(state.accept_navigator_selection());
+        let workspace_request = state
+            .request_federation_attach
+            .take()
+            .expect("native workspace attach request");
+        let workspace_resource = workspace_request.resource.expect("qualified workspace ref");
+        assert_eq!(workspace_resource.resource_id, "rw1");
+        assert_eq!(
+            workspace_resource.kind,
+            crate::federation::FederatedResourceKind::Workspace
+        );
         state.navigator.selected = remote_pane;
         assert!(state.accept_navigator_selection());
         let request = state
             .request_federation_attach
             .take()
             .expect("native attach request");
-        assert_eq!(request.endpoint_id, "tana");
+        assert_eq!(request.endpoint_id, "stl-agents-1");
         let resource = request.resource.expect("qualified pane ref");
-        assert_eq!(resource.endpoint_id, "tana");
-        assert_eq!(resource.server_id, "server-tana");
-        assert_eq!(resource.session_id, "session-tana");
-        assert_eq!(resource.resource_id, "rp1");
+        assert_eq!(resource.endpoint_id, "stl-agents-1");
+        assert_eq!(resource.server_id, "server-stl");
+        assert_eq!(resource.session_id, "session-stl");
+        assert_eq!(resource.resource_id, "w3:pJ");
         assert_eq!(
             resource.kind,
             crate::federation::FederatedResourceKind::Pane
+        );
+
+        let local_pane = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].terminal_id(local_pane).unwrap().clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .metadata_tokens
+            .patch(
+                std::collections::HashMap::from([
+                    ("handoff_state".into(), Some("federated".into())),
+                    ("federation_endpoint_id".into(), Some("stl-agents-1".into())),
+                    ("federation_server_id".into(), Some("server-stl".into())),
+                    ("federation_session_id".into(), Some("session-stl".into())),
+                    ("federation_resource_kind".into(), Some("pane".into())),
+                    ("federation_resource_id".into(), Some("w3:pJ".into())),
+                ]),
+                None,
+                std::time::Instant::now(),
+            );
+        assert!(state.focus_navigator_target(NavigatorTarget::Pane {
+            ws_idx: 0,
+            tab_idx: 0,
+            pane_id: local_pane,
+        }));
+        let pointer_request = state
+            .request_federation_attach
+            .take()
+            .expect("MOVED pointer attach request");
+        assert_eq!(
+            pointer_request
+                .resource
+                .expect("qualified pointer")
+                .resource_id,
+            "w3:pJ"
         );
     }
 

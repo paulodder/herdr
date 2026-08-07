@@ -6,8 +6,8 @@ use tracing::warn;
 use crate::{
     app::state::{
         AgentPanelSort, AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget,
-        MenuListState, Mode, RightClickPassthroughGesture, TabPressState, ViewLayout,
-        WorkspacePressState,
+        MenuListState, Mode, NavigatorTarget, RightClickPassthroughGesture, TabPressState,
+        ViewLayout, WorkspacePressState,
     },
     layout::{PaneInfo, SplitBorder},
     selection::Selection,
@@ -515,6 +515,13 @@ impl AppState {
                     }
 
                     if self.sidebar_collapsed {
+                        if let Some(target) = self.collapsed_remote_workspace_at_row(mouse.row) {
+                            self.focus_navigator_target(NavigatorTarget::RemoteWorkspace {
+                                endpoint_id: target.endpoint_id,
+                                workspace_id: target.workspace_id,
+                            });
+                            return None;
+                        }
                         if let Some(idx) = self.collapsed_workspace_at_row(mouse.row) {
                             self.mode = Mode::Terminal;
                             return Some(MouseAction::FocusWorkspace { ws_idx: idx });
@@ -560,6 +567,13 @@ impl AppState {
                     } else {
                         self.view.workspace_card_areas.clone()
                     };
+                    if let Some(target) = self.remote_workspace_at_row(mouse.row) {
+                        self.focus_navigator_target(NavigatorTarget::RemoteWorkspace {
+                            endpoint_id: target.endpoint_id,
+                            workspace_id: target.workspace_id,
+                        });
+                        return None;
+                    }
                     if let Some(card) = cards.iter().find(|card| {
                         mouse.row == card.rect.y
                             && mouse.column == card.rect.x
@@ -1147,6 +1161,16 @@ impl AppState {
             Some(crate::ui::MobileSwitcherTarget::Workspace(ws_idx)) => {
                 self.mode = Mode::Terminal;
                 return MobileMouseResult::Action(MouseAction::FocusWorkspace { ws_idx });
+            }
+            Some(crate::ui::MobileSwitcherTarget::RemoteWorkspace {
+                endpoint_id,
+                workspace_id,
+            }) => {
+                self.focus_navigator_target(NavigatorTarget::RemoteWorkspace {
+                    endpoint_id,
+                    workspace_id,
+                });
+                return MobileMouseResult::Consumed;
             }
             Some(crate::ui::MobileSwitcherTarget::NewTab) => {
                 if self.prompt_new_tab_name {

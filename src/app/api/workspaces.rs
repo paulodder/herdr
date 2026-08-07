@@ -131,7 +131,8 @@ impl App {
             event: EventKind::WorkspaceRenamed,
             data: EventData::WorkspaceRenamed {
                 workspace_id: self.public_workspace_id(index),
-                label: params.label,
+                label: self.state.workspaces[index]
+                    .display_name_from(&self.state.terminals, &self.terminal_runtimes),
             },
         });
 
@@ -597,6 +598,42 @@ mod tests {
                 if workspace.tokens.get("summary").map(String::as_str) == Some("done")
                     && !workspace.tokens.contains_key("jj_status")
         )));
+    }
+
+    #[test]
+    fn remote_workspace_rename_keeps_a_base_name_and_projects_the_endpoint() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        let mut workspace = Workspace::test_new("one");
+        workspace.metadata_tokens.patch(
+            std::collections::HashMap::from([
+                ("runtime_location".into(), Some("remote".into())),
+                ("runtime_host".into(), Some("stl-agents-1".into())),
+            ]),
+            None,
+            std::time::Instant::now(),
+        );
+        app.state.workspaces = vec![workspace];
+        let workspace_id = app.public_workspace_id(0);
+
+        let response = app.handle_workspace_rename(
+            "req".into(),
+            WorkspaceRenameParams {
+                workspace_id,
+                label: "checking@stl-agents-1".into(),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::WorkspaceInfo { workspace } = success.result else {
+            panic!("expected workspace info");
+        };
+
+        assert_eq!(workspace.label, "checking@stl-agents-1");
+        assert_eq!(
+            app.state.workspaces[0].custom_name.as_deref(),
+            Some("checking")
+        );
     }
 
     #[test]

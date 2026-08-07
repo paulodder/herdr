@@ -14,6 +14,33 @@ const SESSION_ID_FILE: &str = "runtime-session-id";
 
 #[cfg(not(test))]
 static CURRENT: std::sync::OnceLock<RuntimeIdentity> = std::sync::OnceLock::new();
+static FEDERATION_MEMBER: std::sync::OnceLock<std::sync::RwLock<(String, String, Option<String>)>> =
+    std::sync::OnceLock::new();
+
+pub fn set_federation_member(
+    member_id: String,
+    member_target: String,
+    member_label: Option<String>,
+) {
+    let member = FEDERATION_MEMBER
+        .get_or_init(|| std::sync::RwLock::new((String::new(), String::new(), None)));
+    *member
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+        (member_id, member_target, member_label);
+}
+
+fn with_federation_member(mut identity: RuntimeIdentity) -> RuntimeIdentity {
+    if let Some(member) = FEDERATION_MEMBER.get() {
+        let member = member
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        identity.member_id.clone_from(&member.0);
+        identity.member_target.clone_from(&member.1);
+        identity.member_label.clone_from(&member.2);
+    }
+    identity
+}
 
 /// Returns the stable identity for the active config root and session.
 ///
@@ -22,7 +49,7 @@ static CURRENT: std::sync::OnceLock<RuntimeIdentity> = std::sync::OnceLock::new(
 #[cfg(not(test))]
 pub fn current() -> io::Result<RuntimeIdentity> {
     if let Some(identity) = CURRENT.get() {
-        return Ok(identity.clone());
+        return Ok(with_federation_member(identity.clone()));
     }
 
     let identity = load_or_create(
@@ -31,16 +58,21 @@ pub fn current() -> io::Result<RuntimeIdentity> {
         active_session_name(),
     )?;
     let _ = CURRENT.set(identity.clone());
-    Ok(CURRENT.get().cloned().unwrap_or(identity))
+    Ok(with_federation_member(
+        CURRENT.get().cloned().unwrap_or(identity),
+    ))
 }
 
 #[cfg(test)]
 pub fn current() -> io::Result<RuntimeIdentity> {
-    Ok(RuntimeIdentity {
+    Ok(with_federation_member(RuntimeIdentity {
         server_id: "00000000-0000-4000-8000-000000000001".into(),
         session_id: "00000000-0000-4000-8000-000000000002".into(),
         session_name: active_session_name(),
-    })
+        member_id: "local".into(),
+        member_target: String::new(),
+        member_label: None,
+    }))
 }
 
 fn active_session_name() -> String {
@@ -57,6 +89,9 @@ fn load_or_create(
         server_id: load_or_create_id(server_id_path)?,
         session_id: load_or_create_id(session_id_path)?,
         session_name,
+        member_id: String::new(),
+        member_target: String::new(),
+        member_label: None,
     })
 }
 
@@ -130,6 +165,24 @@ mod tests {
         assert_ne!(first.session_id, second.session_id);
         assert_eq!(second.session_name, "second");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn federation_member_fields_refresh_without_replacing_runtime_ids() {
+        set_federation_member("x1".into(), "x1".into(), Some("Home".into()));
+        let before = current().unwrap();
+        set_federation_member(
+            "stl-agents-1".into(),
+            "paul@stl-agents-1".into(),
+            Some("STL Agents".into()),
+        );
+        let after = current().unwrap();
+        assert_eq!(after.server_id, before.server_id);
+        assert_eq!(after.session_id, before.session_id);
+        assert_eq!(after.member_id, "stl-agents-1");
+        assert_eq!(after.member_target, "paul@stl-agents-1");
+        assert_eq!(after.member_label.as_deref(), Some("STL Agents"));
+        set_federation_member("local".into(), String::new(), None);
     }
 
     #[test]

@@ -10,6 +10,12 @@ use super::{EventEnvelope, RuntimeIdentity};
 pub struct SessionWatchParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_cursor: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]

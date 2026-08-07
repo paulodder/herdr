@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 17,
+  "protocol": 18,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -3190,6 +3190,24 @@
               "minimum": 0,
               "type": [
                 "integer",
+                "null"
+              ]
+            },
+            "member_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "server_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_id": {
+              "type": [
+                "string",
                 "null"
               ]
             }
@@ -10154,6 +10172,23 @@
         },
         "RuntimeIdentity": {
           "properties": {
+            "member_id": {
+              "default": "",
+              "description": "Stable federation member identity owned by this running server.",
+              "type": "string"
+            },
+            "member_label": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "member_target": {
+              "default": "",
+              "description": "Advertised client-side target for this member.",
+              "type": "string"
+            },
             "server_id": {
               "type": "string"
             },

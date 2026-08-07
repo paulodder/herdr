@@ -578,6 +578,7 @@ fn success_response_round_trips() {
                 server_id: "server_1".into(),
                 session_id: "session_1".into(),
                 session_name: "default".into(),
+                ..RuntimeIdentity::default()
             }),
         },
     };
@@ -608,6 +609,7 @@ fn session_snapshot_request_and_response_round_trip() {
                     server_id: "server_1".into(),
                     session_id: "session_1".into(),
                     session_name: "default".into(),
+                    ..RuntimeIdentity::default()
                 },
                 event_cursor: 42,
                 focused_workspace_id: None,
@@ -633,6 +635,9 @@ fn session_watch_request_and_event_round_trip() {
         id: "req_watch".into(),
         method: Method::SessionWatch(SessionWatchParams {
             after_cursor: Some(41),
+            member_id: Some("stl-agents-1".into()),
+            server_id: Some("server-1".into()),
+            session_id: Some("session-1".into()),
         }),
     };
     let json = serde_json::to_string(&request).unwrap();

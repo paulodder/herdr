@@ -3,11 +3,19 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct PingParams {}
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RuntimeIdentity {
     pub server_id: String,
     pub session_id: String,
     pub session_name: String,
+    /// Stable federation member identity owned by this running server.
+    #[serde(default)]
+    pub member_id: String,
+    /// Advertised client-side target for this member.
+    #[serde(default)]
+    pub member_target: String,
+    #[serde(default)]
+    pub member_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

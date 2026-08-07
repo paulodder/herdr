@@ -174,7 +174,7 @@ fn probe_endpoint(endpoint: FederationEndpointConfig) -> EndpointState {
     if !endpoint.enabled {
         return EndpointState::configured(endpoint);
     }
-    match EndpointWatch::connect(endpoint.clone(), None) {
+    match EndpointWatch::connect(endpoint.clone(), None, None) {
         Ok(watch) => watch.state.clone(),
         Err(err) => EndpointState {
             endpoint,

@@ -762,34 +762,38 @@ fn stream_session_watch(
     event_hub: &EventHub,
     running: &Arc<AtomicBool>,
 ) -> std::io::Result<()> {
+    let response = dispatch_to_app(
+        Request {
+            id: format!("{request_id}:snapshot"),
+            method: Method::SessionSnapshot(crate::api::schema::EmptyParams::default()),
+        },
+        api_tx,
+    );
+    let value: serde_json::Value = serde_json::from_str(&response).map_err(|err| {
+        std::io::Error::other(format!("failed to decode session snapshot response: {err}"))
+    })?;
+    if value.get("error").is_some() {
+        write_text_line_allow_disconnect(&mut stream, &response)?;
+        return Ok(());
+    }
+    let success: SuccessResponse = serde_json::from_value(value).map_err(|err| {
+        std::io::Error::other(format!("failed to decode session snapshot: {err}"))
+    })?;
+    let ResponseResult::SessionSnapshot { snapshot } = success.result else {
+        return Err(std::io::Error::other(
+            "session snapshot returned an unexpected response",
+        ));
+    };
+    let resume_identity_matches = params.member_id.as_deref()
+        == Some(snapshot.identity.member_id.as_str())
+        && params.server_id.as_deref() == Some(snapshot.identity.server_id.as_str())
+        && params.session_id.as_deref() == Some(snapshot.identity.session_id.as_str());
     let resumable_cursor = params
         .after_cursor
-        .filter(|cursor| event_hub.can_replay_after(*cursor));
+        .filter(|cursor| resume_identity_matches && event_hub.can_replay_after(*cursor));
     let (cursor, resumed, snapshot) = if let Some(cursor) = resumable_cursor {
         (cursor, true, None)
     } else {
-        let response = dispatch_to_app(
-            Request {
-                id: format!("{request_id}:snapshot"),
-                method: Method::SessionSnapshot(crate::api::schema::EmptyParams::default()),
-            },
-            api_tx,
-        );
-        let value: serde_json::Value = serde_json::from_str(&response).map_err(|err| {
-            std::io::Error::other(format!("failed to decode session snapshot response: {err}"))
-        })?;
-        if value.get("error").is_some() {
-            write_text_line_allow_disconnect(&mut stream, &response)?;
-            return Ok(());
-        }
-        let success: SuccessResponse = serde_json::from_value(value).map_err(|err| {
-            std::io::Error::other(format!("failed to decode session snapshot: {err}"))
-        })?;
-        let ResponseResult::SessionSnapshot { snapshot } = success.result else {
-            return Err(std::io::Error::other(
-                "session snapshot returned an unexpected response",
-            ));
-        };
         (snapshot.event_cursor, false, Some(snapshot))
     };
 
@@ -1056,6 +1060,7 @@ mod tests {
                 server_id: "server_1".into(),
                 session_id: "session_1".into(),
                 session_name: "default".into(),
+                ..crate::api::schema::RuntimeIdentity::default()
             },
             version: "0.7.3".into(),
             protocol: crate::protocol::PROTOCOL_VERSION,
@@ -1492,11 +1497,21 @@ mod tests {
         let event_hub = EventHub::default();
         event_hub.push(workspace_closed_event(1));
         event_hub.push(workspace_closed_event(2));
-        let (api_tx, _api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        let snapshot = session_snapshot(2);
+        let identity = snapshot.identity.clone();
+        let (api_tx, responder) = spawn_snapshot_responder(2, None);
         let (mut client, server, _path) = local_stream_pair("api-session-watch-resume");
-        client
-            .write_all(br#"{"id":"watch_2","method":"session.watch","params":{"after_cursor":1}}"#)
-            .unwrap();
+        let request = serde_json::json!({
+            "id": "watch_2",
+            "method": "session.watch",
+            "params": {
+                "after_cursor": 1,
+                "member_id": identity.member_id,
+                "server_id": identity.server_id,
+                "session_id": identity.session_id,
+            }
+        });
+        client.write_all(request.to_string().as_bytes()).unwrap();
         client.write_all(b"\n").unwrap();
         client.flush().unwrap();
 
@@ -1522,6 +1537,46 @@ mod tests {
             .unwrap()
             .is_ok());
         server_thread.join().unwrap();
+        responder.join().unwrap();
+    }
+
+    #[test]
+    fn session_watch_resnapshots_when_runtime_identity_changes() {
+        let event_hub = EventHub::default();
+        event_hub.push(workspace_closed_event(1));
+        let (api_tx, responder) = spawn_snapshot_responder(1, None);
+        let (mut client, server, _path) = local_stream_pair("api-session-watch-identity");
+        client
+            .write_all(
+                br#"{"id":"watch_identity","method":"session.watch","params":{"after_cursor":1,"member_id":"stl-agents-1","server_id":"stale-server","session_id":"stale-session"}}"#,
+            )
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+
+        let running = Arc::new(AtomicBool::new(true));
+        let server_running = Arc::clone(&running);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let server_thread = std::thread::spawn(move || {
+            let result = handle_connection(server, &api_tx, &event_hub, &server_running, None);
+            done_tx.send(result).unwrap();
+        });
+
+        let ack: serde_json::Value = serde_json::from_str(&read_line(&mut client)).unwrap();
+        assert_eq!(ack["result"]["resumed"], false);
+        assert_eq!(
+            ack["result"]["snapshot"]["identity"]["server_id"],
+            "server_1"
+        );
+        assert_eq!(ack["result"]["snapshot"]["event_cursor"], 1);
+
+        drop(client);
+        assert!(done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .is_ok());
+        server_thread.join().unwrap();
+        responder.join().unwrap();
     }
 
     #[test]

@@ -375,6 +375,14 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # while this server projects remote workspaces and agents into the navigator.
 [federation]
 # enabled = true
+# Stable identity advertised by this Herdr server. Every federation member must
+# use a unique member_id; "local" is a safe unpaired default.
+# member_id = "x1"
+# Address other clients may use to reach this member when no retained connection
+# exists. Ordinary return to the home member reuses the retained local socket.
+# member_target = "x1"
+# Optional human-readable member label. Generated name qualifiers still use member_id.
+# member_label = "Home"
 
 # Add one entry per persistent remote Herdr session.
 # [[federation.endpoints]]

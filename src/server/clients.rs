@@ -26,6 +26,12 @@ pub(crate) struct ClientConnection {
     pub(crate) mode: ClientConnectionMode,
     /// True after the handshake for clients that will switch into direct terminal attach mode.
     pub(crate) pending_terminal_attach: bool,
+    /// App rendering is paused while this socket is retained by the TUI
+    /// connection manager as a suspended federation member.
+    pub(crate) suspended: bool,
+    /// Client-owned global directory overlay. It is never shared with or
+    /// re-exported to other clients.
+    pub(crate) federation_directory: Vec<crate::federation::EndpointState>,
     /// Client-local app keybindings. None means use the server's keybindings.
     pub(crate) keybindings: Option<Box<crate::config::LiveKeybindConfig>>,
     /// The client's terminal size after clamping.
@@ -100,6 +106,8 @@ impl ClientConnection {
         Self {
             mode,
             pending_terminal_attach,
+            suspended: false,
+            federation_directory: Vec::new(),
             keybindings,
             terminal_size,
             cell_size,
@@ -127,7 +135,9 @@ impl ClientConnection {
     }
 
     pub(crate) fn is_full_app_client(&self) -> bool {
-        matches!(self.mode, ClientConnectionMode::App) && !self.pending_terminal_attach
+        matches!(self.mode, ClientConnectionMode::App)
+            && !self.pending_terminal_attach
+            && !self.suspended
     }
 
     pub(crate) fn request_semantic_redraw_after_input(&mut self) {
@@ -247,6 +257,7 @@ pub(crate) fn render_targets(
         .iter()
         .filter(|(_, client)| {
             client.writer.is_some()
+                && !client.suspended
                 && (client.is_full_app_client()
                     || matches!(
                         client.mode,

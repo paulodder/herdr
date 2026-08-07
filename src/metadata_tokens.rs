@@ -41,6 +41,24 @@ pub(crate) fn accept_sequence(
 }
 
 impl MetadataTokens {
+    pub(crate) fn get(&self, key: &str) -> Option<&str> {
+        self.entries.get(key).map(|token| token.value.as_str())
+    }
+
+    pub(crate) fn location_endpoint(&self) -> Option<&str> {
+        if let Some(endpoint) = self
+            .get("federation_endpoint_id")
+            .map(str::trim)
+            .filter(|endpoint| !endpoint.is_empty())
+        {
+            return Some(endpoint);
+        }
+        (self.get("runtime_location") == Some("remote"))
+            .then(|| self.get("runtime_host").map(str::trim))
+            .flatten()
+            .filter(|host| !host.is_empty())
+    }
+
     pub(crate) fn patch(
         &mut self,
         patch: HashMap<String, Option<String>>,
@@ -100,6 +118,24 @@ impl MetadataTokens {
         self.entries
             .retain(|_, token| token.expires_at.is_none_or(|deadline| deadline > now));
         self.entries.len() != before
+    }
+}
+
+pub(crate) fn unqualified_name<'a>(name: &'a str, endpoint: &str) -> &'a str {
+    let suffix = format!("@{endpoint}");
+    let mut base = name.trim();
+    while let Some(stripped) = base.strip_suffix(&suffix) {
+        base = stripped.trim_end();
+    }
+    base
+}
+
+pub(crate) fn location_qualified_name(name: &str, endpoint: &str) -> String {
+    let base = unqualified_name(name, endpoint);
+    if base.is_empty() {
+        endpoint.to_string()
+    } else {
+        format!("{base}@{endpoint}")
     }
 }
 
@@ -254,6 +290,35 @@ mod tests {
         assert_eq!(
             tokens.values(),
             HashMap::from([("summary".into(), "persistent".into())])
+        );
+    }
+
+    #[test]
+    fn structured_location_prefers_federation_endpoint() {
+        let now = Instant::now();
+        let mut tokens = MetadataTokens::default();
+        tokens.patch(
+            patch(&[
+                ("runtime_location", Some("remote")),
+                ("runtime_host", Some("ssh-host")),
+                ("federation_endpoint_id", Some("tana.stl.dev")),
+            ]),
+            None,
+            now,
+        );
+
+        assert_eq!(tokens.location_endpoint(), Some("tana.stl.dev"));
+    }
+
+    #[test]
+    fn location_qualification_deduplicates_legacy_suffixes() {
+        assert_eq!(
+            location_qualified_name("checking@stl-agents-1", "stl-agents-1"),
+            "checking@stl-agents-1"
+        );
+        assert_eq!(
+            location_qualified_name("checking@stl-agents-1@stl-agents-1", "stl-agents-1"),
+            "checking@stl-agents-1"
         );
     }
 }

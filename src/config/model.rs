@@ -908,6 +908,12 @@ pub struct RemoteConfig {
 pub struct FederationConfig {
     /// Connect configured Herdr endpoints when this server starts.
     pub enabled: bool,
+    /// Stable ID of this authoritative federation member.
+    pub member_id: String,
+    /// Address other clients may use when this member is not already suspended.
+    pub member_target: String,
+    /// Optional human-readable label for this member.
+    pub member_label: Option<String>,
     /// Authoritative remote Herdr sessions visible through this server.
     pub endpoints: Vec<FederationEndpointConfig>,
 }
@@ -916,6 +922,9 @@ impl Default for FederationConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            member_id: "local".to_string(),
+            member_target: String::new(),
+            member_label: None,
             endpoints: Vec::new(),
         }
     }

@@ -161,15 +161,14 @@ impl App {
         let tab_id = self.public_tab_id(ws_idx, tab_idx).unwrap_or_else(|| {
             crate::workspace::public_tab_id_for_number(&workspace_id, tab_idx + 1)
         });
-        let Some(tab) = self
-            .state
-            .workspaces
-            .get_mut(ws_idx)
-            .and_then(|ws| ws.tabs.get_mut(tab_idx))
-        else {
+        let Some(workspace) = self.state.workspaces.get_mut(ws_idx) else {
             return tab_not_found(id, &params.tab_id);
         };
-        tab.set_custom_name(params.label.clone());
+        let base_label = workspace.unqualified_name(&params.label).to_string();
+        let Some(tab) = workspace.tabs.get_mut(tab_idx) else {
+            return tab_not_found(id, &params.tab_id);
+        };
+        tab.set_custom_name(base_label);
         crate::logging::tab_renamed(&workspace_id, &tab_id);
         if self.state.active == Some(ws_idx) {
             // Reflow the tab bar so the new label width takes effect immediately.
@@ -184,7 +183,9 @@ impl App {
             data: EventData::TabRenamed {
                 tab_id: self.public_tab_id(ws_idx, tab_idx).unwrap(),
                 workspace_id: self.public_workspace_id(ws_idx),
-                label: params.label,
+                label: self.state.workspaces[ws_idx]
+                    .tab_display_name(tab_idx)
+                    .unwrap_or(params.label),
             },
         });
         let tab = self.tab_info(ws_idx, tab_idx).unwrap();
@@ -411,6 +412,42 @@ mod tests {
             width_after > width_before,
             "tab bar should reflow to the new label width immediately: \
              before={width_before}, after={width_after}"
+        );
+    }
+
+    #[test]
+    fn remote_tab_rename_stores_only_the_base_and_returns_the_forced_endpoint() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        let mut workspace = Workspace::test_new("tabs");
+        workspace.metadata_tokens.patch(
+            std::collections::HashMap::from([
+                ("runtime_location".into(), Some("remote".into())),
+                ("runtime_host".into(), Some("stl-agents-1".into())),
+            ]),
+            None,
+            std::time::Instant::now(),
+        );
+        app.state.workspaces = vec![workspace];
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+
+        let response = app.handle_tab_rename(
+            "req".into(),
+            TabRenameParams {
+                tab_id,
+                label: "checking@stl-agents-1".into(),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::TabInfo { tab } = success.result else {
+            panic!("expected tab info");
+        };
+
+        assert_eq!(tab.label, "checking@stl-agents-1");
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].custom_name.as_deref(),
+            Some("checking")
         );
     }
 

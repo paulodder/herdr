@@ -61,7 +61,7 @@ impl Tab {
                     label: agent_label.clone(),
                     pane_label: terminal
                         .effective_title()
-                        .or_else(|| terminal.manual_label.clone()),
+                        .or_else(|| terminal.manual_display_label()),
                     terminal_title: terminal.terminal_title.clone(),
                     terminal_title_stripped: terminal.terminal_title_stripped(),
                     agent_label,

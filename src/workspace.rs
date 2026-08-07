@@ -433,17 +433,19 @@ impl Workspace {
         self.tabs.get_mut(self.active_tab)
     }
 
-    pub fn active_tab_display_name(&self) -> Option<String> {
-        self.tab_display_name(self.active_tab)
-    }
-
-    pub fn tab_display_name(&self, tab_idx: usize) -> Option<String> {
+    pub fn tab_base_name(&self, tab_idx: usize) -> Option<String> {
         let tab = self.tabs.get(tab_idx)?;
         Some(
             tab.custom_name
-                .clone()
+                .as_deref()
+                .map(|name| self.unqualified_name(name).to_string())
                 .unwrap_or_else(|| (tab_idx + 1).to_string()),
         )
+    }
+
+    pub fn tab_display_name(&self, tab_idx: usize) -> Option<String> {
+        let base = self.tab_base_name(tab_idx)?;
+        Some(self.qualify_name(&base))
     }
 
     pub fn switch_tab(&mut self, idx: usize) {
@@ -1038,7 +1040,47 @@ impl Workspace {
     }
 
     pub fn set_custom_name(&mut self, name: String) {
-        self.custom_name = Some(name);
+        self.custom_name = Some(self.unqualified_name(&name).to_string());
+    }
+
+    pub(crate) fn location_endpoint(&self) -> Option<&str> {
+        self.metadata_tokens.location_endpoint()
+    }
+
+    pub(crate) fn unqualified_name<'a>(&self, name: &'a str) -> &'a str {
+        self.location_endpoint()
+            .map(|endpoint| crate::metadata_tokens::unqualified_name(name, endpoint))
+            .unwrap_or(name)
+    }
+
+    pub(crate) fn qualify_name(&self, name: &str) -> String {
+        self.location_endpoint()
+            .map(|endpoint| crate::metadata_tokens::location_qualified_name(name, endpoint))
+            .unwrap_or_else(|| name.to_string())
+    }
+
+    pub fn base_display_name(&self) -> String {
+        if let Some(name) = &self.custom_name {
+            return self.unqualified_name(name).to_string();
+        }
+
+        self.resolved_identity_cwd()
+            .map(|cwd| derive_label_from_cwd(&cwd))
+            .unwrap_or_else(|| "workspace".into())
+    }
+
+    pub fn base_display_name_from(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) -> String {
+        if let Some(name) = &self.custom_name {
+            return self.unqualified_name(name).to_string();
+        }
+
+        self.resolved_identity_cwd_from(terminals, terminal_runtimes)
+            .map(|cwd| derive_label_from_cwd(&cwd))
+            .unwrap_or_else(|| "workspace".into())
     }
 
     pub fn resolved_identity_cwd(&self) -> Option<PathBuf> {
@@ -1057,13 +1099,7 @@ impl Workspace {
     }
 
     pub fn display_name(&self) -> String {
-        if let Some(name) = &self.custom_name {
-            return name.clone();
-        }
-
-        self.resolved_identity_cwd()
-            .map(|cwd| derive_label_from_cwd(&cwd))
-            .unwrap_or_else(|| "workspace".into())
+        self.qualify_name(&self.base_display_name())
     }
 
     pub fn display_name_from(
@@ -1071,13 +1107,7 @@ impl Workspace {
         terminals: &HashMap<TerminalId, TerminalState>,
         terminal_runtimes: &TerminalRuntimeRegistry,
     ) -> String {
-        if let Some(name) = &self.custom_name {
-            return name.clone();
-        }
-
-        self.resolved_identity_cwd_from(terminals, terminal_runtimes)
-            .map(|cwd| derive_label_from_cwd(&cwd))
-            .unwrap_or_else(|| "workspace".into())
+        self.qualify_name(&self.base_display_name_from(terminals, terminal_runtimes))
     }
 
     pub fn branch(&self) -> Option<String> {
@@ -1621,5 +1651,59 @@ mod tests {
         assert_eq!(ws.tabs[2].root_pane, moved_root);
         assert_eq!(ws.tabs[ws.active_tab].root_pane, active_root);
         ws.assert_invariants_for_test();
+    }
+
+    fn mark_test_workspace_remote(ws: &mut Workspace, endpoint: &str) {
+        ws.metadata_tokens.patch(
+            HashMap::from([
+                ("runtime_location".into(), Some("remote".into())),
+                ("runtime_host".into(), Some(endpoint.to_string())),
+            ]),
+            None,
+            std::time::Instant::now(),
+        );
+    }
+
+    #[test]
+    fn remote_tab_display_names_are_location_qualified_without_mutating_base_names() {
+        let mut ws = Workspace::test_new("remote");
+        ws.tabs[0].set_custom_name("checking".into());
+        mark_test_workspace_remote(&mut ws, "stl-agents-1");
+
+        assert_eq!(
+            ws.tab_display_name(0).as_deref(),
+            Some("checking@stl-agents-1")
+        );
+        assert_eq!(ws.tabs[0].custom_name.as_deref(), Some("checking"));
+
+        ws.tabs[0].set_custom_name("reviewing".into());
+        assert_eq!(
+            ws.tab_display_name(0).as_deref(),
+            Some("reviewing@stl-agents-1")
+        );
+        assert_eq!(ws.tabs[0].custom_name.as_deref(), Some("reviewing"));
+    }
+
+    #[test]
+    fn unnamed_remote_tabs_get_a_qualified_numeric_fallback() {
+        let mut ws = Workspace::test_new("remote");
+        mark_test_workspace_remote(&mut ws, "tana.stl.dev");
+
+        assert_eq!(ws.tab_display_name(0).as_deref(), Some("1@tana.stl.dev"));
+        assert!(ws.tabs[0].custom_name.is_none());
+    }
+
+    #[test]
+    fn local_and_legacy_remote_tab_names_remain_stable() {
+        let mut ws = Workspace::test_new("local");
+        ws.tabs[0].set_custom_name("checking".into());
+        assert_eq!(ws.tab_display_name(0).as_deref(), Some("checking"));
+
+        ws.tabs[0].set_custom_name("checking@stl-agents-1".into());
+        mark_test_workspace_remote(&mut ws, "stl-agents-1");
+        assert_eq!(
+            ws.tab_display_name(0).as_deref(),
+            Some("checking@stl-agents-1")
+        );
     }
 }

@@ -235,6 +235,16 @@ fn workspace_attention_priority(state: AgentState, seen: bool) -> u8 {
     }
 }
 
+pub(crate) fn agent_status_state(status: crate::api::schema::AgentStatus) -> (AgentState, bool) {
+    match status {
+        crate::api::schema::AgentStatus::Blocked => (AgentState::Blocked, true),
+        crate::api::schema::AgentStatus::Working => (AgentState::Working, true),
+        crate::api::schema::AgentStatus::Done => (AgentState::Idle, false),
+        crate::api::schema::AgentStatus::Idle => (AgentState::Idle, true),
+        crate::api::schema::AgentStatus::Unknown => (AgentState::Unknown, true),
+    }
+}
+
 fn space_aggregate_state(app: &AppState, key: &str) -> (AgentState, bool) {
     app.workspaces
         .iter()
@@ -287,7 +297,14 @@ pub(crate) fn grouped_child_display_label(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkspaceListEntry {
-    Workspace { ws_idx: usize, indented: bool },
+    Workspace {
+        ws_idx: usize,
+        indented: bool,
+    },
+    RemoteWorkspace {
+        endpoint_id: String,
+        workspace_id: String,
+    },
 }
 
 pub(crate) fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], idx: usize) -> bool {
@@ -419,7 +436,65 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
             }
         }
     }
+    for endpoint in app.federation_states() {
+        let Some(snapshot) = endpoint.snapshot.as_ref() else {
+            continue;
+        };
+        entries.extend(snapshot.workspaces.iter().map(|workspace| {
+            WorkspaceListEntry::RemoteWorkspace {
+                endpoint_id: endpoint.endpoint.id.clone(),
+                workspace_id: workspace.workspace_id.clone(),
+            }
+        }));
+    }
     entries
+}
+
+pub(crate) fn remote_workspace<'a>(
+    app: &'a AppState,
+    endpoint_id: &str,
+    workspace_id: &str,
+) -> Option<(
+    &'a crate::federation::EndpointState,
+    &'a crate::api::schema::WorkspaceInfo,
+)> {
+    let endpoint = app.federation_state(endpoint_id)?;
+    let workspace = endpoint
+        .snapshot
+        .as_ref()?
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.workspace_id == workspace_id)?;
+    Some((endpoint, workspace))
+}
+
+fn remote_workspace_row_height(
+    app: &AppState,
+    endpoint_id: &str,
+    workspace_id: &str,
+    body_height: u16,
+) -> u16 {
+    let Some((endpoint, workspace)) = remote_workspace(app, endpoint_id, workspace_id) else {
+        return 0;
+    };
+    let (state, seen) = agent_status_state(workspace.agent_status);
+    let label =
+        crate::metadata_tokens::location_qualified_name(&workspace.label, &endpoint.endpoint.id);
+    (tokens::space_rows(
+        &app.sidebar_spaces,
+        SpaceTokenContext {
+            workspace: &label,
+            branch: None,
+            state_text: state_label(state, seen),
+            ahead_behind: None,
+            tokens: &workspace.tokens,
+            suppress_git_details: true,
+        },
+    )
+    .len()
+    .max(1)
+    .min(u16::MAX as usize) as u16)
+        .min(body_height)
 }
 
 pub(crate) fn workspace_list_rect(area: Rect, split_ratio: f32) -> Rect {
@@ -459,6 +534,13 @@ fn workspace_list_visible_count(app: &AppState, area: Rect, scroll: usize) -> us
                     workspace_entry_gap(&entries, entry_idx, *indented),
                 )
             }
+            WorkspaceListEntry::RemoteWorkspace {
+                endpoint_id,
+                workspace_id,
+            } => (
+                remote_workspace_row_height(app, endpoint_id, workspace_id, body.height),
+                workspace_entry_gap(&entries, entry_idx, false),
+            ),
         };
         if used_rows.saturating_add(row_height) > body.height {
             break;
@@ -478,13 +560,26 @@ fn workspace_list_bottom_start(app: &AppState, area: Rect) -> usize {
     let mut used_rows = 0u16;
     let mut start = entries.len();
     for (entry_idx, entry) in entries.iter().enumerate().rev() {
-        let WorkspaceListEntry::Workspace { ws_idx, indented } = entry;
-        let Some(workspace) = app.workspaces.get(*ws_idx) else {
-            continue;
+        let (height, indented) = match entry {
+            WorkspaceListEntry::Workspace { ws_idx, indented } => {
+                let Some(workspace) = app.workspaces.get(*ws_idx) else {
+                    continue;
+                };
+                (
+                    workspace_row_height_in_body(app, workspace, *indented, body.height),
+                    *indented,
+                )
+            }
+            WorkspaceListEntry::RemoteWorkspace {
+                endpoint_id,
+                workspace_id,
+            } => (
+                remote_workspace_row_height(app, endpoint_id, workspace_id, body.height),
+                false,
+            ),
         };
-        let gap = workspace_entry_gap(&entries, entry_idx, *indented);
-        let needed = workspace_row_height_in_body(app, workspace, *indented, body.height)
-            .saturating_add(gap);
+        let gap = workspace_entry_gap(&entries, entry_idx, indented);
+        let needed = height.saturating_add(gap);
         if used_rows.saturating_add(needed) > body.height {
             break;
         }
@@ -680,8 +775,33 @@ pub(crate) fn compute_workspace_list_areas(
                 }
                 cards.push(crate::app::state::WorkspaceCardArea {
                     ws_idx: *ws_idx,
+                    remote: None,
                     rect: Rect::new(body.x, row_y, body.width, row_height),
                     indented: *indented,
+                });
+                row_y = row_y.saturating_add(row_height);
+                if gap > 0 && row_y < body_bottom {
+                    row_y = row_y.saturating_add(1);
+                }
+            }
+            WorkspaceListEntry::RemoteWorkspace {
+                endpoint_id,
+                workspace_id,
+            } => {
+                let row_height =
+                    remote_workspace_row_height(app, endpoint_id, workspace_id, body.height);
+                let gap = workspace_entry_gap(&entries, entry_idx, false);
+                if row_y.saturating_add(row_height) > body_bottom {
+                    break;
+                }
+                cards.push(crate::app::state::WorkspaceCardArea {
+                    ws_idx: usize::MAX,
+                    remote: Some(crate::app::state::FederatedWorkspaceTarget {
+                        endpoint_id: endpoint_id.clone(),
+                        workspace_id: workspace_id.clone(),
+                    }),
+                    rect: Rect::new(body.x, row_y, body.width, row_height),
+                    indented: false,
                 });
                 row_y = row_y.saturating_add(row_height);
                 if gap > 0 && row_y < body_bottom {
@@ -752,15 +872,33 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
         return;
     }
 
-    for (visible_idx, ws) in app.workspaces.iter().enumerate() {
+    for (visible_idx, entry) in workspace_list_entries(app).iter().enumerate() {
         let y = ws_area.y + visible_idx as u16;
         if y >= ws_area.y + ws_area.height {
             break;
         }
-        let (agg_state, agg_seen) = ws.aggregate_state(&app.terminals);
+        let (agg_state, agg_seen, local_ws_idx) = match entry {
+            WorkspaceListEntry::Workspace { ws_idx, .. } => {
+                let Some(ws) = app.workspaces.get(*ws_idx) else {
+                    continue;
+                };
+                let (state, seen) = ws.aggregate_state(&app.terminals);
+                (state, seen, Some(*ws_idx))
+            }
+            WorkspaceListEntry::RemoteWorkspace {
+                endpoint_id,
+                workspace_id,
+            } => {
+                let Some((_, workspace)) = remote_workspace(app, endpoint_id, workspace_id) else {
+                    continue;
+                };
+                let (state, seen) = agent_status_state(workspace.agent_status);
+                (state, seen, None)
+            }
+        };
         let (icon, icon_style) = state_dot(agg_state, agg_seen, p);
-        let is_selected = visible_idx == app.selected && is_navigating;
-        let is_active = Some(visible_idx) == app.active;
+        let is_selected = local_ws_idx == Some(app.selected) && is_navigating;
+        let is_active = local_ws_idx == app.active;
         let row_style = if is_selected {
             Style::default().bg(p.surface0)
         } else if is_active {
@@ -839,12 +977,16 @@ pub(crate) fn workspace_drop_indicator_row(
     }
     let list_bottom = area.y + area.height.saturating_sub(1);
 
-    let first = cards.first()?;
+    let local_cards = cards
+        .iter()
+        .filter(|card| card.remote.is_none())
+        .collect::<Vec<_>>();
+    let first = *local_cards.first()?;
     if insert_idx == first.ws_idx {
         return first.rect.y.checked_sub(1).filter(|y| *y < list_bottom);
     }
 
-    if let Some(row) = cards
+    if let Some(row) = local_cards
         .last()
         .filter(|card| insert_idx == card.ws_idx.saturating_add(1))
         .map(|card| card.rect.y.saturating_add(card.rect.height))
@@ -853,11 +995,76 @@ pub(crate) fn workspace_drop_indicator_row(
         return Some(row);
     }
 
-    if let Some(card) = cards.iter().find(|card| card.ws_idx == insert_idx) {
+    if let Some(card) = local_cards.iter().find(|card| card.ws_idx == insert_idx) {
         return card.rect.y.checked_sub(1).filter(|y| *y < list_bottom);
     }
 
     None
+}
+
+fn render_remote_workspace_card(
+    app: &AppState,
+    frame: &mut Frame,
+    card: &crate::app::state::WorkspaceCardArea,
+    list_bottom: u16,
+) -> bool {
+    let Some(target) = card.remote.as_ref() else {
+        return false;
+    };
+    let Some((endpoint, workspace)) =
+        remote_workspace(app, &target.endpoint_id, &target.workspace_id)
+    else {
+        return true;
+    };
+    let p = &app.palette;
+    let (state, seen) = agent_status_state(workspace.agent_status);
+    let label =
+        crate::metadata_tokens::location_qualified_name(&workspace.label, &endpoint.endpoint.id);
+    let state_icon = state_dot(state, seen, p);
+    let state_text_style = Style::default()
+        .fg(state_label_color(state, seen, p))
+        .add_modifier(Modifier::DIM);
+    let secondary_style = Style::default().fg(p.overlay0);
+    let rows = tokens::space_rows(
+        &app.sidebar_spaces,
+        SpaceTokenContext {
+            workspace: &label,
+            branch: None,
+            state_text: state_label(state, seen),
+            ahead_behind: None,
+            tokens: &workspace.tokens,
+            suppress_git_details: true,
+        },
+    );
+    for (row_index, resolved) in rows.iter().enumerate() {
+        if row_index as u16 >= card.rect.height || card.rect.y + row_index as u16 >= list_bottom {
+            break;
+        }
+        let mut spans = vec![Span::raw(if row_index == 0 { " " } else { "   " })];
+        spans.extend(resolved_token_spans(
+            resolved,
+            state_icon,
+            state_text_style,
+            Style::default().fg(p.subtext0),
+            secondary_style,
+            secondary_style,
+            secondary_style,
+            p,
+            card.rect
+                .width
+                .saturating_sub(if row_index == 0 { 1 } else { 3 }) as usize,
+        ));
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect::new(
+                card.rect.x,
+                card.rect.y + row_index as u16,
+                card.rect.width,
+                1,
+            ),
+        );
+    }
+    true
 }
 
 pub(super) fn render_sidebar(
@@ -1106,6 +1313,9 @@ fn render_workspace_list(
     let cards = &app.view.workspace_card_areas;
 
     for card in cards {
+        if render_remote_workspace_card(app, frame, card, list_bottom) {
+            continue;
+        }
         let i = card.ws_idx;
         let ws = &app.workspaces[i];
         let row_y = card.rect.y;
@@ -2113,6 +2323,7 @@ mod tests {
         app.mode = Mode::Terminal;
         app.view.workspace_card_areas = vec![crate::app::state::WorkspaceCardArea {
             ws_idx: 0,
+            remote: None,
             rect: Rect::new(0, 1, 15, 2),
             indented: false,
         }];

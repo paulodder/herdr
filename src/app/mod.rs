@@ -525,14 +525,23 @@ impl App {
         };
 
         let agent_manifest_summaries = crate::detect::manifest::reload_manifests();
+        crate::runtime_identity::set_federation_member(
+            config.federation.member_id.clone(),
+            config.federation.member_target.clone(),
+            config.federation.member_label.clone(),
+        );
         let theme_runtime = theme_runtime_config(config, true);
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
 
         let mut state = AppState {
+            federation_member_id: config.federation.member_id.clone(),
+            federation_member_target: config.federation.member_target.clone(),
+            federation_member_label: config.federation.member_label.clone(),
             federation: crate::federation::configured_states(&config.federation)
                 .into_iter()
                 .map(|state| (state.endpoint.id.clone(), state))
                 .collect(),
+            federation_client_overlay: std::collections::BTreeMap::new(),
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
@@ -1501,6 +1510,14 @@ impl App {
                 .federation_watch_generation
                 .fetch_add(1, Ordering::AcqRel)
                 + 1;
+            self.state.federation_member_id = config.federation.member_id.clone();
+            self.state.federation_member_target = config.federation.member_target.clone();
+            self.state.federation_member_label = config.federation.member_label.clone();
+            crate::runtime_identity::set_federation_member(
+                config.federation.member_id.clone(),
+                config.federation.member_target.clone(),
+                config.federation.member_label.clone(),
+            );
             self.state.federation = crate::federation::configured_states(&config.federation)
                 .into_iter()
                 .map(|state| (state.endpoint.id.clone(), state))

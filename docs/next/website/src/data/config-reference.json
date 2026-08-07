@@ -1034,6 +1034,24 @@
           "type": "boolean",
           "default": "true",
           "description": "Connect configured remote Herdr sessions and project them into the local navigator."
+        },
+        {
+          "key": "federation.member_id",
+          "type": "string",
+          "default": "\"local\"",
+          "description": "Stable ID of this authoritative federation member. Every paired member must use a unique value."
+        },
+        {
+          "key": "federation.member_target",
+          "type": "string",
+          "default": "\"\"",
+          "description": "Address clients may use to reach this member when no retained connection exists."
+        },
+        {
+          "key": "federation.member_label",
+          "type": "string or null",
+          "default": "null",
+          "description": "Optional human-readable label for this federation member."
         }
       ]
     },

@@ -12,6 +12,15 @@ from scripts.vendor_libghostty_vt import ensure_dist_archive, parse_archive_root
 
 
 class VendorLibghosttyVtTests(unittest.TestCase):
+    def test_cargo_build_uses_target_specific_zig_install_prefix(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        build_script = (root / "build.rs").read_text(encoding="utf-8")
+        self.assertIn('cargo:rerun-if-changed=build.rs', build_script)
+        self.assertIn('env::var("OUT_DIR")', build_script)
+        self.assertIn('.arg("--prefix")', build_script)
+        self.assertIn('let lib_dir = install_prefix.join("lib")', build_script)
+        self.assertNotIn('vendored_dir.join("zig-out/lib")', build_script)
+
     def test_parse_archive_root_returns_single_top_level_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             archive = Path(temp_dir) / "libghostty-vt.tar.gz"

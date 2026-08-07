@@ -186,9 +186,97 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
         local_socket.clone(),
         session_name,
         remote_ssh.options(),
+        true,
     )?;
 
     run_client_process(&local_socket, &reattach_command, remote.keybindings)
+}
+
+/// Owns the SSH transport used by an in-process federation attachment.
+///
+/// Keeping this value alive keeps both the local bridge listener and any
+/// managed SSH control socket alive.  The client may open a replacement
+/// stream through the same bridge after a remote server live handoff without
+/// rebuilding its terminal or process state.
+pub(crate) struct InPlaceRemoteConnection {
+    // Drop the bridge before the SSH configuration/control master it uses.
+    bridge: SshStdioBridge,
+    _ssh: RemoteSsh,
+}
+
+impl InPlaceRemoteConnection {
+    pub(crate) fn connect(&self) -> io::Result<crate::ipc::LocalStream> {
+        crate::ipc::connect_local_stream(&self.bridge.local_socket).map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!(
+                    "failed to connect to federation bridge {}: {err}",
+                    self.bridge.local_socket.display()
+                ),
+            )
+        })
+    }
+}
+
+/// Prepare a non-interactive SSH bridge for an in-process federation switch.
+///
+/// Unlike the standalone `--remote` launcher this path never installs a
+/// binary, stops a server, or asks a question while the terminal is in raw
+/// mode.  A rollout must make the receiver compatible first; otherwise the
+/// home client remains active and reports a clear compatibility error.
+pub(crate) fn start_in_place_remote_connection(
+    target: String,
+    session_name: String,
+) -> io::Result<InPlaceRemoteConnection> {
+    let manage_ssh_config = crate::config::Config::load()
+        .config
+        .remote
+        .manage_ssh_config;
+    let ssh = RemoteSsh::new_unmultiplexed(target.clone(), manage_ssh_config);
+    let remote_herdr = compatible_installed_remote_herdr(&ssh)?;
+
+    match remote_server_status(&ssh, &remote_herdr)? {
+        RemoteServerStatus::Running { protocol, .. } if protocol != Some(CURRENT_PROTOCOL) => {
+            return Err(io::Error::other(format!(
+                "federation receiver {target} advertises protocol {}; local client requires {CURRENT_PROTOCOL}; the home client remains active",
+                protocol
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            )));
+        }
+        _ => {}
+    }
+
+    let local_socket = local_forward_socket_path(&target, &session_name);
+    let bridge = SshStdioBridge::start(
+        target,
+        remote_herdr,
+        local_socket,
+        session_name,
+        ssh.options(),
+        false,
+    )?;
+    Ok(InPlaceRemoteConnection { bridge, _ssh: ssh })
+}
+
+fn compatible_installed_remote_herdr(ssh: &RemoteSsh) -> io::Result<RemoteHerdr> {
+    let platform = detect_remote_platform(ssh)?;
+    let default = RemoteHerdr::for_platform(platform);
+    let mut candidates = remote_binary_candidates(ssh, &default)?;
+    candidates.push(default);
+    candidates.dedup_by(|left, right| left.shell_path == right.shell_path);
+
+    for candidate in candidates {
+        if remote_binary_matches(ssh, &candidate).unwrap_or(false) {
+            return Ok(candidate);
+        }
+    }
+
+    Err(io::Error::other(format!(
+        "federation receiver {} has no installed Herdr {} (protocol {CURRENT_PROTOCOL}); deploy receivers before enabling this sender; the home client remains active",
+        ssh.target(),
+        current_version()
+    )))
 }
 
 pub(crate) fn run_remote_client_bridge() -> io::Result<()> {
@@ -453,6 +541,7 @@ impl Drop for ManagedSshConfig {
 struct RemoteSsh {
     target: String,
     managed_config: Option<ManagedSshConfig>,
+    multiplexing: bool,
 }
 
 impl RemoteSsh {
@@ -470,7 +559,14 @@ impl RemoteSsh {
         Self {
             target,
             managed_config,
+            multiplexing: true,
         }
+    }
+
+    fn new_unmultiplexed(target: String, manage_ssh_config: bool) -> Self {
+        let mut ssh = Self::new(target, manage_ssh_config);
+        ssh.multiplexing = false;
+        ssh
     }
 
     fn target(&self) -> &str {
@@ -489,7 +585,14 @@ impl RemoteSsh {
 
     fn base_command(&self) -> Command {
         let mut command = Command::new("ssh");
-        apply_managed_ssh_options(&mut command, self.options());
+        if self.multiplexing {
+            apply_managed_ssh_options(&mut command, self.options());
+        } else {
+            if let Some(options) = self.options() {
+                command.arg("-F").arg(&options.config_path);
+            }
+            apply_unmultiplexed_ssh_options(&mut command);
+        }
         command
     }
 
@@ -613,7 +716,7 @@ fn remote_install_commit_script(tmp_path: &str, dest_path: &str) -> String {
 
 impl Drop for RemoteSsh {
     fn drop(&mut self) {
-        if self.managed_config.is_none() {
+        if self.managed_config.is_none() || !self.multiplexing {
             return;
         }
 
@@ -629,6 +732,14 @@ impl Drop for RemoteSsh {
             .stderr(Stdio::null())
             .status();
     }
+}
+
+fn apply_unmultiplexed_ssh_options(command: &mut Command) {
+    command
+        .arg("-o")
+        .arg("ControlMaster=no")
+        .arg("-o")
+        .arg("ControlPath=none");
 }
 
 fn apply_managed_ssh_options(command: &mut Command, options: Option<&ManagedSshOptions>) {
@@ -1695,6 +1806,7 @@ impl SshStdioBridge {
         local_socket: PathBuf,
         session_name: String,
         ssh_options: Option<&ManagedSshOptions>,
+        multiplexing: bool,
     ) -> io::Result<Self> {
         let _ = std::fs::remove_file(&local_socket);
         let listener = UnixListener::bind(&local_socket)?;
@@ -1720,6 +1832,7 @@ impl SshStdioBridge {
                             &remote_herdr,
                             &session_name,
                             thread_ssh_options.as_ref(),
+                            multiplexing,
                         ) {
                             eprintln!("herdr: remote bridge failed: {err}");
                         }
@@ -1854,9 +1967,17 @@ fn bridge_connection(
     remote_herdr: &RemoteHerdr,
     session_name: &str,
     ssh_options: Option<&ManagedSshOptions>,
+    multiplexing: bool,
 ) -> io::Result<()> {
     let mut command = Command::new("ssh");
-    apply_managed_ssh_options(&mut command, ssh_options);
+    if multiplexing {
+        apply_managed_ssh_options(&mut command, ssh_options);
+    } else {
+        if let Some(options) = ssh_options {
+            command.arg("-F").arg(&options.config_path);
+        }
+        apply_unmultiplexed_ssh_options(&mut command);
+    }
     command
         .arg("-T")
         .arg(target)
@@ -2035,6 +2156,7 @@ mod tests {
             socket.clone(),
             "default".to_string(),
             None,
+            true,
         )
         .expect("start bridge listener");
 
@@ -2121,6 +2243,7 @@ mod tests {
         let ssh = RemoteSsh {
             target: "example".to_string(),
             managed_config: Some(managed_config),
+            multiplexing: true,
         };
 
         let command = ssh.command();
@@ -2151,6 +2274,7 @@ mod tests {
         let ssh = RemoteSsh {
             target: "example".to_string(),
             managed_config: None,
+            multiplexing: true,
         };
 
         let command = ssh.command();
@@ -2160,6 +2284,35 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(args, vec!["-T".to_string(), "example".to_string()]);
+    }
+
+    #[test]
+    fn in_place_remote_ssh_disables_user_multiplexing() {
+        let ssh = RemoteSsh::new_unmultiplexed("tana".to_string(), true);
+        let args = ssh
+            .command()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-o", "ControlMaster=no"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-o", "ControlPath=none"]));
+        assert!(!args.iter().any(|arg| arg == "-S"));
+        assert!(!args.iter().any(|arg| arg == "ControlMaster=auto"));
+        assert!(!args.iter().any(|arg| arg == "ControlPersist=yes"));
+        assert_eq!(args[args.len() - 2..], ["-T", "tana"]);
+        let disable_path = args
+            .windows(2)
+            .position(|pair| pair == ["-o", "ControlPath=none"])
+            .expect("ControlPath disable");
+        let config = args
+            .iter()
+            .position(|arg| arg == "-F")
+            .expect("managed config");
+        assert!(disable_path > config);
     }
 
     #[test]

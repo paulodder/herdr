@@ -1204,7 +1204,9 @@ impl App {
             return pane_not_found(id, &params.pane_id);
         };
         match params.label.map(|label| label.trim().to_string()) {
-            Some(label) if !label.is_empty() => terminal.set_manual_label(label),
+            Some(label) if !label.is_empty() => {
+                terminal.set_manual_label(label);
+            }
             _ => terminal.clear_manual_label(),
         }
         self.state.mark_session_dirty();
@@ -2029,6 +2031,47 @@ mod tests {
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert!(app.state.terminals[&terminal_id].restore_argv.is_none());
+    }
+
+    #[test]
+    fn remote_pane_rename_does_not_generate_an_endpoint_suffix() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(internal_pane_id)
+            .unwrap()
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .metadata_tokens
+            .patch(
+                std::collections::HashMap::from([
+                    ("runtime_location".into(), Some("remote".into())),
+                    ("runtime_host".into(), Some("tana.stl.dev".into())),
+                ]),
+                None,
+                std::time::Instant::now(),
+            );
+
+        let response = app.handle_pane_rename(
+            "rename".into(),
+            PaneRenameParams {
+                pane_id,
+                label: Some("tiles@tana.stl.dev".into()),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneInfo { pane } = success.result else {
+            panic!("expected pane info");
+        };
+
+        assert_eq!(pane.label.as_deref(), Some("tiles@tana.stl.dev"));
+        assert_eq!(
+            app.state.terminals[&terminal_id].manual_label.as_deref(),
+            Some("tiles@tana.stl.dev")
+        );
     }
 
     #[test]

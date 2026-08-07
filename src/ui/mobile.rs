@@ -32,10 +32,14 @@ pub(crate) struct MobileSwitcherAreas {
     pub viewport: Rect,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MobileSwitcherTarget {
     NewWorkspace,
     Workspace(usize),
+    RemoteWorkspace {
+        endpoint_id: String,
+        workspace_id: String,
+    },
     NewTab,
     Tab(usize),
     Agent {
@@ -114,7 +118,9 @@ pub(crate) fn mobile_switcher_workspace_doc_range(
     // in the entry list, not its raw array index.
     let pos = workspace_list_entries_expanded(app)
         .iter()
-        .position(|WorkspaceListEntry::Workspace { ws_idx, .. }| *ws_idx == idx)
+        .position(
+            |entry| matches!(entry, WorkspaceListEntry::Workspace { ws_idx, .. } if *ws_idx == idx),
+        )
         .unwrap_or(idx);
     // spaces sit after the agents block, then a title + "new workspace" row.
     let start = mobile_agents_block_height(app) + 2 + pos * 2;
@@ -170,9 +176,18 @@ pub(crate) fn mobile_switcher_target_at(
     let spaces_end = cursor + space_entries.len() * 2;
     if doc_row >= cursor && doc_row < spaces_end {
         let entry_idx = (doc_row - cursor) / 2;
-        return space_entries.get(entry_idx).map(
-            |WorkspaceListEntry::Workspace { ws_idx, .. }| MobileSwitcherTarget::Workspace(*ws_idx),
-        );
+        return space_entries.get(entry_idx).map(|entry| match entry {
+            WorkspaceListEntry::Workspace { ws_idx, .. } => {
+                MobileSwitcherTarget::Workspace(*ws_idx)
+            }
+            WorkspaceListEntry::RemoteWorkspace {
+                endpoint_id,
+                workspace_id,
+            } => MobileSwitcherTarget::RemoteWorkspace {
+                endpoint_id: endpoint_id.clone(),
+                workspace_id: workspace_id.clone(),
+            },
+        });
     }
     cursor = spaces_end;
 
@@ -566,9 +581,49 @@ fn render_mobile_switcher_content(
     );
     doc_y += 1;
     let space_entries = workspace_list_entries_expanded(app);
-    for (entry_idx, WorkspaceListEntry::Workspace { ws_idx, indented }) in
-        space_entries.iter().enumerate()
-    {
+    for (entry_idx, entry) in space_entries.iter().enumerate() {
+        let WorkspaceListEntry::Workspace { ws_idx, indented } = entry else {
+            let WorkspaceListEntry::RemoteWorkspace {
+                endpoint_id,
+                workspace_id,
+            } = entry
+            else {
+                continue;
+            };
+            let Some((endpoint, workspace)) =
+                super::sidebar::remote_workspace(app, endpoint_id, workspace_id)
+            else {
+                continue;
+            };
+            let (state, seen) = super::sidebar::agent_status_state(workspace.agent_status);
+            let (dot, dot_style) = state_dot(state, seen, p);
+            let name = crate::metadata_tokens::location_qualified_name(
+                &workspace.label,
+                &endpoint.endpoint.id,
+            );
+            let title = Line::from(vec![
+                Span::raw("  "),
+                Span::styled(dot, dot_style),
+                Span::raw(" "),
+                Span::styled(
+                    truncate_end(&name, content.width.saturating_sub(5) as usize),
+                    Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+                ),
+            ]);
+            render_two_line_item(
+                frame,
+                viewport,
+                content,
+                doc_y,
+                app.mobile_switcher_scroll,
+                mobile_item_bg(false, false, p),
+                title,
+                format!("  {} panes", workspace.pane_count),
+                p.overlay0,
+            );
+            doc_y += 2;
+            continue;
+        };
         let Some(ws) = app.workspaces.get(*ws_idx) else {
             continue;
         };

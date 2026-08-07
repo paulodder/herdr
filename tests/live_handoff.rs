@@ -361,7 +361,10 @@ fn server_ptmx_fd_count(pid: u32) -> usize {
     entries
         .filter_map(Result::ok)
         .filter_map(|entry| fs::read_link(entry.path()).ok())
-        .filter(|target| target == Path::new("/dev/ptmx"))
+        // procfs reports the same Unix98 PTY master as either the public
+        // compatibility path or its devpts mount path, depending on the
+        // host/container mount layout.
+        .filter(|target| target == Path::new("/dev/ptmx") || target == Path::new("/dev/pts/ptmx"))
         .count()
 }
 

@@ -344,7 +344,7 @@ fn selected_detail(app: &AppState, terminal_runtimes: &TerminalRuntimeRegistry) 
 }
 
 fn federation_detail(app: &AppState, endpoint_id: &str, row: &NavigatorRow) -> String {
-    let Some(endpoint) = app.federation.get(endpoint_id) else {
+    let Some(endpoint) = app.federation_state(endpoint_id) else {
         return String::new();
     };
     let label = endpoint.endpoint.label.as_deref().unwrap_or(endpoint_id);

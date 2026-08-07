@@ -135,6 +135,17 @@ impl Config {
 impl FederationConfig {
     pub(crate) fn diagnostics(&self) -> Vec<String> {
         let mut diagnostics = Vec::new();
+        if self.member_id.is_empty()
+            || !self
+                .member_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            diagnostics.push(
+                "federation.member_id must contain only ASCII letters, numbers, '.', '_' or '-'"
+                    .to_string(),
+            );
+        }
         let mut ids = std::collections::HashSet::new();
         for (index, endpoint) in self.endpoints.iter().enumerate() {
             let prefix = format!("federation.endpoints[{index}]");
@@ -151,6 +162,12 @@ impl FederationConfig {
                 diagnostics.push(format!(
                     "duplicate federation endpoint id {:?}",
                     endpoint.id
+                ));
+            }
+            if endpoint.id == self.member_id {
+                diagnostics.push(format!(
+                    "{prefix}.id duplicates federation.member_id {:?}",
+                    self.member_id
                 ));
             }
             if endpoint.target.trim().is_empty() || endpoint.target.starts_with('-') {

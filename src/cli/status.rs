@@ -75,6 +75,7 @@ enum ServerRuntimeStatus {
         version: Option<String>,
         protocol: Option<u32>,
         capabilities: Option<crate::api::schema::ServerCapabilities>,
+        identity: Option<crate::api::schema::RuntimeIdentity>,
     },
     NotRunning,
 }
@@ -158,6 +159,7 @@ fn read_server_runtime_status() -> std::io::Result<ServerRuntimeStatus> {
             version: status.version,
             protocol: status.protocol,
             capabilities: status.capabilities,
+            identity: status.identity,
         }),
         Err(ApiClientError::Io(err)) if server_not_running_error(&err) => {
             Ok(ServerRuntimeStatus::NotRunning)
@@ -236,6 +238,14 @@ struct ServerStatusJson {
     socket: String,
     session: Option<String>,
     restart_needed: Option<bool>,
+    federation: Option<FederationStatusJson>,
+}
+
+#[derive(Serialize)]
+struct FederationStatusJson {
+    member_id: String,
+    member_target: String,
+    member_label: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -266,6 +276,7 @@ fn server_status_json(server: &ServerRuntimeStatus) -> ServerStatusJson {
             version,
             protocol,
             capabilities,
+            identity,
         } => ServerStatusJson {
             status: "running",
             running: true,
@@ -282,6 +293,11 @@ fn server_status_json(server: &ServerRuntimeStatus) -> ServerStatusJson {
             socket: api::socket_path().display().to_string(),
             session: crate::session::active_name(),
             restart_needed: restart_needed_bool(server),
+            federation: identity.as_ref().map(|identity| FederationStatusJson {
+                member_id: identity.member_id.clone(),
+                member_target: identity.member_target.clone(),
+                member_label: identity.member_label.clone(),
+            }),
         },
         ServerRuntimeStatus::NotRunning => ServerStatusJson {
             status: "not_running",
@@ -293,6 +309,7 @@ fn server_status_json(server: &ServerRuntimeStatus) -> ServerStatusJson {
             socket: api::socket_path().display().to_string(),
             session: crate::session::active_name(),
             restart_needed: Some(false),
+            federation: None,
         },
     }
 }
@@ -330,4 +347,30 @@ fn print_status_help() {
     eprintln!("  herdr status [--json]         show local client and running server status");
     eprintln!("  herdr status server [--json]  show running server status");
     eprintln!("  herdr status client [--json]  show local client binary status");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_status_json_exposes_authoritative_federation_identity() {
+        let status = ServerRuntimeStatus::Running {
+            version: Some("0.7.4".into()),
+            protocol: Some(crate::protocol::PROTOCOL_VERSION),
+            capabilities: None,
+            identity: Some(crate::api::schema::RuntimeIdentity {
+                server_id: "server-stl".into(),
+                session_id: "session-stl".into(),
+                session_name: "default".into(),
+                member_id: "stl-agents-1".into(),
+                member_target: "paul@stl-agents-1".into(),
+                member_label: Some("STL Agents".into()),
+            }),
+        };
+        let value = serde_json::to_value(server_status_json(&status)).unwrap();
+        assert_eq!(value["federation"]["member_id"], "stl-agents-1");
+        assert_eq!(value["federation"]["member_target"], "paul@stl-agents-1");
+        assert_eq!(value["federation"]["member_label"], "STL Agents");
+    }
 }

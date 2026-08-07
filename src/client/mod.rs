@@ -19,6 +19,8 @@ use std::io::{self, BufRead, Write as _};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 use base64::Engine;
 use crossterm::event::{
@@ -46,6 +48,7 @@ use crate::protocol::{
 use crate::server::socket_paths::client_socket_path;
 
 static RECEIVED_KITTY_GRAPHICS_IDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+static PINNED_CLIENT_KEYBINDINGS: OnceLock<ClientKeybindings> = OnceLock::new();
 
 // ---------------------------------------------------------------------------
 // Client state
@@ -239,14 +242,6 @@ pub enum ClientError {
     ConnectionLost(io::Error),
     /// Protocol error (framing, deserialization).
     Protocol(protocol::FramingError),
-    /// The home server asked this client to attach to an authoritative remote endpoint.
-    FederationAttach {
-        endpoint_id: String,
-        target: String,
-        session: String,
-        focus_kind: Option<protocol::FederationFocusKind>,
-        resource_id: Option<String>,
-    },
 }
 
 impl std::fmt::Display for ClientError {
@@ -303,14 +298,6 @@ impl std::fmt::Display for ClientError {
             ClientError::Protocol(err) => {
                 write!(f, "protocol error: {err}")
             }
-            ClientError::FederationAttach {
-                endpoint_id,
-                target,
-                ..
-            } => write!(
-                f,
-                "switching to federation endpoint {endpoint_id} ({target})"
-            ),
         }
     }
 }
@@ -688,7 +675,6 @@ fn is_remote_client_process() -> bool {
 /// window; on a high-latency link that easily exceeds 5s, so it gets a far
 /// larger budget. See issue #753.
 const LOCAL_HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(unix)]
 const REMOTE_HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn handshake_read_timeout() -> Duration {
@@ -700,17 +686,18 @@ fn handshake_read_timeout() -> Duration {
 }
 
 fn requested_keybindings() -> ClientKeybindings {
-    match std::env::var(crate::remote::REMOTE_KEYBINDINGS_ENV_VAR)
-        .ok()
-        .as_deref()
-    {
-        Some("local") => crate::config::Config::load()
-            .config
-            .local_keybindings_profile_toml()
-            .map(|keys_toml| ClientKeybindings::Local { keys_toml })
-            .unwrap_or(ClientKeybindings::Server),
-        _ => ClientKeybindings::Server,
-    }
+    PINNED_CLIENT_KEYBINDINGS
+        .get_or_init(|| {
+            // Pin the originating client's keymap once. Federation candidates
+            // and live-handoff reconnects must not silently adopt a remote
+            // server's conflicting bindings.
+            crate::config::Config::load()
+                .config
+                .local_keybindings_profile_toml()
+                .map(|keys_toml| ClientKeybindings::Local { keys_toml })
+                .unwrap_or(ClientKeybindings::Server)
+        })
+        .clone()
 }
 
 #[cfg(windows)]
@@ -752,6 +739,7 @@ fn do_handshake(
     cell_height_px: u32,
     requested_encoding: RenderEncoding,
     direct_attach_requested: bool,
+    federation_candidate: bool,
 ) -> Result<RenderEncoding, ClientError> {
     stream
         .set_nonblocking(false)
@@ -768,6 +756,8 @@ fn do_handshake(
         keybindings: requested_keybindings(),
         launch_mode: if direct_attach_requested {
             ClientLaunchMode::TerminalAttach
+        } else if federation_candidate {
+            ClientLaunchMode::FederationCandidate
         } else {
             ClientLaunchMode::App
         },
@@ -778,7 +768,11 @@ fn do_handshake(
     // Read Welcome.
     set_handshake_recv_timeout(
         stream,
-        Some(handshake_read_timeout()),
+        Some(if federation_candidate {
+            REMOTE_HANDSHAKE_READ_TIMEOUT
+        } else {
+            handshake_read_timeout()
+        }),
         "client handshake read timeout unavailable",
     )?;
     let welcome: ServerMessage = protocol::read_message(stream, MAX_FRAME_SIZE)?;
@@ -830,6 +824,7 @@ fn reconnect_after_live_handoff(
                     cell_height_px,
                     requested_encoding,
                     direct_attach_requested,
+                    cfg!(unix),
                 ) {
                     Ok(encoding) => {
                         if let Some((terminal_id, takeover)) = attach_request {
@@ -882,6 +877,215 @@ enum ClientLoopEvent {
     ServerDisconnected { connection_id: u64 },
     /// Timer tick.
     Timer,
+}
+
+#[cfg(unix)]
+struct SuspendedClientConnection {
+    member_id: String,
+    server_id: Option<String>,
+    session_id: Option<String>,
+    stream: LocalStream,
+    connection_id: u64,
+    remote: Option<crate::remote::InPlaceRemoteConnection>,
+    mouse_capture_active: bool,
+    window_title: Option<String>,
+    prefix_input_source_active: bool,
+    is_remote_client: bool,
+}
+
+#[cfg(unix)]
+struct ResumedClientConnection {
+    member_id: String,
+    server_id: Option<String>,
+    session_id: Option<String>,
+    stream: LocalStream,
+    connection_id: u64,
+    remote: Option<crate::remote::InPlaceRemoteConnection>,
+    mouse_capture_active: bool,
+    window_title: Option<String>,
+    prefix_input_source_active: bool,
+    is_remote_client: bool,
+    reconnected_encoding: Option<RenderEncoding>,
+}
+
+#[cfg(unix)]
+struct PendingFederationActivation {
+    connection: ResumedClientConnection,
+    endpoint_id: String,
+    expected_resource: Option<crate::federation::FederatedResourceRef>,
+    expected_runtime_identity: Option<(String, String)>,
+    request_id: u64,
+    retain_current: bool,
+    restore_if_rejected: bool,
+    deadline: Instant,
+    buffered_messages: Vec<ServerMessage>,
+}
+
+#[cfg(unix)]
+const FEDERATION_ACTIVATION_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(unix)]
+const DIRECTORY_AUTHORITY_RECONNECT_INTERVAL: Duration = Duration::from_secs(1);
+
+fn spawn_server_reader(
+    stream: &LocalStream,
+    event_tx: &tokio::sync::mpsc::Sender<ClientLoopEvent>,
+    should_quit: &Arc<AtomicBool>,
+    kitty_graphics_enabled: bool,
+    connection_id: u64,
+) -> Result<(), ClientError> {
+    let read_stream = stream.try_clone().map_err(ClientError::ConnectionFailed)?;
+    let server_read_tx = event_tx.clone();
+    let server_read_quit = should_quit.clone();
+    let max_frame_size = if kitty_graphics_enabled {
+        MAX_GRAPHICS_FRAME_SIZE
+    } else {
+        MAX_FRAME_SIZE
+    };
+    std::thread::spawn(move || {
+        server_reader_thread(
+            read_stream,
+            server_read_tx,
+            &server_read_quit,
+            max_frame_size,
+            connection_id,
+        );
+    });
+    Ok(())
+}
+
+#[cfg(unix)]
+fn handshake_current_terminal(
+    mut stream: LocalStream,
+    requested_encoding: RenderEncoding,
+    direct_attach_requested: bool,
+    kitty_graphics_enabled: bool,
+    federation_candidate: bool,
+) -> Result<(LocalStream, RenderEncoding), ClientError> {
+    let (cols, rows, cell_width_px, cell_height_px) =
+        current_terminal_geometry(kitty_graphics_enabled);
+    let encoding = do_handshake(
+        &mut stream,
+        cols,
+        rows,
+        cell_width_px,
+        cell_height_px,
+        requested_encoding,
+        direct_attach_requested,
+        federation_candidate,
+    )?;
+    Ok((stream, encoding))
+}
+
+#[cfg(unix)]
+fn reconnect_suspended_connection(
+    remote: Option<&crate::remote::InPlaceRemoteConnection>,
+    requested_encoding: RenderEncoding,
+    direct_attach_requested: bool,
+    kitty_graphics_enabled: bool,
+) -> Result<(LocalStream, RenderEncoding), ClientError> {
+    let stream = if let Some(remote) = remote {
+        remote.connect().map_err(ClientError::ConnectionFailed)?
+    } else {
+        crate::ipc::connect_local_stream(&client_socket_path())
+            .map_err(ClientError::ConnectionFailed)?
+    };
+    handshake_current_terminal(
+        stream,
+        requested_encoding,
+        direct_attach_requested,
+        kitty_graphics_enabled,
+        true,
+    )
+}
+
+#[cfg(unix)]
+fn reconnect_remote_after_live_handoff(
+    remote: &crate::remote::InPlaceRemoteConnection,
+    requested_encoding: RenderEncoding,
+    direct_attach_requested: bool,
+    kitty_graphics_enabled: bool,
+) -> Result<(LocalStream, RenderEncoding), ClientError> {
+    let deadline = Instant::now() + LIVE_HANDOFF_RECONNECT_TIMEOUT;
+    loop {
+        let attempt = remote
+            .connect()
+            .map_err(ClientError::ConnectionFailed)
+            .and_then(|stream| {
+                handshake_current_terminal(
+                    stream,
+                    requested_encoding,
+                    direct_attach_requested,
+                    kitty_graphics_enabled,
+                    true,
+                )
+            });
+        match attempt {
+            Ok(connection) => return Ok(connection),
+            Err(err) if Instant::now() < deadline => {
+                debug!(%err, "remote replacement is not ready; retrying in-place handshake");
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn resume_suspended_connection(
+    suspended: SuspendedClientConnection,
+    reconnect: bool,
+    next_connection_id: u64,
+    requested_encoding: RenderEncoding,
+    direct_attach_requested: bool,
+    kitty_graphics_enabled: bool,
+) -> Result<ResumedClientConnection, ClientError> {
+    let SuspendedClientConnection {
+        member_id,
+        server_id,
+        session_id,
+        stream,
+        connection_id,
+        remote,
+        mouse_capture_active,
+        window_title,
+        prefix_input_source_active,
+        is_remote_client,
+    } = suspended;
+    if reconnect {
+        let (stream, encoding) = reconnect_suspended_connection(
+            remote.as_ref(),
+            requested_encoding,
+            direct_attach_requested,
+            kitty_graphics_enabled,
+        )?;
+        Ok(ResumedClientConnection {
+            member_id,
+            server_id,
+            session_id,
+            stream,
+            connection_id: next_connection_id,
+            remote,
+            mouse_capture_active,
+            window_title,
+            prefix_input_source_active,
+            is_remote_client,
+            reconnected_encoding: Some(encoding),
+        })
+    } else {
+        Ok(ResumedClientConnection {
+            member_id,
+            server_id,
+            session_id,
+            stream,
+            connection_id,
+            remote,
+            mouse_capture_active,
+            window_title,
+            prefix_input_source_active,
+            is_remote_client,
+            reconnected_encoding: None,
+        })
+    }
 }
 
 /// Runs the thin client: connects to the server, performs the handshake,
@@ -1001,6 +1205,7 @@ fn connect_terminal_session_stream(
         0,
         RenderEncoding::TerminalAnsi,
         true,
+        false,
     ) {
         Ok(RenderEncoding::TerminalAnsi) => {}
         Ok(encoding) => {
@@ -1233,6 +1438,7 @@ fn run_client_with_mode(
         cell_height_px,
         requested_encoding,
         direct_attach_requested,
+        false,
     ) {
         Ok(encoding) => encoding,
         Err(err) => {
@@ -1306,25 +1512,13 @@ fn run_client_with_mode(
             negotiated_encoding,
             attach_request,
             attach_escape,
+            loaded_config.config.federation.member_id.clone(),
         )
         .await
     });
 
     // Restore the terminal before printing any final status message.
     drop(terminal_guard);
-
-    if let Err(ClientError::FederationAttach {
-        endpoint_id,
-        target,
-        session,
-        focus_kind,
-        resource_id,
-    }) = result
-    {
-        rt.shutdown_timeout(Duration::from_millis(100));
-        crate::logging::shutdown("client");
-        return launch_federation_attach(endpoint_id, target, session, focus_kind, resource_id);
-    }
 
     if let Err(err) = result {
         eprintln!("herdr: {err}");
@@ -1348,76 +1542,185 @@ fn run_client_with_mode(
     Ok(())
 }
 
-fn launch_federation_attach(
-    endpoint_id: String,
-    target: String,
-    session: String,
-    focus_kind: Option<protocol::FederationFocusKind>,
-    resource_id: Option<String>,
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FederationConnectionPlan {
+    Current,
+    Suspended(usize),
+    New,
+}
+
+#[cfg(unix)]
+fn federation_connection_plan<'a>(
+    active_member_id: &str,
+    mut suspended_member_ids: impl Iterator<Item = &'a str>,
+    destination_member_id: &str,
+) -> FederationConnectionPlan {
+    if active_member_id == destination_member_id {
+        return FederationConnectionPlan::Current;
+    }
+    suspended_member_ids
+        .position(|member_id| member_id == destination_member_id)
+        .map_or(
+            FederationConnectionPlan::New,
+            FederationConnectionPlan::Suspended,
+        )
+}
+
+#[cfg(unix)]
+fn federation_activation_identity_matches(
+    expected_member_id: &str,
+    expected_resource: Option<&crate::federation::FederatedResourceRef>,
+    expected_runtime_identity: Option<&(String, String)>,
+    member_id: &str,
+    server_id: &str,
+    session_id: &str,
+) -> bool {
+    member_id == expected_member_id
+        && expected_resource.is_none_or(|resource| {
+            resource.server_id == server_id && resource.session_id == session_id
+        })
+        && expected_runtime_identity.is_none_or(|(expected_server, expected_session)| {
+            expected_server == server_id && expected_session == session_id
+        })
+}
+
+#[cfg(unix)]
+fn federated_endpoint_runtime_identity(
+    state: &crate::federation::EndpointState,
+) -> Option<(String, String)> {
+    state.snapshot.as_ref().map(|snapshot| {
+        (
+            snapshot.identity.server_id.clone(),
+            snapshot.identity.session_id.clone(),
+        )
+    })
+}
+
+#[cfg(unix)]
+fn directory_authority_identity_matches(
+    connection_member_id: &str,
+    connection_server_id: Option<&str>,
+    connection_session_id: Option<&str>,
+    authority_member_id: &str,
+    member_id: &str,
+    server_id: &str,
+    session_id: &str,
+) -> bool {
+    connection_member_id == authority_member_id
+        && connection_member_id == member_id
+        && connection_server_id == Some(server_id)
+        && connection_session_id == Some(session_id)
+}
+
+#[cfg(unix)]
+fn merge_federation_directory(
+    directory: &mut Vec<crate::federation::EndpointState>,
+    incoming: Vec<crate::federation::EndpointState>,
+) {
+    let previous = std::mem::take(directory);
+    for mut state in incoming {
+        if let Some(existing) = previous
+            .iter()
+            .find(|existing| existing.endpoint.id == state.endpoint.id)
+        {
+            // A temporary disconnect must not erase the last useful global
+            // directory snapshot that the client already has.
+            if state.snapshot.is_none() {
+                state.snapshot = existing.snapshot.clone();
+                state.cursor = state.cursor.or(existing.cursor);
+            }
+        }
+        directory.push(state);
+    }
+    directory.sort_by(|left, right| left.endpoint.id.cmp(&right.endpoint.id));
+}
+
+#[cfg(unix)]
+fn activate_federation_connection(
+    stream: &mut LocalStream,
+    request_id: u64,
+    expected_member_id: &str,
+    resource: Option<crate::federation::FederatedResourceRef>,
+    directory: &[crate::federation::EndpointState],
 ) -> io::Result<()> {
-    let executable = std::env::current_exe()?;
-    let remote_result = (|| -> io::Result<()> {
-        if let (Some(focus_kind), Some(resource_id)) = (focus_kind, resource_id) {
-            let method = match focus_kind {
-                protocol::FederationFocusKind::Workspace => {
-                    crate::api::schema::Method::WorkspaceFocus(
-                        crate::api::schema::WorkspaceTarget {
-                            workspace_id: resource_id,
-                        },
-                    )
-                }
-                protocol::FederationFocusKind::Tab => {
-                    crate::api::schema::Method::TabFocus(crate::api::schema::TabTarget {
-                        tab_id: resource_id,
-                    })
-                }
-                protocol::FederationFocusKind::Pane => {
-                    crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget {
-                        pane_id: resource_id,
-                    })
-                }
-            };
-            crate::federation::request(
-                &crate::config::FederationEndpointConfig {
-                    id: endpoint_id,
-                    target: target.clone(),
-                    label: None,
-                    session: session.clone(),
-                    enabled: true,
-                },
-                &crate::api::schema::Request {
-                    id: "client:federation:focus".into(),
-                    method,
-                },
+    write_to_server(
+        stream,
+        &ClientMessage::FederationActivate {
+            request_id,
+            expected_member_id: expected_member_id.to_string(),
+            resource,
+            directory: directory.to_vec(),
+        },
+    )
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn begin_suspended_fallback(
+    suspended_connections: &mut Vec<SuspendedClientConnection>,
+    disconnected_connections: &mut HashSet<u64>,
+    next_connection_id: &mut u64,
+    next_activation_request_id: &mut u64,
+    requested_encoding: RenderEncoding,
+    direct_attach_requested: bool,
+    kitty_graphics_enabled: bool,
+    event_tx: &tokio::sync::mpsc::Sender<ClientLoopEvent>,
+    should_quit: &Arc<AtomicBool>,
+    directory: &[crate::federation::EndpointState],
+) -> Result<Option<PendingFederationActivation>, ClientError> {
+    while let Some(suspended) = suspended_connections.pop() {
+        let reconnect = disconnected_connections.remove(&suspended.connection_id);
+        let resumed = match resume_suspended_connection(
+            suspended,
+            reconnect,
+            *next_connection_id,
+            requested_encoding,
+            direct_attach_requested,
+            kitty_graphics_enabled,
+        ) {
+            Ok(resumed) => resumed,
+            Err(err) => {
+                warn!(%err, "skipping unhealthy suspended Herdr connection");
+                continue;
+            }
+        };
+        if resumed.reconnected_encoding.is_some() {
+            *next_connection_id = next_connection_id.wrapping_add(1);
+            spawn_server_reader(
+                &resumed.stream,
+                event_tx,
+                should_quit,
+                kitty_graphics_enabled,
+                resumed.connection_id,
             )?;
         }
-
-        let remote_status = std::process::Command::new(&executable)
-            .arg("--remote")
-            .arg(&target)
-            .arg("--session")
-            .arg(&session)
-            .status()?;
-        if remote_status.success() {
-            Ok(())
-        } else {
-            Err(io::Error::other(format!(
-                "remote Herdr attach exited with {remote_status}"
-            )))
+        let request_id = *next_activation_request_id;
+        *next_activation_request_id = next_activation_request_id.wrapping_add(1);
+        let mut resumed = resumed;
+        if let Err(err) = activate_federation_connection(
+            &mut resumed.stream,
+            request_id,
+            &resumed.member_id,
+            None,
+            directory,
+        ) {
+            warn!(member_id = resumed.member_id, %err, "skipping suspended Herdr connection that could not be activated");
+            continue;
         }
-    })();
-
-    // The home attachment is the recovery path as well as the normal return
-    // path. Always attempt it, even when remote focus or SSH attachment fails.
-    let local_status = std::process::Command::new(&executable)
-        .arg("client")
-        .status()?;
-    if !local_status.success() {
-        return Err(io::Error::other(format!(
-            "local Herdr reattach exited with {local_status}"
-        )));
+        return Ok(Some(PendingFederationActivation {
+            endpoint_id: resumed.member_id.clone(),
+            expected_runtime_identity: resumed.server_id.clone().zip(resumed.session_id.clone()),
+            connection: resumed,
+            expected_resource: None,
+            request_id,
+            retain_current: false,
+            restore_if_rejected: false,
+            deadline: Instant::now() + FEDERATION_ACTIVATION_TIMEOUT,
+            buffered_messages: Vec::new(),
+        }));
     }
-    remote_result
+    Ok(None)
 }
 
 /// The main client event loop.
@@ -1437,12 +1740,13 @@ async fn run_client_loop(
     negotiated_encoding: RenderEncoding,
     attach_request: Option<(String, bool)>,
     attach_escape: Option<AttachEscapeState>,
+    local_member_id: String,
 ) -> Result<(), ClientError> {
     #[cfg(windows)]
     let _ = config.mouse_scroll_lines;
     let draw_host_cursor = attach_escape.is_none() && should_draw_host_cursor(config.host_cursor);
     #[cfg(unix)]
-    let is_remote_client = is_remote_client_process();
+    let mut is_remote_client = is_remote_client_process();
 
     let mut state = ClientState {
         blit_encoder: render_ansi::BlitEncoder::new(),
@@ -1470,14 +1774,14 @@ async fn run_client_loop(
     let stdin_quit = should_quit.clone();
     let stdin_tx = event_tx.clone();
     let stdin_mouse_capture_active = host_mouse_capture_active.clone();
-    let mut input_thread = Some(std::thread::spawn(move || {
+    let _input_thread = std::thread::spawn(move || {
         input::stdin_reader_loop(
             stdin_tx,
             &stdin_quit,
             will_query_host_terminal_theme,
             stdin_mouse_capture_active,
         );
-    }));
+    });
 
     if will_query_host_terminal_theme {
         query_host_terminal_theme();
@@ -1493,24 +1797,15 @@ async fn run_client_loop(
 
     // Spawn the server reader thread (blocking reads from the socket).
     // Clone the stream's file descriptor so we can read from a blocking stream.
-    let server_read_quit = should_quit.clone();
-    let server_read_tx = event_tx.clone();
-    let read_stream = stream.try_clone().map_err(ClientError::ConnectionFailed)?;
     let mut active_connection_id = 1_u64;
-    std::thread::spawn(move || {
-        let max_frame_size = if kitty_graphics_enabled {
-            MAX_GRAPHICS_FRAME_SIZE
-        } else {
-            MAX_FRAME_SIZE
-        };
-        server_reader_thread(
-            read_stream,
-            server_read_tx,
-            &server_read_quit,
-            max_frame_size,
-            1,
-        );
-    });
+    let mut next_connection_id = 2_u64;
+    spawn_server_reader(
+        &stream,
+        &event_tx,
+        &should_quit,
+        kitty_graphics_enabled,
+        active_connection_id,
+    )?;
 
     // Use the original stream for writing (blocking is fine since we write
     // from the async loop).
@@ -1518,10 +1813,73 @@ async fn run_client_loop(
     write_stream
         .set_nonblocking(false)
         .map_err(ClientError::ConnectionFailed)?;
+    #[cfg(unix)]
+    let mut active_remote_connection: Option<crate::remote::InPlaceRemoteConnection> = None;
+    #[cfg(unix)]
+    let mut suspended_connections = Vec::<SuspendedClientConnection>::new();
+    #[cfg(unix)]
+    let mut disconnected_connections = HashSet::<u64>::new();
+    #[cfg(unix)]
+    let mut active_member_id = local_member_id.clone();
+    #[cfg(unix)]
+    let mut active_server_id: Option<String> = None;
+    #[cfg(unix)]
+    let mut active_session_id: Option<String> = None;
+    #[cfg(unix)]
+    let mut active_window_title: Option<String> = None;
+    #[cfg(unix)]
+    let mut active_prefix_input_source_active = false;
+    #[cfg(unix)]
+    let mut directory_authority_member_id = local_member_id;
+    #[cfg(unix)]
+    let mut federation_directory = Vec::<crate::federation::EndpointState>::new();
+    #[cfg(unix)]
+    let mut pending_federation_activation: Option<PendingFederationActivation> = None;
+    #[cfg(unix)]
+    let mut next_activation_request_id = 1_u64;
+    #[cfg(unix)]
+    let mut directory_authority_connection_id = 1_u64;
+    #[cfg(unix)]
+    let mut pending_directory_authority_connection_id: Option<u64> = None;
+    #[cfg(unix)]
+    let mut next_directory_authority_reconnect_at: Option<Instant> = None;
+    #[cfg(windows)]
+    let _ = local_member_id;
 
     // This (foreground) client owns the prefix ASCII input-source switch; a no-op on non-macOS.
     use crate::platform::PrefixInputSource;
     let mut prefix_input_source = crate::platform::RealPrefixInputSource::default();
+
+    macro_rules! handle_active_write_failure {
+        ($error:expr) => {{
+            let error = $error;
+            #[cfg(unix)]
+            {
+                if let Some(pending) = pending_federation_activation.as_mut() {
+                    pending.retain_current = false;
+                    warn!(%error, "source write failed while destination activation is pending");
+                    continue;
+                }
+                pending_federation_activation = begin_suspended_fallback(
+                    &mut suspended_connections,
+                    &mut disconnected_connections,
+                    &mut next_connection_id,
+                    &mut next_activation_request_id,
+                    requested_encoding,
+                    attach_request.is_some(),
+                    state.kitty_graphics_enabled,
+                    &event_tx,
+                    &should_quit,
+                    &federation_directory,
+                )?;
+                if pending_federation_activation.is_some() {
+                    warn!(%error, "active Herdr write failed; activating a retained member");
+                    continue;
+                }
+            }
+            return Err(ClientError::ConnectionLost(error));
+        }};
+    }
 
     // Main event loop.
     while !should_quit.load(Ordering::Acquire) {
@@ -1557,7 +1915,7 @@ async fn run_client_loop(
                                 modifiers,
                             };
                             if let Err(e) = write_to_server(&mut write_stream, &msg) {
-                                return Err(ClientError::ConnectionLost(e));
+                                handle_active_write_failure!(e);
                             }
                             continue;
                         }
@@ -1604,7 +1962,7 @@ async fn run_client_loop(
                             data: image.bytes,
                         };
                         if let Err(e) = write_to_server(&mut write_stream, &msg) {
-                            return Err(ClientError::ConnectionLost(e));
+                            handle_active_write_failure!(e);
                         }
                         continue;
                     }
@@ -1623,13 +1981,13 @@ async fn run_client_loop(
                         data: image.bytes,
                     };
                     if let Err(e) = write_to_server(&mut write_stream, &msg) {
-                        return Err(ClientError::ConnectionLost(e));
+                        handle_active_write_failure!(e);
                     }
                     continue;
                 }
                 let msg = ClientMessage::Input { data };
                 if let Err(e) = write_to_server(&mut write_stream, &msg) {
-                    return Err(ClientError::ConnectionLost(e));
+                    handle_active_write_failure!(e);
                 }
             }
             #[cfg(windows)]
@@ -1649,7 +2007,7 @@ async fn run_client_loop(
                 }
                 let msg = ClientMessage::InputEvents { events };
                 if let Err(e) = write_to_server(&mut write_stream, &msg) {
-                    return Err(ClientError::ConnectionLost(e));
+                    handle_active_write_failure!(e);
                 }
             }
             ClientLoopEvent::Resize(new_cols, new_rows, cell_width_px, cell_height_px) => {
@@ -1661,14 +2019,289 @@ async fn run_client_loop(
                     cell_height_px,
                 };
                 if let Err(e) = write_to_server(&mut write_stream, &msg) {
-                    return Err(ClientError::ConnectionLost(e));
+                    handle_active_write_failure!(e);
                 }
             }
             ClientLoopEvent::ServerMessage {
                 connection_id,
                 message,
             } => {
+                #[cfg(unix)]
+                if let ServerMessage::FederationDirectoryUpdate { directory } = &message {
+                    if connection_id == directory_authority_connection_id {
+                        merge_federation_directory(&mut federation_directory, directory.clone());
+                        if active_connection_id != directory_authority_connection_id {
+                            let _ = write_to_server(
+                                &mut write_stream,
+                                &ClientMessage::FederationDirectoryUpdate {
+                                    directory: federation_directory.clone(),
+                                },
+                            );
+                        }
+                        state.request_full_redraw();
+                    } else {
+                        warn!(
+                            connection_id,
+                            "ignoring federation directory update from non-home member"
+                        );
+                    }
+                    continue;
+                }
+                #[cfg(unix)]
+                if let ServerMessage::FederationIdentity {
+                    member_id,
+                    server_id,
+                    session_id,
+                } = &message
+                {
+                    if pending_directory_authority_connection_id == Some(connection_id) {
+                        let identity_matches = suspended_connections.iter().any(|connection| {
+                            connection.connection_id == connection_id
+                                && directory_authority_identity_matches(
+                                    &connection.member_id,
+                                    connection.server_id.as_deref(),
+                                    connection.session_id.as_deref(),
+                                    &directory_authority_member_id,
+                                    member_id,
+                                    server_id,
+                                    session_id,
+                                )
+                        });
+                        pending_directory_authority_connection_id = None;
+                        if identity_matches {
+                            directory_authority_connection_id = connection_id;
+                            disconnected_connections.remove(&connection_id);
+                            next_directory_authority_reconnect_at = None;
+                            info!(
+                                connection_id,
+                                member_id, "restored suspended home directory authority"
+                            );
+                        } else {
+                            disconnected_connections.insert(connection_id);
+                            next_directory_authority_reconnect_at =
+                                Some(Instant::now() + DIRECTORY_AUTHORITY_RECONNECT_INTERVAL);
+                            warn!(
+                                connection_id,
+                                member_id,
+                                server_id,
+                                session_id,
+                                "rejected replacement home directory authority identity"
+                            );
+                        }
+                        continue;
+                    }
+                    if connection_id == directory_authority_connection_id {
+                        directory_authority_member_id.clone_from(member_id);
+                        if connection_id == active_connection_id {
+                            active_member_id.clone_from(member_id);
+                            active_server_id = Some(server_id.clone());
+                            active_session_id = Some(session_id.clone());
+                        }
+                    }
+                    continue;
+                }
+                #[cfg(unix)]
+                if let ServerMessage::FederationActivationResult {
+                    request_id,
+                    accepted,
+                    member_id,
+                    server_id,
+                    session_id,
+                    error,
+                } = &message
+                {
+                    let is_pending =
+                        pending_federation_activation
+                            .as_ref()
+                            .is_some_and(|pending| {
+                                pending.connection.connection_id == connection_id
+                                    && pending.request_id == *request_id
+                            });
+                    if is_pending {
+                        let mut pending = pending_federation_activation
+                            .take()
+                            .expect("pending activation checked above");
+                        let identity_matches = federation_activation_identity_matches(
+                            &pending.endpoint_id,
+                            pending.expected_resource.as_ref(),
+                            pending.expected_runtime_identity.as_ref(),
+                            member_id,
+                            server_id,
+                            session_id,
+                        );
+                        if *accepted && identity_matches {
+                            if pending.retain_current {
+                                if let Err(err) = write_to_server(
+                                    &mut write_stream,
+                                    &ClientMessage::FederationSuspend,
+                                ) {
+                                    warn!(%err, "previous Herdr connection closed while destination activation succeeded; committing destination");
+                                    pending.retain_current = false;
+                                }
+                            }
+                            let ResumedClientConnection {
+                                member_id: resumed_member_id,
+                                server_id: _,
+                                session_id: _,
+                                stream: resumed_stream,
+                                connection_id: resumed_id,
+                                remote: resumed_remote,
+                                mouse_capture_active: resumed_mouse_capture,
+                                window_title: resumed_window_title,
+                                prefix_input_source_active: resumed_prefix_input_source_active,
+                                is_remote_client: resumed_is_remote,
+                                reconnected_encoding,
+                            } = pending.connection;
+                            let previous_stream =
+                                std::mem::replace(&mut write_stream, resumed_stream);
+                            if pending.retain_current {
+                                suspended_connections.push(SuspendedClientConnection {
+                                    member_id: active_member_id,
+                                    server_id: active_server_id,
+                                    session_id: active_session_id,
+                                    stream: previous_stream,
+                                    connection_id: active_connection_id,
+                                    remote: active_remote_connection.take(),
+                                    mouse_capture_active: state.mouse_capture_active,
+                                    window_title: active_window_title,
+                                    prefix_input_source_active: active_prefix_input_source_active,
+                                    is_remote_client,
+                                });
+                            } else {
+                                drop(previous_stream);
+                                drop(active_remote_connection.take());
+                            }
+                            active_member_id = resumed_member_id;
+                            active_server_id = Some(server_id.clone());
+                            active_session_id = Some(session_id.clone());
+                            if active_member_id == directory_authority_member_id {
+                                directory_authority_connection_id = resumed_id;
+                            }
+                            active_remote_connection = resumed_remote;
+                            active_connection_id = resumed_id;
+                            is_remote_client = resumed_is_remote;
+                            if state.mouse_capture_active != resumed_mouse_capture {
+                                set_mouse_capture(resumed_mouse_capture)
+                                    .map_err(ClientError::ConnectionFailed)?;
+                                state.mouse_capture_active = resumed_mouse_capture;
+                                host_mouse_capture_active
+                                    .store(resumed_mouse_capture, Ordering::Release);
+                            }
+                            write_window_title(resumed_window_title.as_deref());
+                            if resumed_prefix_input_source_active {
+                                prefix_input_source.switch_to_ascii();
+                            } else {
+                                prefix_input_source.restore();
+                            }
+                            active_window_title = resumed_window_title;
+                            active_prefix_input_source_active = resumed_prefix_input_source_active;
+                            state.request_full_redraw();
+                            let (cols, rows, cell_width_px, cell_height_px) =
+                                current_terminal_geometry(state.kitty_graphics_enabled);
+                            let _ = write_to_server(
+                                &mut write_stream,
+                                &ClientMessage::Resize {
+                                    cols,
+                                    rows,
+                                    cell_width_px,
+                                    cell_height_px,
+                                },
+                            );
+                            for buffered in pending.buffered_messages.drain(..) {
+                                let _ = event_tx.try_send(ClientLoopEvent::ServerMessage {
+                                    connection_id: active_connection_id,
+                                    message: buffered,
+                                });
+                            }
+                            info!(
+                                member_id,
+                                server_id,
+                                session_id,
+                                ?reconnected_encoding,
+                                connection_id = resumed_id,
+                                "federation member activation accepted"
+                            );
+                        } else {
+                            let detail = error.clone().unwrap_or_else(|| {
+                                format!(
+                                    "receiver identity was {member_id}/{server_id}/{session_id}"
+                                )
+                            });
+                            let _ = write_to_server(
+                                &mut pending.connection.stream,
+                                &ClientMessage::FederationSuspend,
+                            );
+                            if pending.restore_if_rejected && member_id == &pending.endpoint_id {
+                                let connection = pending.connection;
+                                suspended_connections.push(SuspendedClientConnection {
+                                    member_id: connection.member_id,
+                                    server_id: connection.server_id,
+                                    session_id: connection.session_id,
+                                    stream: connection.stream,
+                                    connection_id: connection.connection_id,
+                                    remote: connection.remote,
+                                    mouse_capture_active: connection.mouse_capture_active,
+                                    window_title: connection.window_title,
+                                    prefix_input_source_active: connection
+                                        .prefix_input_source_active,
+                                    is_remote_client: connection.is_remote_client,
+                                });
+                            }
+                            warn!(endpoint_id = pending.endpoint_id, %detail, "federation activation rejected");
+                            handle_notify(
+                                NotifyKind::Toast,
+                                "Federated member rejected activation",
+                                Some(&format!("{}: {detail}", pending.endpoint_id)),
+                                &state.sound_config,
+                            );
+                            if !pending.retain_current {
+                                pending_federation_activation = begin_suspended_fallback(
+                                    &mut suspended_connections,
+                                    &mut disconnected_connections,
+                                    &mut next_connection_id,
+                                    &mut next_activation_request_id,
+                                    requested_encoding,
+                                    attach_request.is_some(),
+                                    state.kitty_graphics_enabled,
+                                    &event_tx,
+                                    &should_quit,
+                                    &federation_directory,
+                                )?;
+                                if pending_federation_activation.is_none() {
+                                    return Err(ClientError::ConnectionLost(io::Error::other(
+                                        "no healthy suspended Herdr connection remains",
+                                    )));
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                }
+                #[cfg(unix)]
+                if pending_federation_activation
+                    .as_ref()
+                    .is_some_and(|pending| pending.connection.connection_id == connection_id)
+                {
+                    if matches!(
+                        message,
+                        ServerMessage::MouseCapture { .. }
+                            | ServerMessage::WindowTitle { .. }
+                            | ServerMessage::PrefixInputSource { .. }
+                            | ServerMessage::ReloadSoundConfig
+                            | ServerMessage::Clipboard { .. }
+                            | ServerMessage::Notify { .. }
+                    ) {
+                        if let Some(pending) = pending_federation_activation.as_mut() {
+                            pending.buffered_messages.push(message);
+                        }
+                    }
+                    continue;
+                }
                 if connection_id != active_connection_id {
+                    #[cfg(unix)]
+                    if matches!(message, ServerMessage::ServerShutdown { .. }) {
+                        disconnected_connections.insert(connection_id);
+                    }
                     continue;
                 }
                 match message {
@@ -1720,44 +2353,154 @@ async fn run_client_loop(
                     ServerMessage::ServerShutdown { reason } => {
                         if reason.as_deref() == Some(crate::protocol::LIVE_HANDOFF_RECONNECT_REASON)
                         {
-                            let (reconnected_stream, reconnected_encoding) =
-                                reconnect_after_live_handoff(
-                                    requested_encoding,
-                                    attach_request.is_some(),
-                                    attach_request.as_ref(),
-                                    state.kitty_graphics_enabled,
-                                )?;
-                            active_connection_id = active_connection_id.wrapping_add(1);
-                            let read_stream = reconnected_stream
-                                .try_clone()
-                                .map_err(ClientError::ConnectionFailed)?;
-                            let server_read_tx = event_tx.clone();
-                            let server_read_quit = should_quit.clone();
-                            let max_frame_size = if state.kitty_graphics_enabled {
-                                MAX_GRAPHICS_FRAME_SIZE
-                            } else {
-                                MAX_FRAME_SIZE
-                            };
-                            let connection_id = active_connection_id;
-                            std::thread::spawn(move || {
-                                server_reader_thread(
-                                    read_stream,
-                                    server_read_tx,
-                                    &server_read_quit,
-                                    max_frame_size,
-                                    connection_id,
-                                );
-                            });
-                            write_stream = reconnected_stream;
-                            write_stream
-                                .set_nonblocking(false)
-                                .map_err(ClientError::ConnectionFailed)?;
-                            state.request_full_redraw();
-                            info!(
-                                ?reconnected_encoding,
-                                "client reconnected after live handoff"
+                            #[cfg(unix)]
+                            let reconnect_result =
+                                if let Some(remote) = active_remote_connection.as_ref() {
+                                    reconnect_remote_after_live_handoff(
+                                        remote,
+                                        requested_encoding,
+                                        attach_request.is_some(),
+                                        state.kitty_graphics_enabled,
+                                    )
+                                } else {
+                                    reconnect_after_live_handoff(
+                                        requested_encoding,
+                                        attach_request.is_some(),
+                                        attach_request.as_ref(),
+                                        state.kitty_graphics_enabled,
+                                    )
+                                };
+                            #[cfg(not(unix))]
+                            let reconnect_result = reconnect_after_live_handoff(
+                                requested_encoding,
+                                attach_request.is_some(),
+                                attach_request.as_ref(),
+                                state.kitty_graphics_enabled,
                             );
-                            continue;
+                            match reconnect_result {
+                                Ok((reconnected_stream, reconnected_encoding)) => {
+                                    #[cfg(unix)]
+                                    {
+                                        let mut reconnected_stream = reconnected_stream;
+                                        let candidate_connection_id = next_connection_id;
+                                        next_connection_id = next_connection_id.wrapping_add(1);
+                                        spawn_server_reader(
+                                            &reconnected_stream,
+                                            &event_tx,
+                                            &should_quit,
+                                            state.kitty_graphics_enabled,
+                                            candidate_connection_id,
+                                        )?;
+                                        let request_id = next_activation_request_id;
+                                        next_activation_request_id =
+                                            next_activation_request_id.wrapping_add(1);
+                                        activate_federation_connection(
+                                            &mut reconnected_stream,
+                                            request_id,
+                                            &active_member_id,
+                                            None,
+                                            &federation_directory,
+                                        )
+                                        .map_err(ClientError::ConnectionLost)?;
+                                        pending_federation_activation =
+                                            Some(PendingFederationActivation {
+                                                connection: ResumedClientConnection {
+                                                    member_id: active_member_id.clone(),
+                                                    server_id: active_server_id.clone(),
+                                                    session_id: active_session_id.clone(),
+                                                    stream: reconnected_stream,
+                                                    connection_id: candidate_connection_id,
+                                                    remote: active_remote_connection.take(),
+                                                    mouse_capture_active: state
+                                                        .mouse_capture_active,
+                                                    window_title: active_window_title.clone(),
+                                                    prefix_input_source_active:
+                                                        active_prefix_input_source_active,
+                                                    is_remote_client,
+                                                    reconnected_encoding: Some(
+                                                        reconnected_encoding,
+                                                    ),
+                                                },
+                                                endpoint_id: active_member_id.clone(),
+                                                expected_resource: None,
+                                                expected_runtime_identity: active_server_id
+                                                    .clone()
+                                                    .zip(active_session_id.clone()),
+                                                request_id,
+                                                retain_current: false,
+                                                restore_if_rejected: false,
+                                                deadline: Instant::now()
+                                                    + FEDERATION_ACTIVATION_TIMEOUT,
+                                                buffered_messages: Vec::new(),
+                                            });
+                                        info!("waiting for replacement Herdr identity acknowledgement");
+                                        continue;
+                                    }
+                                    #[cfg(not(unix))]
+                                    {
+                                        active_connection_id = next_connection_id;
+                                        next_connection_id = next_connection_id.wrapping_add(1);
+                                        spawn_server_reader(
+                                            &reconnected_stream,
+                                            &event_tx,
+                                            &should_quit,
+                                            state.kitty_graphics_enabled,
+                                            active_connection_id,
+                                        )?;
+                                        write_stream = reconnected_stream;
+                                    }
+                                    #[cfg(not(unix))]
+                                    {
+                                        state.request_full_redraw();
+                                        info!(
+                                            ?reconnected_encoding,
+                                            "client reconnected after live handoff"
+                                        );
+                                        continue;
+                                    }
+                                }
+                                #[cfg(unix)]
+                                Err(err) if !suspended_connections.is_empty() => {
+                                    warn!(%err, "remote live handoff reconnect failed; resuming previous Herdr connection");
+                                    handle_notify(
+                                        NotifyKind::Toast,
+                                        "Remote Herdr connection changed",
+                                        Some("Returning to the previous Herdr connection without restarting the client."),
+                                        &state.sound_config,
+                                    );
+                                }
+                                Err(err) => return Err(err),
+                            }
+                        }
+                        #[cfg(unix)]
+                        if reason.as_deref() != Some("detached") {
+                            if let Some(pending) = pending_federation_activation.as_mut() {
+                                pending.retain_current = false;
+                                warn!(?reason, "source Herdr closed while destination activation is pending; waiting for destination acknowledgement");
+                                continue;
+                            }
+                            pending_federation_activation = begin_suspended_fallback(
+                                &mut suspended_connections,
+                                &mut disconnected_connections,
+                                &mut next_connection_id,
+                                &mut next_activation_request_id,
+                                requested_encoding,
+                                attach_request.is_some(),
+                                state.kitty_graphics_enabled,
+                                &event_tx,
+                                &should_quit,
+                                &federation_directory,
+                            )?;
+                            if pending_federation_activation.is_some() {
+                                handle_notify(
+                                    NotifyKind::Toast,
+                                    "Herdr member disconnected",
+                                    Some("Activating a retained member without restarting the client."),
+                                    &state.sound_config,
+                                );
+                                state.request_full_redraw();
+                                continue;
+                            }
                         }
                         return Err(ClientError::ServerShutdown { reason });
                     }
@@ -1773,6 +2516,8 @@ async fn run_client_loop(
                         let _ = io::stdout().flush();
                     }
                     ServerMessage::WindowTitle { title } => {
+                        #[cfg(unix)]
+                        active_window_title.clone_from(&title);
                         write_window_title(title.as_deref());
                         let _ = io::stdout().flush();
                     }
@@ -1798,6 +2543,10 @@ async fn run_client_loop(
                         }
                     }
                     ServerMessage::PrefixInputSource { active } => {
+                        #[cfg(unix)]
+                        {
+                            active_prefix_input_source_active = active;
+                        }
                         if active {
                             prefix_input_source.switch_to_ascii();
                         } else {
@@ -1806,23 +2555,256 @@ async fn run_client_loop(
                     }
                     ServerMessage::FederationAttach {
                         endpoint_id,
-                        target,
-                        session,
-                        focus_kind,
-                        resource_id,
+                        target: _requested_target,
+                        session: _requested_session,
+                        resource,
+                        directory,
                     } => {
-                        should_quit.store(true, Ordering::Release);
-                        let _ = write_to_server(&mut write_stream, &ClientMessage::Detach);
-                        if let Some(input_thread) = input_thread.take() {
-                            let _ = input_thread.join();
+                        #[cfg(unix)]
+                        {
+                            if connection_id == directory_authority_connection_id {
+                                merge_federation_directory(&mut federation_directory, directory);
+                            }
+                            let Some(authoritative) = federation_directory
+                                .iter()
+                                .find(|state| state.endpoint.id == endpoint_id)
+                            else {
+                                warn!(
+                                    endpoint_id,
+                                    "ignoring unpaired federation endpoint selection"
+                                );
+                                handle_notify(
+                                    NotifyKind::Toast,
+                                    "Untrusted federation destination",
+                                    Some("The selected member is not present in the pinned home directory."),
+                                    &state.sound_config,
+                                );
+                                continue;
+                            };
+                            if authoritative.snapshot.is_none() {
+                                warn!(endpoint_id, "ignoring federation endpoint without an authoritative runtime snapshot");
+                                handle_notify(
+                                    NotifyKind::Toast,
+                                    "Federated member unavailable",
+                                    Some("The home directory has no verified runtime identity for this member."),
+                                    &state.sound_config,
+                                );
+                                continue;
+                            }
+                            let expected_runtime_identity =
+                                federated_endpoint_runtime_identity(authoritative)
+                                    .expect("authoritative snapshot checked above");
+                            if let Some(resource) = resource.as_ref() {
+                                let identity_matches = resource.endpoint_id == endpoint_id
+                                    && expected_runtime_identity.0 == resource.server_id
+                                    && expected_runtime_identity.1 == resource.session_id;
+                                if !identity_matches {
+                                    warn!(
+                                        endpoint_id,
+                                        "ignoring stale or untrusted qualified resource"
+                                    );
+                                    handle_notify(
+                                        NotifyKind::Toast,
+                                        "Stale federated resource",
+                                        Some("Refresh the home directory before retrying this selection."),
+                                        &state.sound_config,
+                                    );
+                                    continue;
+                                }
+                            }
+                            let target = authoritative.endpoint.target.clone();
+                            let session = authoritative.endpoint.session.clone();
+                            if pending_federation_activation.is_some() {
+                                handle_notify(
+                                    NotifyKind::Toast,
+                                    "Federation switch already in progress",
+                                    Some("Wait for the selected member to accept or reject activation."),
+                                    &state.sound_config,
+                                );
+                                continue;
+                            }
+                            let plan = federation_connection_plan(
+                                &active_member_id,
+                                suspended_connections
+                                    .iter()
+                                    .map(|connection| connection.member_id.as_str()),
+                                &endpoint_id,
+                            );
+
+                            if plan == FederationConnectionPlan::Current {
+                                let request_id = next_activation_request_id;
+                                next_activation_request_id =
+                                    next_activation_request_id.wrapping_add(1);
+                                if let Err(err) = activate_federation_connection(
+                                    &mut write_stream,
+                                    request_id,
+                                    &endpoint_id,
+                                    resource,
+                                    &federation_directory,
+                                ) {
+                                    return Err(ClientError::ConnectionLost(err));
+                                }
+                                state.request_full_redraw();
+                                continue;
+                            }
+
+                            let switch_result = match plan {
+                                FederationConnectionPlan::Suspended(index) => {
+                                    let suspended = suspended_connections.remove(index);
+                                    let reconnect =
+                                        disconnected_connections.remove(&suspended.connection_id);
+                                    resume_suspended_connection(
+                                        suspended,
+                                        reconnect,
+                                        next_connection_id,
+                                        requested_encoding,
+                                        attach_request.is_some(),
+                                        state.kitty_graphics_enabled,
+                                    )
+                                    .map(|resumed| (resumed, reconnect))
+                                    .map_err(|err| io::Error::other(err.to_string()))
+                                }
+                                FederationConnectionPlan::New => (|| {
+                                    let remote = crate::remote::start_in_place_remote_connection(
+                                        target.clone(),
+                                        session,
+                                    )?;
+                                    let stream = remote.connect()?;
+                                    let (stream, encoding) = handshake_current_terminal(
+                                        stream,
+                                        requested_encoding,
+                                        false,
+                                        state.kitty_graphics_enabled,
+                                        true,
+                                    )
+                                    .map_err(|err| io::Error::other(err.to_string()))?;
+                                    Ok((
+                                        ResumedClientConnection {
+                                            member_id: endpoint_id.clone(),
+                                            server_id: Some(expected_runtime_identity.0.clone()),
+                                            session_id: Some(expected_runtime_identity.1.clone()),
+                                            stream,
+                                            connection_id: next_connection_id,
+                                            remote: Some(remote),
+                                            mouse_capture_active: state.mouse_capture_active,
+                                            window_title: None,
+                                            prefix_input_source_active: false,
+                                            is_remote_client: true,
+                                            reconnected_encoding: Some(encoding),
+                                        },
+                                        true,
+                                    ))
+                                })(
+                                ),
+                                FederationConnectionPlan::Current => unreachable!(),
+                            };
+
+                            match switch_result {
+                                Ok((mut resumed, needs_reader)) => {
+                                    if needs_reader {
+                                        next_connection_id = next_connection_id.wrapping_add(1);
+                                        spawn_server_reader(
+                                            &resumed.stream,
+                                            &event_tx,
+                                            &should_quit,
+                                            state.kitty_graphics_enabled,
+                                            resumed.connection_id,
+                                        )?;
+                                    }
+                                    let request_id = next_activation_request_id;
+                                    next_activation_request_id =
+                                        next_activation_request_id.wrapping_add(1);
+                                    activate_federation_connection(
+                                        &mut resumed.stream,
+                                        request_id,
+                                        &endpoint_id,
+                                        resource.clone(),
+                                        &federation_directory,
+                                    )
+                                    .map_err(ClientError::ConnectionLost)?;
+                                    let resumed_id = resumed.connection_id;
+                                    let reconnected_encoding = resumed.reconnected_encoding;
+                                    pending_federation_activation =
+                                        Some(PendingFederationActivation {
+                                            connection: resumed,
+                                            endpoint_id: endpoint_id.clone(),
+                                            expected_runtime_identity: Some(
+                                                expected_runtime_identity,
+                                            ),
+                                            expected_resource: resource,
+                                            request_id,
+                                            retain_current: true,
+                                            restore_if_rejected: matches!(
+                                                plan,
+                                                FederationConnectionPlan::Suspended(_)
+                                            ),
+                                            deadline: Instant::now()
+                                                + FEDERATION_ACTIVATION_TIMEOUT,
+                                            buffered_messages: Vec::new(),
+                                        });
+                                    info!(
+                                        endpoint_id,
+                                        target,
+                                        reused =
+                                            matches!(plan, FederationConnectionPlan::Suspended(_)),
+                                        ?reconnected_encoding,
+                                        connection_id = resumed_id,
+                                        "waiting for Herdr member activation acknowledgement"
+                                    );
+                                }
+                                Err(err) => {
+                                    warn!(endpoint_id, target, %err, "federation connection switch failed; keeping current connection");
+                                    handle_notify(
+                                        NotifyKind::Toast,
+                                        "Could not open remote Herdr",
+                                        Some(&format!(
+                                            "{endpoint_id}: {err}. The current Herdr connection is still active."
+                                        )),
+                                        &state.sound_config,
+                                    );
+                                    state.request_full_redraw();
+                                }
+                            }
                         }
-                        return Err(ClientError::FederationAttach {
-                            endpoint_id,
-                            target,
-                            session,
-                            focus_kind,
-                            resource_id,
-                        });
+                        #[cfg(windows)]
+                        {
+                            let _ = (
+                                endpoint_id,
+                                _requested_target,
+                                _requested_session,
+                                resource,
+                                directory,
+                            );
+                            handle_notify(
+                                NotifyKind::Toast,
+                                "Remote Herdr attachment is unavailable",
+                                Some("In-place federation attachment is not supported on Windows."),
+                                &state.sound_config,
+                            );
+                        }
+                    }
+                    ServerMessage::FederationActivationResult {
+                        accepted,
+                        member_id,
+                        error,
+                        ..
+                    } => {
+                        if !accepted {
+                            let detail = error.unwrap_or_else(|| {
+                                format!("member {member_id} rejected activation")
+                            });
+                            handle_notify(
+                                NotifyKind::Toast,
+                                "Federated member rejected activation",
+                                Some(&detail),
+                                &state.sound_config,
+                            );
+                        }
+                    }
+                    ServerMessage::FederationIdentity { .. }
+                    | ServerMessage::FederationDirectoryUpdate { .. } => {
+                        // Handled before active-connection routing so the
+                        // pinned home connection may update while suspended.
                     }
                     ServerMessage::Welcome { .. } => {
                         debug!("received unexpected Welcome in main loop");
@@ -1830,15 +2812,195 @@ async fn run_client_loop(
                 }
             }
             ClientLoopEvent::ServerDisconnected { connection_id } => {
-                if connection_id != active_connection_id {
+                #[cfg(unix)]
+                if pending_federation_activation
+                    .as_ref()
+                    .is_some_and(|pending| pending.connection.connection_id == connection_id)
+                {
+                    let pending = pending_federation_activation
+                        .take()
+                        .expect("pending connection id checked above");
+                    warn!(
+                        endpoint_id = pending.endpoint_id,
+                        "pending federation activation disconnected"
+                    );
+                    handle_notify(
+                        NotifyKind::Toast,
+                        "Federated member disconnected",
+                        Some("The current Herdr connection remains active."),
+                        &state.sound_config,
+                    );
+                    if !pending.retain_current {
+                        pending_federation_activation = begin_suspended_fallback(
+                            &mut suspended_connections,
+                            &mut disconnected_connections,
+                            &mut next_connection_id,
+                            &mut next_activation_request_id,
+                            requested_encoding,
+                            attach_request.is_some(),
+                            state.kitty_graphics_enabled,
+                            &event_tx,
+                            &should_quit,
+                            &federation_directory,
+                        )?;
+                        if pending_federation_activation.is_none() {
+                            return Err(ClientError::ConnectionLost(io::Error::other(
+                                "no healthy suspended Herdr connection remains",
+                            )));
+                        }
+                    }
                     continue;
+                }
+                if connection_id != active_connection_id {
+                    #[cfg(unix)]
+                    {
+                        disconnected_connections.insert(connection_id);
+                        if connection_id == directory_authority_connection_id
+                            || pending_directory_authority_connection_id == Some(connection_id)
+                        {
+                            pending_directory_authority_connection_id = None;
+                            next_directory_authority_reconnect_at = Some(Instant::now());
+                        }
+                    }
+                    continue;
+                }
+                #[cfg(unix)]
+                if let Some(pending) = pending_federation_activation.as_mut() {
+                    pending.retain_current = false;
+                    warn!("source Herdr disconnected while destination activation is pending; waiting for destination acknowledgement");
+                    continue;
+                }
+                #[cfg(unix)]
+                {
+                    pending_federation_activation = begin_suspended_fallback(
+                        &mut suspended_connections,
+                        &mut disconnected_connections,
+                        &mut next_connection_id,
+                        &mut next_activation_request_id,
+                        requested_encoding,
+                        attach_request.is_some(),
+                        state.kitty_graphics_enabled,
+                        &event_tx,
+                        &should_quit,
+                        &federation_directory,
+                    )?;
+                    if pending_federation_activation.is_some() {
+                        handle_notify(
+                            NotifyKind::Toast,
+                            "Remote Herdr disconnected",
+                            Some("Activating a retained member without restarting the client."),
+                            &state.sound_config,
+                        );
+                        continue;
+                    }
                 }
                 return Err(ClientError::ConnectionLost(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "server closed connection",
                 )));
             }
-            ClientLoopEvent::Timer => {}
+            ClientLoopEvent::Timer => {
+                #[cfg(unix)]
+                if active_connection_id != directory_authority_connection_id
+                    && pending_directory_authority_connection_id.is_none()
+                    && next_directory_authority_reconnect_at
+                        .is_some_and(|deadline| Instant::now() >= deadline)
+                {
+                    let authority_index = suspended_connections.iter().position(|connection| {
+                        connection.member_id == directory_authority_member_id
+                    });
+                    if let Some(index) = authority_index {
+                        let connection = &mut suspended_connections[index];
+                        match reconnect_suspended_connection(
+                            connection.remote.as_ref(),
+                            requested_encoding,
+                            attach_request.is_some(),
+                            state.kitty_graphics_enabled,
+                        ) {
+                            Ok((stream, _encoding)) => {
+                                let connection_id = next_connection_id;
+                                next_connection_id = next_connection_id.wrapping_add(1);
+                                spawn_server_reader(
+                                    &stream,
+                                    &event_tx,
+                                    &should_quit,
+                                    state.kitty_graphics_enabled,
+                                    connection_id,
+                                )?;
+                                connection.stream = stream;
+                                connection.connection_id = connection_id;
+                                disconnected_connections.remove(&directory_authority_connection_id);
+                                pending_directory_authority_connection_id = Some(connection_id);
+                                next_directory_authority_reconnect_at = None;
+                            }
+                            Err(err) => {
+                                warn!(%err, "suspended home directory authority is not ready; retrying");
+                                next_directory_authority_reconnect_at =
+                                    Some(Instant::now() + DIRECTORY_AUTHORITY_RECONNECT_INTERVAL);
+                            }
+                        }
+                    } else {
+                        next_directory_authority_reconnect_at = None;
+                    }
+                }
+                #[cfg(unix)]
+                if pending_federation_activation
+                    .as_ref()
+                    .is_some_and(|pending| Instant::now() >= pending.deadline)
+                {
+                    let mut pending = pending_federation_activation
+                        .take()
+                        .expect("expired activation checked above");
+                    let _ = write_to_server(
+                        &mut pending.connection.stream,
+                        &ClientMessage::FederationSuspend,
+                    );
+                    warn!(
+                        endpoint_id = pending.endpoint_id,
+                        "federation activation acknowledgement timed out"
+                    );
+                    handle_notify(
+                        NotifyKind::Toast,
+                        "Federated member timed out",
+                        Some("The current Herdr connection remains active."),
+                        &state.sound_config,
+                    );
+                    if pending.restore_if_rejected {
+                        let connection = pending.connection;
+                        suspended_connections.push(SuspendedClientConnection {
+                            member_id: connection.member_id,
+                            server_id: connection.server_id,
+                            session_id: connection.session_id,
+                            stream: connection.stream,
+                            connection_id: connection.connection_id,
+                            remote: connection.remote,
+                            mouse_capture_active: connection.mouse_capture_active,
+                            window_title: connection.window_title,
+                            prefix_input_source_active: connection.prefix_input_source_active,
+                            is_remote_client: connection.is_remote_client,
+                        });
+                    }
+                    if !pending.retain_current {
+                        pending_federation_activation = begin_suspended_fallback(
+                            &mut suspended_connections,
+                            &mut disconnected_connections,
+                            &mut next_connection_id,
+                            &mut next_activation_request_id,
+                            requested_encoding,
+                            attach_request.is_some(),
+                            state.kitty_graphics_enabled,
+                            &event_tx,
+                            &should_quit,
+                            &federation_directory,
+                        )?;
+                        if pending_federation_activation.is_none() {
+                            return Err(ClientError::ConnectionLost(io::Error::other(
+                                "no healthy suspended Herdr connection remains",
+                            )));
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -3202,5 +4364,126 @@ mod tests {
             b"\x1b]0;herdr api\x07"
         );
         assert_eq!(window_title_osc(None), b"\x1b]0;herdr\x07");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authoritative_directory_update_revokes_removed_members() {
+        let endpoint = |id: &str| {
+            crate::federation::EndpointState::configured(crate::config::FederationEndpointConfig {
+                id: id.into(),
+                target: id.into(),
+                ..crate::config::FederationEndpointConfig::default()
+            })
+        };
+        let mut directory = vec![endpoint("x1"), endpoint("stl-agents-1"), endpoint("tana")];
+        merge_federation_directory(
+            &mut directory,
+            vec![endpoint("x1"), endpoint("stl-agents-1")],
+        );
+        assert_eq!(
+            directory
+                .iter()
+                .map(|state| state.endpoint.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["stl-agents-1", "x1"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_handoff_activation_requires_runtime_identity_continuity() {
+        let expected = ("server-stl".to_string(), "session-stl".to_string());
+        assert!(federation_activation_identity_matches(
+            "stl-agents-1",
+            None,
+            Some(&expected),
+            "stl-agents-1",
+            "server-stl",
+            "session-stl",
+        ));
+        assert!(!federation_activation_identity_matches(
+            "stl-agents-1",
+            None,
+            Some(&expected),
+            "stl-agents-1",
+            "replacement-server",
+            "session-stl",
+        ));
+        assert!(!federation_activation_identity_matches(
+            "stl-agents-1",
+            None,
+            Some(&expected),
+            "stl-agents-1",
+            "server-stl",
+            "replacement-session",
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resource_less_activation_uses_home_snapshot_runtime_identity() {
+        let mut endpoint =
+            crate::federation::EndpointState::configured(crate::config::FederationEndpointConfig {
+                id: "stl-agents-1".into(),
+                target: "paul@stl-agents-1".into(),
+                ..crate::config::FederationEndpointConfig::default()
+            });
+        endpoint.snapshot = Some(crate::api::schema::SessionSnapshot {
+            identity: crate::api::schema::RuntimeIdentity {
+                server_id: "server-stl".into(),
+                session_id: "session-stl".into(),
+                member_id: "stl-agents-1".into(),
+                ..crate::api::schema::RuntimeIdentity::default()
+            },
+            version: crate::build_info::version(),
+            protocol: crate::protocol::PROTOCOL_VERSION,
+            event_cursor: 9,
+            focused_workspace_id: None,
+            focused_tab_id: None,
+            focused_pane_id: None,
+            workspaces: Vec::new(),
+            tabs: Vec::new(),
+            panes: Vec::new(),
+            layouts: Vec::new(),
+            agents: Vec::new(),
+        });
+
+        assert_eq!(
+            federated_endpoint_runtime_identity(&endpoint),
+            Some(("server-stl".into(), "session-stl".into()))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn home_directory_authority_reconnect_requires_full_identity_continuity() {
+        assert!(directory_authority_identity_matches(
+            "x1",
+            Some("server-x1"),
+            Some("session-x1"),
+            "x1",
+            "x1",
+            "server-x1",
+            "session-x1",
+        ));
+        assert!(!directory_authority_identity_matches(
+            "x1",
+            Some("replacement-server"),
+            Some("session-x1"),
+            "x1",
+            "x1",
+            "server-x1",
+            "session-x1",
+        ));
+        assert!(!directory_authority_identity_matches(
+            "x1",
+            Some("server-x1"),
+            Some("session-x1"),
+            "x1",
+            "hostile",
+            "server-x1",
+            "session-x1",
+        ));
     }
 }

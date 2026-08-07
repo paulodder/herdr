@@ -1309,6 +1309,10 @@ impl TerminalState {
         self.manual_label = None;
     }
 
+    pub fn manual_display_label(&self) -> Option<String> {
+        self.manual_label.clone()
+    }
+
     pub fn set_agent_name(&mut self, name: String) {
         let name = name.trim().to_string();
         self.agent_name = (!name.is_empty()).then_some(name);
@@ -1346,7 +1350,7 @@ impl TerminalState {
 
     pub fn border_label(&self, show_agent_labels: bool) -> Option<String> {
         self.effective_title().or_else(|| {
-            self.manual_label.clone().or_else(|| {
+            self.manual_display_label().or_else(|| {
                 show_agent_labels
                     .then(|| {
                         self.effective_display_agent()

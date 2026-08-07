@@ -9,6 +9,7 @@ pub struct RuntimeStatus {
     pub version: Option<String>,
     pub protocol: Option<u32>,
     pub capabilities: Option<crate::api::schema::ServerCapabilities>,
+    pub identity: Option<crate::api::schema::RuntimeIdentity>,
 }
 
 pub fn read_runtime_status_at(
@@ -48,11 +49,12 @@ pub fn read_runtime_status_at(
             version,
             protocol,
             capabilities,
-            identity: _,
+            identity,
         } => Ok(Some(RuntimeStatus {
             version: Some(version),
             protocol: Some(protocol),
             capabilities,
+            identity,
         })),
         result => Err(io::Error::other(format!(
             "server status request returned unexpected result: {result:?}"

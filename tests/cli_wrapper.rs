@@ -178,6 +178,7 @@ fn spawn_named_server(
         .args(["--session", session, "server"])
         .env("XDG_CONFIG_HOME", config_home)
         .env("XDG_RUNTIME_DIR", runtime_dir)
+        .env_remove("HERDR_CONFIG_PATH")
         .env_remove("HERDR_SOCKET_PATH")
         .env_remove("HERDR_CLIENT_SOCKET_PATH")
         .env_remove("HERDR_ENV")
@@ -224,6 +225,7 @@ fn run_named_cli_with_env_and_socket_override(
         .args(args)
         .env("XDG_CONFIG_HOME", config_home)
         .env("XDG_RUNTIME_DIR", runtime_dir)
+        .env_remove("HERDR_CONFIG_PATH")
         .env_remove("HERDR_CLIENT_SOCKET_PATH")
         .env_remove("HERDR_ENV");
     for (key, value) in envs {
@@ -295,6 +297,7 @@ fn spawn_herdr_with_config(
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", socket_path);
+    cmd.env_remove("HERDR_CONFIG_PATH");
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
     cmd.env("SHELL", "/bin/sh");
     cmd.env_remove("HERDR_ENV");
@@ -314,6 +317,7 @@ fn run_cli(socket_path: &Path, args: &[&str]) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
     command.args(args);
     command.env("HERDR_SOCKET_PATH", socket_path);
+    command.env_remove("HERDR_CONFIG_PATH");
     command.output().unwrap()
 }
 
@@ -322,6 +326,7 @@ fn run_cli_in_dir(socket_path: &Path, args: &[&str], current_dir: &Path) -> std:
     command.args(args);
     command.current_dir(current_dir);
     command.env("HERDR_SOCKET_PATH", socket_path);
+    command.env_remove("HERDR_CONFIG_PATH");
     command.output().unwrap()
 }
 
@@ -1681,7 +1686,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {full_stdout}"
     );
     assert!(
-        full_stdout.contains("  protocol: 17"),
+        full_stdout.contains("  protocol: 18"),
         "stdout: {full_stdout}"
     );
     assert!(full_stdout.contains("server:\n"), "stdout: {full_stdout}");
@@ -1714,7 +1719,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {server_stdout}"
     );
     assert!(
-        server_stdout.contains("protocol: 17"),
+        server_stdout.contains("protocol: 18"),
         "stdout: {server_stdout}"
     );
 
@@ -1726,7 +1731,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {client_stdout}"
     );
     assert!(
-        client_stdout.contains("protocol: 17"),
+        client_stdout.contains("protocol: 18"),
         "stdout: {client_stdout}"
     );
     assert!(
@@ -1736,7 +1741,7 @@ fn status_commands_report_client_and_server_versions() {
 
     let full_json = run_cli_json(&socket_path, &["status", "--json"]);
     assert_eq!(full_json["client"]["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(full_json["client"]["protocol"], 17);
+    assert_eq!(full_json["client"]["protocol"], 18);
     assert_eq!(full_json["server"]["status"], "running");
     assert_eq!(full_json["server"]["running"], true);
     assert_eq!(full_json["server"]["compatible"], true);
@@ -1750,12 +1755,12 @@ fn status_commands_report_client_and_server_versions() {
     let server_json = run_cli_json(&socket_path, &["status", "server", "--json"]);
     assert_eq!(server_json["status"], "running");
     assert_eq!(server_json["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(server_json["protocol"], 17);
+    assert_eq!(server_json["protocol"], 18);
     assert_eq!(server_json["compatible"], true);
 
     let client_json = run_cli_json(&socket_path, &["status", "client", "--json"]);
     assert_eq!(client_json["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(client_json["protocol"], 17);
+    assert_eq!(client_json["protocol"], 18);
     assert!(client_json["binary"]
         .as_str()
         .is_some_and(|path| !path.is_empty()));

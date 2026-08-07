@@ -316,7 +316,24 @@ impl AppState {
         };
 
         cards.iter().find_map(|card| {
-            (row >= card.rect.y && row < card.rect.y + card.rect.height).then_some(card.ws_idx)
+            (card.remote.is_none() && row >= card.rect.y && row < card.rect.y + card.rect.height)
+                .then_some(card.ws_idx)
+        })
+    }
+
+    pub(super) fn remote_workspace_at_row(
+        &self,
+        row: u16,
+    ) -> Option<crate::app::state::FederatedWorkspaceTarget> {
+        let cards = if self.view.workspace_card_areas.is_empty() {
+            crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect)
+        } else {
+            self.view.workspace_card_areas.clone()
+        };
+        cards.iter().find_map(|card| {
+            (row >= card.rect.y && row < card.rect.y + card.rect.height)
+                .then(|| card.remote.clone())
+                .flatten()
         })
     }
 
@@ -331,7 +348,34 @@ impl AppState {
         }
 
         let idx = (row - ws_area.y) as usize;
-        (idx < self.workspaces.len()).then_some(idx)
+        match crate::ui::workspace_list_entries(self).get(idx)? {
+            crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. } => Some(*ws_idx),
+            crate::ui::WorkspaceListEntry::RemoteWorkspace { .. } => None,
+        }
+    }
+
+    pub(super) fn collapsed_remote_workspace_at_row(
+        &self,
+        row: u16,
+    ) -> Option<crate::app::state::FederatedWorkspaceTarget> {
+        if !self.sidebar_collapsed {
+            return None;
+        }
+        let (ws_area, _, _) = crate::ui::collapsed_sidebar_sections(self.view.sidebar_rect);
+        if ws_area == Rect::default() || row < ws_area.y || row >= ws_area.y + ws_area.height {
+            return None;
+        }
+        let idx = (row - ws_area.y) as usize;
+        match crate::ui::workspace_list_entries(self).get(idx)? {
+            crate::ui::WorkspaceListEntry::RemoteWorkspace {
+                endpoint_id,
+                workspace_id,
+            } => Some(crate::app::state::FederatedWorkspaceTarget {
+                endpoint_id: endpoint_id.clone(),
+                workspace_id: workspace_id.clone(),
+            }),
+            crate::ui::WorkspaceListEntry::Workspace { .. } => None,
+        }
     }
 
     pub(super) fn collapsed_agent_detail_target_at(
@@ -374,6 +418,10 @@ impl AppState {
         } else {
             self.view.workspace_card_areas.clone()
         };
+        let cards = cards
+            .into_iter()
+            .filter(|card| card.remote.is_none())
+            .collect::<Vec<_>>();
         if cards.is_empty() {
             return Some(0);
         }

@@ -569,9 +569,16 @@ impl Palette {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FederatedWorkspaceTarget {
+    pub endpoint_id: String,
+    pub workspace_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceCardArea {
     pub ws_idx: usize,
+    pub remote: Option<FederatedWorkspaceTarget>,
     pub rect: Rect,
     pub indented: bool,
 }
@@ -1342,8 +1349,16 @@ pub(crate) struct FederationAttachRequest {
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
 pub struct AppState {
+    /// Stable identity and advertised address of this authoritative member.
+    pub(crate) federation_member_id: String,
+    pub(crate) federation_member_target: String,
+    pub(crate) federation_member_label: Option<String>,
     /// Latest authoritative projections from configured remote Herdr sessions.
     pub(crate) federation: std::collections::BTreeMap<String, crate::federation::EndpointState>,
+    /// Per-render client directory overlay selected by the headless server.
+    /// This is intentionally distinct from authoritative watcher state.
+    pub(crate) federation_client_overlay:
+        std::collections::BTreeMap<String, crate::federation::EndpointState>,
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
     /// Terminal ids whose size is currently owned by a direct attach client.
@@ -1531,6 +1546,27 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub(crate) fn federation_states(
+        &self,
+    ) -> impl Iterator<Item = &crate::federation::EndpointState> {
+        self.federation_client_overlay
+            .values()
+            .chain(self.federation.values().filter(|state| {
+                !self
+                    .federation_client_overlay
+                    .contains_key(&state.endpoint.id)
+            }))
+    }
+
+    pub(crate) fn federation_state(
+        &self,
+        endpoint_id: &str,
+    ) -> Option<&crate::federation::EndpointState> {
+        self.federation_client_overlay
+            .get(endpoint_id)
+            .or_else(|| self.federation.get(endpoint_id))
+    }
+
     pub(crate) fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
     }
@@ -1720,7 +1756,11 @@ impl AppState {
     /// Create an AppState for testing — no channels, no PTYs.
     pub fn test_new() -> Self {
         Self {
+            federation_member_id: "local".into(),
+            federation_member_target: String::new(),
+            federation_member_label: None,
             federation: std::collections::BTreeMap::new(),
+            federation_client_overlay: std::collections::BTreeMap::new(),
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),

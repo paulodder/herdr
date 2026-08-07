@@ -8,6 +8,31 @@ use std::io::{self, Read, Write};
 
 use serde::{Deserialize, Serialize};
 
+mod federation_directory_wire {
+    use serde::{Deserialize as _, Deserializer, Serializer};
+
+    pub(super) fn serialize<S>(
+        directory: &[crate::federation::EndpointState],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let json = serde_json::to_vec(directory).map_err(serde::ser::Error::custom)?;
+        serializer.serialize_bytes(&json)
+    }
+
+    pub(super) fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<Vec<crate::federation::EndpointState>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let json = Vec::<u8>::deserialize(deserializer)?;
+        serde_json::from_slice(&json).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Server-shutdown reason that asks an interactive client to reconnect to the
 /// replacement server instead of exiting during a live handoff.
 pub const LIVE_HANDOFF_RECONNECT_REASON: &str =
@@ -18,7 +43,7 @@ pub const LIVE_HANDOFF_RECONNECT_REASON: &str =
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 17;
+pub const PROTOCOL_VERSION: u32 = 18;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -64,6 +89,8 @@ pub enum ClientLaunchMode {
     App,
     /// Direct terminal attach client.
     TerminalAttach,
+    /// A non-foreground federation connection awaiting identity validation.
+    FederationCandidate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -309,7 +336,7 @@ impl ClientInputEvent {
 }
 
 /// Messages sent from the client to the server over the client protocol socket.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ClientMessage {
     /// Handshake: client announces its protocol version and terminal dimensions.
     Hello {
@@ -399,6 +426,27 @@ pub enum ClientMessage {
         target: String,
         /// Replace an existing writable controller for this terminal.
         takeover: bool,
+    },
+
+    /// Activate this authoritative member inside an existing TUI process.
+    /// The directory is carried by the client so returning to a suspended
+    /// home member never depends on reverse SSH reachability.
+    FederationActivate {
+        request_id: u64,
+        expected_member_id: String,
+        resource: Option<crate::federation::FederatedResourceRef>,
+        #[serde(with = "federation_directory_wire")]
+        directory: Vec<crate::federation::EndpointState>,
+    },
+
+    /// Stop rendering this full-app connection while retaining its protocol
+    /// socket and server-side state for an in-place federation return.
+    FederationSuspend,
+
+    /// Refresh this connection's client-owned global directory overlay.
+    FederationDirectoryUpdate {
+        #[serde(with = "federation_directory_wire")]
+        directory: Vec<crate::federation::EndpointState>,
     },
 }
 
@@ -600,7 +648,7 @@ pub enum NotifyKind {
 }
 
 /// Messages sent from the server to the client over the client protocol socket.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ServerMessage {
     /// Handshake response: server acknowledges (or rejects) the client.
     Welcome {
@@ -670,22 +718,38 @@ pub enum ServerMessage {
         active: bool,
     },
 
-    /// Replace this local app attachment with a native attachment to one
-    /// authoritative remote Herdr session.
+    /// Ask the TUI connection manager to activate one authoritative member.
     FederationAttach {
         endpoint_id: String,
         target: String,
         session: String,
-        focus_kind: Option<FederationFocusKind>,
-        resource_id: Option<String>,
+        resource: Option<crate::federation::FederatedResourceRef>,
+        #[serde(with = "federation_directory_wire")]
+        directory: Vec<crate::federation::EndpointState>,
     },
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FederationFocusKind {
-    Workspace,
-    Tab,
-    Pane,
+    /// A destination member's authoritative response to FederationActivate.
+    FederationActivationResult {
+        request_id: u64,
+        accepted: bool,
+        member_id: String,
+        server_id: String,
+        session_id: String,
+        error: Option<String>,
+    },
+
+    /// Authoritative identity of the server that owns this connection.
+    FederationIdentity {
+        member_id: String,
+        server_id: String,
+        session_id: String,
+    },
+
+    /// Authoritative directory refresh, emitted by the pinned home server.
+    FederationDirectoryUpdate {
+        #[serde(with = "federation_directory_wire")]
+        directory: Vec<crate::federation::EndpointState>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1064,6 +1128,22 @@ mod tests {
                 takeover: false,
             }),
             9
+        );
+        assert_eq!(
+            tag(&ClientMessage::FederationActivate {
+                request_id: 1,
+                expected_member_id: "x1".into(),
+                resource: None,
+                directory: Vec::new(),
+            }),
+            10
+        );
+        assert_eq!(tag(&ClientMessage::FederationSuspend), 11);
+        assert_eq!(
+            tag(&ClientMessage::FederationDirectoryUpdate {
+                directory: Vec::new(),
+            }),
+            12
         );
     }
 
@@ -1981,13 +2061,150 @@ mod tests {
             endpoint_id: "tana".into(),
             target: "tana".into(),
             session: "default".into(),
-            focus_kind: Some(FederationFocusKind::Pane),
-            resource_id: Some("w1:p1".into()),
+            resource: Some(crate::federation::FederatedResourceRef {
+                endpoint_id: "tana".into(),
+                server_id: "server-tana".into(),
+                session_id: "session-tana".into(),
+                kind: crate::federation::FederatedResourceKind::Pane,
+                resource_id: "w1:p1".into(),
+            }),
+            directory: Vec::new(),
         };
         let mut bytes = Vec::new();
         write_message(&mut bytes, &message).unwrap();
         let decoded: ServerMessage = read_message(&mut bytes.as_slice(), MAX_FRAME_SIZE).unwrap();
         assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn federation_connection_control_messages_round_trip() {
+        let messages = [
+            ClientMessage::FederationActivate {
+                request_id: 42,
+                expected_member_id: "tana".into(),
+                resource: None,
+                directory: Vec::new(),
+            },
+            ClientMessage::FederationSuspend,
+            ClientMessage::FederationDirectoryUpdate {
+                directory: Vec::new(),
+            },
+        ];
+        for message in messages {
+            let mut bytes = Vec::new();
+            write_message(&mut bytes, &message).unwrap();
+            let decoded: ClientMessage =
+                read_message(&mut bytes.as_slice(), MAX_FRAME_SIZE).unwrap();
+            assert_eq!(decoded, message);
+        }
+
+        let result = ServerMessage::FederationActivationResult {
+            request_id: 42,
+            accepted: true,
+            member_id: "tana".into(),
+            server_id: "server-tana".into(),
+            session_id: "session-tana".into(),
+            error: None,
+        };
+        let mut bytes = Vec::new();
+        write_message(&mut bytes, &result).unwrap();
+        let decoded: ServerMessage = read_message(&mut bytes.as_slice(), MAX_FRAME_SIZE).unwrap();
+        assert_eq!(decoded, result);
+
+        let identity = ServerMessage::FederationIdentity {
+            member_id: "x1".into(),
+            server_id: "server-x1".into(),
+            session_id: "session-x1".into(),
+        };
+        let mut bytes = Vec::new();
+        write_message(&mut bytes, &identity).unwrap();
+        let decoded: ServerMessage = read_message(&mut bytes.as_slice(), MAX_FRAME_SIZE).unwrap();
+        assert_eq!(decoded, identity);
+
+        let directory = ServerMessage::FederationDirectoryUpdate {
+            directory: vec![crate::federation::EndpointState {
+                endpoint: crate::config::FederationEndpointConfig {
+                    id: "tana.stl.dev".into(),
+                    target: "paul@tana.tail.example".into(),
+                    label: None,
+                    session: "default".into(),
+                    enabled: true,
+                },
+                status: crate::federation::EndpointConnectionStatus::Disconnected,
+                snapshot: Some(crate::api::schema::SessionSnapshot {
+                    identity: crate::api::schema::RuntimeIdentity {
+                        server_id: "server-tana".into(),
+                        session_id: "session-tana".into(),
+                        session_name: "default".into(),
+                        member_id: "tana.stl.dev".into(),
+                        member_target: "paul@tana.tail.example".into(),
+                        member_label: None,
+                    },
+                    version: "0.7.4".into(),
+                    protocol: PROTOCOL_VERSION,
+                    event_cursor: 9,
+                    focused_workspace_id: None,
+                    focused_tab_id: None,
+                    focused_pane_id: None,
+                    workspaces: Vec::new(),
+                    tabs: Vec::new(),
+                    panes: Vec::new(),
+                    layouts: Vec::new(),
+                    agents: Vec::new(),
+                }),
+                cursor: Some(9),
+                error: Some("offline".into()),
+            }],
+        };
+        let mut bytes = Vec::new();
+        write_message(&mut bytes, &directory).unwrap();
+        let decoded: ServerMessage = read_message(&mut bytes.as_slice(), MAX_FRAME_SIZE).unwrap();
+        assert_eq!(decoded, directory);
+
+        let snapshot = crate::api::schema::SessionSnapshot {
+            identity: crate::api::schema::RuntimeIdentity {
+                server_id: "server-tana".into(),
+                session_id: "session-tana".into(),
+                session_name: "default".into(),
+                member_id: "tana.stl.dev".into(),
+                member_target: "tana".into(),
+                member_label: None,
+            },
+            version: "0.7.4".into(),
+            protocol: PROTOCOL_VERSION,
+            event_cursor: 9,
+            focused_workspace_id: None,
+            focused_tab_id: None,
+            focused_pane_id: None,
+            workspaces: Vec::new(),
+            tabs: Vec::new(),
+            panes: Vec::new(),
+            layouts: Vec::new(),
+            agents: Vec::new(),
+        };
+        let endpoint = crate::config::FederationEndpointConfig {
+            id: "tana.stl.dev".into(),
+            target: "tana".into(),
+            label: None,
+            session: "default".into(),
+            enabled: true,
+        };
+        let directory = ServerMessage::FederationDirectoryUpdate {
+            directory: vec![
+                crate::federation::EndpointState::configured(endpoint.clone()),
+                crate::federation::EndpointState {
+                    endpoint,
+                    status: crate::federation::EndpointConnectionStatus::Connected,
+                    snapshot: Some(snapshot),
+                    cursor: Some(9),
+                    error: None,
+                },
+            ],
+        };
+        let mut bytes = Vec::new();
+        write_message(&mut bytes, &directory).unwrap();
+        let decoded: ServerMessage = read_message(&mut bytes.as_slice(), MAX_FRAME_SIZE).unwrap();
+        assert_eq!(decoded, directory);
     }
 
     #[test]

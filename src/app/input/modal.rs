@@ -371,7 +371,7 @@ pub(super) fn open_rename_workspace(
     state.selected = ws_idx;
     state.rename_pane_target = None;
     state.name_input =
-        state.workspaces[ws_idx].display_name_from(&state.terminals, terminal_runtimes);
+        state.workspaces[ws_idx].base_display_name_from(&state.terminals, terminal_runtimes);
     state.name_input_replace_on_type = false;
     state.name_input_edit = TextInputState::at_end(&state.name_input);
     state.mode = Mode::RenameWorkspace;
@@ -382,7 +382,7 @@ pub(super) fn open_rename_active_tab(state: &mut AppState, replace_on_type: bool
     state.requested_new_tab_name = None;
     state.rename_pane_target = None;
     if let Some(ws) = state.active.and_then(|i| state.workspaces.get(i)) {
-        if let Some(name) = ws.active_tab_display_name() {
+        if let Some(name) = ws.tab_base_name(ws.active_tab) {
             state.name_input = name;
             state.name_input_replace_on_type = replace_on_type;
             state.name_input_edit = TextInputState::at_end(&state.name_input);
@@ -538,7 +538,7 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                                 .get(active_tab)
                                 .is_some_and(|tab| tab.is_auto_named())
                                 && ws
-                                    .tab_display_name(active_tab)
+                                    .tab_base_name(active_tab)
                                     .is_some_and(|name| new_name == name);
                             if let Some(tab) = ws.active_tab_mut() {
                                 if !new_name.is_empty() && !keep_auto_name {
@@ -996,7 +996,7 @@ impl App {
                     .get(tab_idx)
                     .is_some_and(|tab| tab.is_auto_named())
                     && self.state.workspaces[ws_idx]
-                        .tab_display_name(tab_idx)
+                        .tab_base_name(tab_idx)
                         .is_some_and(|name| new_name == name);
                 if !keep_auto_name {
                     if let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) {
