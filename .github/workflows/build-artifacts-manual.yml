@@ -31,6 +31,18 @@ on:
         options:
           - 'false'
           - 'true'
+      build_channel:
+        description: build identity channel embedded in the binary
+        required: true
+        default: stable
+        type: choice
+        options:
+          - stable
+          - stl
+      build_id:
+        description: optional build identifier appended to the version
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -39,6 +51,9 @@ permissions:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   RUST_TOOLCHAIN_VERSION: 1.96.1
+  HERDR_BUILD_CHANNEL: ${{ inputs.build_channel }}
+  HERDR_BUILD_ID: ${{ inputs.build_id }}
+  HERDR_BUILD_COMMIT: ${{ github.sha }}
 
 jobs:
   build-linux:
@@ -111,6 +126,8 @@ jobs:
           {
             echo "commit=$GITHUB_SHA"
             echo "target=${{ matrix.target }}"
+            echo "build_channel=$HERDR_BUILD_CHANNEL"
+            echo "build_id=$HERDR_BUILD_ID"
             echo "libghostty_vt_optimize=$LIBGHOSTTY_VT_OPTIMIZE"
             echo "libghostty_vt_simd=$LIBGHOSTTY_VT_SIMD"
           } >> BUILD_INFO.txt
@@ -174,6 +191,8 @@ jobs:
           {
             echo "commit=$GITHUB_SHA"
             echo "target=${{ matrix.target }}"
+            echo "build_channel=$HERDR_BUILD_CHANNEL"
+            echo "build_id=$HERDR_BUILD_ID"
             echo "libghostty_vt_optimize=$LIBGHOSTTY_VT_OPTIMIZE"
             echo "libghostty_vt_simd=$LIBGHOSTTY_VT_SIMD"
           } >> BUILD_INFO.txt
@@ -227,6 +246,8 @@ jobs:
           Copy-Item target\x86_64-pc-windows-msvc\release\herdr.exe herdr-windows-x86_64.exe
           "commit=$env:GITHUB_SHA" | Out-File -Encoding utf8 BUILD_INFO.txt
           "target=x86_64-pc-windows-msvc" | Out-File -Encoding utf8 -Append BUILD_INFO.txt
+          "build_channel=$env:HERDR_BUILD_CHANNEL" | Out-File -Encoding utf8 -Append BUILD_INFO.txt
+          "build_id=$env:HERDR_BUILD_ID" | Out-File -Encoding utf8 -Append BUILD_INFO.txt
           "libghostty_vt_optimize=$env:LIBGHOSTTY_VT_OPTIMIZE" | Out-File -Encoding utf8 -Append BUILD_INFO.txt
           "libghostty_vt_simd=$env:LIBGHOSTTY_VT_SIMD" | Out-File -Encoding utf8 -Append BUILD_INFO.txt
           $hash = (Get-FileHash -Algorithm SHA256 herdr-windows-x86_64.exe).Hash.ToLowerInvariant()
