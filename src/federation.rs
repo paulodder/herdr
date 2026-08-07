@@ -3,7 +3,7 @@
 //! Every endpoint remains authoritative for its own PTYs and session state.
 //! This module only transports qualified references, snapshots, and events.
 
-use std::io::{self, BufReader, Read as _, Write as _};
+use std::io::{self, BufReader, Read as _};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -228,6 +228,10 @@ pub fn start_app_watchers(
 /// A live `session.watch` stream transported through one SSH process.
 pub struct EndpointWatch {
     child: Child,
+    // Keep the request side of the SSH transport open for the watch lifetime.
+    // Dropping it after the one-shot session.watch request makes the remote
+    // bridge observe EOF even though the watch is still healthy.
+    _stdin: std::process::ChildStdin,
     reader: BufReader<std::process::ChildStdout>,
     pub state: EndpointState,
 }
@@ -292,14 +296,10 @@ impl EndpointWatch {
                 session_id: resume_identity.map(|identity| identity.session_id.clone()),
             }),
         };
-        if let Some(mut stdin) = child.stdin.take() {
-            write_json_line(&mut stdin, &request)?;
-        } else {
-            return Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "ssh bridge stdin is unavailable",
-            ));
-        }
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::BrokenPipe, "ssh bridge stdin is unavailable")
+        })?;
+        write_json_line(&mut stdin, &request)?;
         let stdout = child.stdout.take().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -336,6 +336,7 @@ impl EndpointWatch {
         };
         Ok(Self {
             child: child.take(),
+            _stdin: stdin,
             reader,
             state,
         })
@@ -442,20 +443,54 @@ fn ensure_local_server_ready() -> io::Result<()> {
 
 #[cfg(unix)]
 fn copy_stdio(stream: crate::ipc::LocalStream) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    copy_bridge_stream(stream, || io::stdin().lock(), &mut stdout)
+}
+
+#[cfg(unix)]
+fn copy_bridge_stream<R: io::Read>(
+    stream: crate::ipc::LocalStream,
+    input: impl FnOnce() -> R + Send + 'static,
+    output: &mut impl io::Write,
+) -> io::Result<()> {
     use interprocess::TryClone as _;
 
     let mut upload_stream = stream.try_clone()?;
+    let shutdown_stream = stream.try_clone()?;
     let mut download_stream = stream;
     let upload = std::thread::spawn(move || {
-        let mut stdin = io::stdin().lock();
-        io::copy(&mut stdin, &mut upload_stream).map(|_| ())
+        let mut input = input();
+        copy_bridge_input(&mut input, &mut upload_stream, &shutdown_stream)
     });
-    let mut stdout = io::stdout().lock();
-    io::copy(&mut download_stream, &mut stdout)?;
-    stdout.flush()?;
+    io::copy(&mut download_stream, output)?;
+    output.flush()?;
     upload
         .join()
         .map_err(|_| io::Error::other("federation bridge input thread panicked"))?
+}
+
+#[cfg(unix)]
+fn copy_bridge_input(
+    input: &mut impl io::Read,
+    upload_stream: &mut crate::ipc::LocalStream,
+    shutdown_stream: &crate::ipc::LocalStream,
+) -> io::Result<()> {
+    let result = io::copy(input, upload_stream).map(|_| ());
+    // EOF means the SSH transport disappeared. Closing only the upload clone
+    // leaves the download clone blocked on a quiet session.watch stream and
+    // turns the remote bridge into a PPID-1 orphan. Shut down the underlying
+    // Unix socket in both directions so the download copy wakes immediately.
+    let _ = shutdown_local_stream(shutdown_stream);
+    result
+}
+
+#[cfg(unix)]
+fn shutdown_local_stream(stream: &crate::ipc::LocalStream) -> io::Result<()> {
+    match stream {
+        crate::ipc::LocalStream::UdSocket(stream) => {
+            stream.inner().shutdown(std::net::Shutdown::Both)
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -829,6 +864,34 @@ pub fn apply_event(snapshot: &mut SessionSnapshot, envelope: &SequencedEventEnve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_relay_exits_promptly_when_input_closes_and_server_stays_open() {
+        use std::os::unix::net::UnixStream;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (bridge_socket, server_socket) = UnixStream::pair().unwrap();
+        let bridge_socket = crate::ipc::LocalStream::UdSocket(
+            interprocess::os::unix::uds_local_socket::Stream::from(bridge_socket),
+        );
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let relay = std::thread::spawn(move || {
+            let mut output = io::sink();
+            let result = copy_bridge_stream(bridge_socket, io::empty, &mut output);
+            let _ = finished_tx.send(result);
+        });
+
+        // Keep the server peer alive and silent. Before the EOF cancellation,
+        // the relay's download half waited forever for output from this peer.
+        let result = finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("bridge relay did not exit promptly after stdin EOF");
+        result.unwrap();
+        relay.join().unwrap();
+        drop(server_socket);
+    }
 
     #[test]
     fn remote_bridge_command_contains_only_validated_session_data() {
