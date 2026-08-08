@@ -321,6 +321,8 @@ impl App {
             | EmacsBuiltin::PreviousLine
             | EmacsBuiltin::ForwardWord
             | EmacsBuiltin::BackwardWord
+            | EmacsBuiltin::ForwardSexp
+            | EmacsBuiltin::BackwardSexp
             | EmacsBuiltin::MoveBeginningOfLine
             | EmacsBuiltin::MoveEndOfLine
             | EmacsBuiltin::ScrollUp
@@ -1110,6 +1112,12 @@ impl App {
                 EmacsBuiltin::PreviousLine => text_mode::previous_line(&buf, point),
                 EmacsBuiltin::ForwardWord => text_mode::forward_word(&buf, point),
                 EmacsBuiltin::BackwardWord => text_mode::backward_word(&buf, point),
+                // Fundamental-mode atoms in terminal scrollback use the same
+                // word constituent rules as TEXT-mode word motion. Balanced
+                // delimiter traversal can extend these commands when a trace
+                // establishes the required syntax behavior.
+                EmacsBuiltin::ForwardSexp => text_mode::forward_word(&buf, point),
+                EmacsBuiltin::BackwardSexp => text_mode::backward_word(&buf, point),
                 EmacsBuiltin::MoveBeginningOfLine => text_mode::line_beginning(point),
                 EmacsBuiltin::MoveEndOfLine => text_mode::line_end(&buf, point),
                 EmacsBuiltin::ScrollUp => text_mode::clamp(
@@ -2292,6 +2300,38 @@ mod tests {
 
         let text = app.state.emacs.text_mode.as_ref().unwrap();
         assert_eq!(text.point.row, 3, "press plus two repeats move three rows");
+        assert_eq!(text.mark.map(|mark| mark.row), Some(0));
+        assert!(text.mark_active);
+    }
+
+    #[tokio::test]
+    async fn held_kitty_c_n_extends_an_active_region_through_raw_input() {
+        let (mut app, _pane, _rx) = emacs_app_with_channel(FIVE_LINES);
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x1b, b'<']); // M-<
+        app.route_client_input(vec![0x00]); // C-SPC
+
+        app.route_client_input(
+            b"\x1b[110;5:1u\x1b[110;5:2u\x1b[110;5:2u\x1b[110;5:3u".to_vec(),
+        );
+
+        let text = app.state.emacs.text_mode.as_ref().unwrap();
+        assert_eq!(text.point.row, 3, "press plus two repeats move three rows");
+        assert_eq!(text.mark.map(|mark| mark.row), Some(0));
+        assert!(text.mark_active);
+    }
+
+    #[tokio::test]
+    async fn held_legacy_c_n_extends_an_active_region_through_raw_input() {
+        let (mut app, _pane, _rx) = emacs_app_with_channel(FIVE_LINES);
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x1b, b'<']); // M-<
+        app.route_client_input(vec![0x00]); // C-SPC
+
+        app.route_client_input(vec![0x0e, 0x0e, 0x0e]);
+
+        let text = app.state.emacs.text_mode.as_ref().unwrap();
+        assert_eq!(text.point.row, 3, "three legacy C-n bytes move three rows");
         assert_eq!(text.mark.map(|mark| mark.row), Some(0));
         assert!(text.mark_active);
     }

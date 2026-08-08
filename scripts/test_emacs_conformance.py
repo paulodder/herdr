@@ -17,6 +17,26 @@ def snapshot(row: int, col: int, *, minibuffer=None):
 
 
 class EmacsConformanceTest(unittest.TestCase):
+    def test_trace_repeat_runs_finds_adjacent_single_chord_commands(self):
+        steps = [
+            {"index": 7, "depth": 0, "keys": "C-n", "command": "next-line"},
+            {"index": 8, "depth": 0, "keys": "C-n", "command": "next-line"},
+            {"index": 9, "depth": 0, "keys": "C-n", "command": "next-line"},
+            {"index": 10, "depth": 0, "keys": "M-w", "command": "kill-ring-save"},
+        ]
+        self.assertEqual(
+            emacs_conformance.trace_repeat_runs(steps),
+            [
+                {
+                    "start_step": 7,
+                    "end_step": 9,
+                    "count": 3,
+                    "keys": "C-n",
+                    "command": "next-line",
+                }
+            ],
+        )
+
     def test_snapshot_projection_keeps_only_the_asserted_contract(self):
         self.assertEqual(
             emacs_conformance.snapshot_projection(snapshot(2, 3)),
@@ -59,6 +79,14 @@ class EmacsConformanceTest(unittest.TestCase):
                                 "command": "forward-char",
                                 "before": snapshot(0, 0),
                                 "after": snapshot(0, 1),
+                            },
+                            {
+                                "index": 1,
+                                "depth": 0,
+                                "keys": "C-f",
+                                "command": "forward-char",
+                                "before": snapshot(0, 1),
+                                "after": snapshot(0, 2),
                             }
                         ],
                     }
@@ -71,9 +99,12 @@ class EmacsConformanceTest(unittest.TestCase):
             )
 
             case = json.loads(corpus_path.read_text(encoding="utf-8"))["cases"][0]
-            self.assertEqual(case["keys"], "C-f")
-            self.assertEqual(case["emacs"]["point"], {"row": 0, "col": 1})
+            self.assertEqual(case["keys"], "C-f C-f")
+            self.assertEqual(case["emacs"]["point"], {"row": 0, "col": 2})
             self.assertEqual(case["steps"][0]["command"], "forward-char")
+            self.assertNotIn("input_kind", case["steps"][0])
+            self.assertEqual(case["steps"][1]["input_kind"], "repeat")
+            self.assertEqual(case["recorded_with"]["repeat_runs"][0]["count"], 2)
 
     def test_import_trace_rejects_recursive_minibuffer_session(self):
         with tempfile.TemporaryDirectory() as directory:

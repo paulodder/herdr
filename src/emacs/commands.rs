@@ -134,6 +134,8 @@ pub enum EmacsBuiltin {
     PreviousLine,
     ForwardWord,
     BackwardWord,
+    ForwardSexp,
+    BackwardSexp,
     MoveBeginningOfLine,
     MoveEndOfLine,
     RecenterTopBottom,
@@ -173,6 +175,7 @@ pub enum EmacsBuiltin {
 pub const BUILTIN_NAMES: &[(EmacsBuiltin, &str)] = &[
     (EmacsBuiltin::BackwardChar, "backward-char"),
     (EmacsBuiltin::BackwardKillWord, "backward-kill-word"),
+    (EmacsBuiltin::BackwardSexp, "backward-sexp"),
     (EmacsBuiltin::BackwardWord, "backward-word"),
     (EmacsBuiltin::BeginningOfBuffer, "beginning-of-buffer"),
     (EmacsBuiltin::DeleteBackwardChar, "delete-backward-char"),
@@ -192,6 +195,7 @@ pub const BUILTIN_NAMES: &[(EmacsBuiltin, &str)] = &[
     (EmacsBuiltin::ExitTextMode, "exit-text-mode"),
     (EmacsBuiltin::Feedback, "feedback"),
     (EmacsBuiltin::ForwardChar, "forward-char"),
+    (EmacsBuiltin::ForwardSexp, "forward-sexp"),
     (EmacsBuiltin::ForwardWord, "forward-word"),
     (EmacsBuiltin::GotoLine, "goto-line"),
     (EmacsBuiltin::HerdrOnboarding, "herdr-onboarding"),
@@ -278,6 +282,8 @@ impl EmacsBuiltin {
             | Self::PreviousLine
             | Self::ForwardWord
             | Self::BackwardWord
+            | Self::ForwardSexp
+            | Self::BackwardSexp
             | Self::MoveBeginningOfLine
             | Self::MoveEndOfLine
             | Self::RecenterTopBottom
@@ -498,6 +504,8 @@ const DEFAULT_TEXT_BINDINGS: &[(&str, EmacsCommand)] = &[
     ("C-p", EmacsCommand::Builtin(EmacsBuiltin::PreviousLine)),
     ("M-f", EmacsCommand::Builtin(EmacsBuiltin::ForwardWord)),
     ("M-b", EmacsCommand::Builtin(EmacsBuiltin::BackwardWord)),
+    ("C-M-f", EmacsCommand::Builtin(EmacsBuiltin::ForwardSexp)),
+    ("C-M-b", EmacsCommand::Builtin(EmacsBuiltin::BackwardSexp)),
     (
         "C-a",
         EmacsCommand::Builtin(EmacsBuiltin::MoveBeginningOfLine),
@@ -820,6 +828,8 @@ mod tests {
             ("C-p", EmacsBuiltin::PreviousLine),
             ("M-f", EmacsBuiltin::ForwardWord),
             ("M-b", EmacsBuiltin::BackwardWord),
+            ("C-M-f", EmacsBuiltin::ForwardSexp),
+            ("C-M-b", EmacsBuiltin::BackwardSexp),
             ("C-a", EmacsBuiltin::MoveBeginningOfLine),
             ("C-e", EmacsBuiltin::MoveEndOfLine),
             ("C-l", EmacsBuiltin::RecenterTopBottom),

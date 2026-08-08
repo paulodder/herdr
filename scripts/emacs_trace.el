@@ -124,8 +124,43 @@
     (let ((result (make-hash-table :test 'equal)))
       (puthash "query" (substring-no-properties isearch-string) result)
       (puthash "direction" (if isearch-forward "forward" "backward") result)
-      (puthash "failing" (herdr-emacs-trace--json-false isearch-failing) result)
+      (puthash "failing"
+               (herdr-emacs-trace--json-false
+                (bound-and-true-p isearch-failing))
+               result)
       result)))
+
+(defun herdr-emacs-trace--json-safe (value)
+  "Return VALUE with every compound value made unambiguous to json-serialize.
+
+Emacs's encoder treats a bare Lisp list as an alist.  Some commands expose
+internal state as lists of numbers, which would otherwise fail at save time
+with `wrong-type-argument consp'."
+  (cond
+   ((hash-table-p value)
+    (let ((copy (make-hash-table :test 'equal)))
+      (maphash (lambda (key child)
+                 (puthash (if (stringp key) key (format "%s" key))
+                          (herdr-emacs-trace--json-safe child)
+                          copy))
+               value)
+      copy))
+   ((vectorp value)
+    (vconcat (mapcar #'herdr-emacs-trace--json-safe (append value nil))))
+   ((consp value)
+    (let ((remaining value)
+          items)
+      (while (consp remaining)
+        (push (herdr-emacs-trace--json-safe (car remaining)) items)
+        (setq remaining (cdr remaining)))
+      (unless (null remaining)
+        (push (herdr-emacs-trace--json-safe remaining) items))
+      (vconcat (nreverse items))))
+   ((null value) :null)
+   ((memq value '(t :false :null)) value)
+   ((symbolp value) (symbol-name value))
+   ((or (stringp value) (numberp value)) value)
+   (t (format "%S" value))))
 
 (defun herdr-emacs-trace--buffer-summary (buffer)
   (with-current-buffer buffer
@@ -307,7 +342,7 @@
         (force-mode-line-update)))
     (make-directory (file-name-directory output) t)
     (with-temp-file output
-      (insert (json-serialize document))
+      (insert (json-serialize (herdr-emacs-trace--json-safe document)))
       (insert "\n"))
     (message "Saved %d Emacs command transitions to %s"
              (length (plist-get session :steps)) output)

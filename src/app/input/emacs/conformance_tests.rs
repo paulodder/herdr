@@ -26,6 +26,7 @@ struct ConformanceCase {
 struct ConformanceStep {
     keys: String,
     command: String,
+    input_kind: Option<String>,
     emacs: ConformanceSnapshot,
     comparison: Option<String>,
     reason: Option<String>,
@@ -121,7 +122,7 @@ async fn emacs_conformance_corpus_matches() {
         text.mark_active = false;
 
         if case.steps.is_empty() {
-            replay_keys(&mut app, &case.name, &case.keys);
+            replay_keys(&mut app, &case.name, &case.keys, None);
         } else {
             let joined = case
                 .steps
@@ -135,7 +136,12 @@ async fn emacs_conformance_corpus_matches() {
                 case.name
             );
             for (index, step) in case.steps.iter().enumerate() {
-                replay_keys(&mut app, &case.name, &step.keys);
+                replay_keys(
+                    &mut app,
+                    &case.name,
+                    &step.keys,
+                    step.input_kind.as_deref(),
+                );
                 let expected = match step.comparison.as_deref().unwrap_or("exact") {
                     "exact" => {
                         assert!(
@@ -219,12 +225,25 @@ async fn emacs_conformance_corpus_matches() {
     }
 }
 
-fn replay_keys(app: &mut App, case_name: &str, keys: &str) {
+fn replay_keys(app: &mut App, case_name: &str, keys: &str, input_kind: Option<&str>) {
     let chords = crate::emacs::keymap::parse_key_seq(keys)
         .unwrap_or_else(|| panic!("{case_name}: invalid key sequence {keys:?}"));
+    if input_kind == Some("repeat") {
+        assert_eq!(
+            chords.len(),
+            1,
+            "{case_name}: repeat delivery requires a single chord"
+        );
+    } else if let Some(other) = input_kind {
+        panic!("{case_name}: unknown input kind {other:?}");
+    }
     for chord in chords {
+        let mut key = terminal_key(chord);
+        if input_kind == Some("repeat") {
+            key = key.with_kind(crossterm::event::KeyEventKind::Repeat);
+        }
         assert!(
-            app.emacs_intercept_key(terminal_key(chord)),
+            app.emacs_intercept_key(key),
             "{}: {} must be owned by Herdr TEXT mode",
             case_name,
             crate::emacs::keymap::format_seq(&[chord])

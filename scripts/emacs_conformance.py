@@ -162,7 +162,7 @@ def update(corpus_path: Path, corpus: dict[str, Any], result: dict[str, Any]) ->
             previous_steps = case["steps"]
             if len(previous_steps) == len(refreshed_steps):
                 for previous, refreshed in zip(previous_steps, refreshed_steps):
-                    for key in ("comparison", "reason", "herdr"):
+                    for key in ("comparison", "reason", "herdr", "input_kind"):
                         if key in previous:
                             refreshed[key] = previous[key]
             case["steps"] = refreshed_steps
@@ -182,13 +182,49 @@ def snapshot_projection(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def import_trace(
-    corpus_path: Path,
-    trace_path: Path,
-    name: str,
-    comparison: str,
-    reason: str | None,
-) -> None:
+def trace_repeat_runs(steps: list[dict[str, Any]], minimum: int = 2) -> list[dict[str, Any]]:
+    """Find adjacent completed commands that are candidates for key auto-repeat.
+
+    Emacs's command hooks cannot distinguish a physically held key from quick
+    manual presses. Adjacent identical single-chord commands still define the
+    right conformance obligation: Herdr must accept the first as Press and the
+    rest as Repeat without changing the resulting editor state.
+    """
+    runs: list[dict[str, Any]] = []
+    start = 0
+    while start < len(steps):
+        step = steps[start]
+        signature = (step.get("keys"), step.get("command"), step.get("depth", 0))
+        end = start + 1
+        while end < len(steps):
+            candidate = steps[end]
+            if (
+                candidate.get("keys"),
+                candidate.get("command"),
+                candidate.get("depth", 0),
+            ) != signature:
+                break
+            end += 1
+        keys = signature[0]
+        if (
+            end - start >= minimum
+            and isinstance(keys, str)
+            and len(keys.split()) == 1
+        ):
+            runs.append(
+                {
+                    "start_step": step.get("index", start),
+                    "end_step": steps[end - 1].get("index", end - 1),
+                    "count": end - start,
+                    "keys": keys,
+                    "command": signature[1],
+                }
+            )
+        start = end
+    return runs
+
+
+def load_trace(trace_path: Path) -> dict[str, Any]:
     with trace_path.open(encoding="utf-8") as file:
         trace = json.load(file)
     if trace.get("schema_version") != 1 or trace.get("kind") != "herdr-emacs-interactive-trace":
@@ -196,6 +232,38 @@ def import_trace(
     steps = trace.get("steps")
     if not isinstance(steps, list) or not steps:
         raise RuntimeError("the trace contains no completed commands")
+    return trace
+
+
+def analyze_trace(trace_path: Path) -> list[str]:
+    trace = load_trace(trace_path)
+    steps = trace["steps"]
+    lines = [
+        f"{len(steps)} completed commands; "
+        f"{len({step.get('command') for step in steps})} distinct commands"
+    ]
+    runs = trace_repeat_runs(steps)
+    if not runs:
+        lines.append("no adjacent single-key repeat candidates")
+    else:
+        for run in runs:
+            lines.append(
+                "repeat candidate: "
+                f"steps {run['start_step']}-{run['end_step']}: "
+                f"{run['keys']} -> {run['command']} x{run['count']}"
+            )
+    return lines
+
+
+def import_trace(
+    corpus_path: Path,
+    trace_path: Path,
+    name: str,
+    comparison: str,
+    reason: str | None,
+) -> None:
+    trace = load_trace(trace_path)
+    steps = trace["steps"]
     if any(
         step.get("depth", 0) != 0
         or step.get("before", {}).get("minibuffer") is not None
@@ -221,18 +289,23 @@ def import_trace(
     initial = trace["initial_state"]
     projected_steps = []
     key_sequences = []
+    previous_repeat_signature: tuple[str, str] | None = None
     for step in steps:
         keys = step.get("keys")
         if not isinstance(keys, str) or not keys:
             raise RuntimeError(f"trace step {step.get('index', '?')} has no canonical keys")
         key_sequences.append(keys)
-        projected_steps.append(
-            {
-                "keys": keys,
-                "command": step.get("command", "unknown"),
-                "emacs": snapshot_projection(step["after"]),
-            }
-        )
+        command = step.get("command", "unknown")
+        projected_step = {
+            "keys": keys,
+            "command": command,
+            "emacs": snapshot_projection(step["after"]),
+        }
+        repeat_signature = (keys, command)
+        if len(keys.split()) == 1 and repeat_signature == previous_repeat_signature:
+            projected_step["input_kind"] = "repeat"
+        projected_steps.append(projected_step)
+        previous_repeat_signature = repeat_signature if len(keys.split()) == 1 else None
 
     case = {
         "name": name,
@@ -248,6 +321,7 @@ def import_trace(
         "recorded_with": {
             "emacs_version": trace["reference"]["emacs_version"],
             "source_sha256": trace["source"]["sha256"],
+            "repeat_runs": trace_repeat_runs(steps),
         },
     }
     corpus["cases"].append(case)
@@ -290,7 +364,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "action",
-        choices=("verify", "update", "record", "import-trace"),
+        choices=("verify", "update", "record", "analyze-trace", "import-trace"),
         nargs="?",
         default="verify",
     )
@@ -320,6 +394,12 @@ def main() -> int:
                 args.terminal,
             )
             print(f"recorded {args.output.resolve()}")
+            return 0
+        if args.action == "analyze-trace":
+            if args.input is None:
+                raise RuntimeError("analyze-trace requires TRACE.json")
+            for line in analyze_trace(args.input.resolve()):
+                print(line)
             return 0
         if args.action == "import-trace":
             if args.input is None or not args.name:
