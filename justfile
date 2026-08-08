@@ -24,6 +24,10 @@ emacs-conformance-update:
 emacs-record input output row='0' col='0':
     python3 scripts/emacs_conformance.py record "{{input}}" --output "{{output}}" --row "{{row}}" --col "{{col}}"
 
+# Summarize command coverage and held-key repeat candidates in a trace.
+emacs-trace-analyze trace:
+    python3 scripts/emacs_conformance.py analyze-trace "{{trace}}"
+
 # Add a recorded session as an exact, step-by-step conformance case.
 emacs-conformance-import trace name:
     python3 scripts/emacs_conformance.py import-trace "{{trace}}" --name "{{name}}"

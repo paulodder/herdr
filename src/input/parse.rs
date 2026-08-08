@@ -640,6 +640,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_kitty_ctrl_n_repeat_sequence() {
+        let key = parse_terminal_key_sequence("\x1b[110;5:2u").unwrap();
+        assert_eq!(key.code, KeyCode::Char('n'));
+        assert_eq!(key.modifiers, KeyModifiers::CONTROL);
+        assert_eq!(key.kind, crossterm::event::KeyEventKind::Repeat);
+    }
+
+    #[test]
     fn parse_ghostty_enhanced_up_arrow_press_sequence() {
         let key = parse_terminal_key_sequence("\x1b[1;1:1A").unwrap();
         assert_eq!(key.code, KeyCode::Up);

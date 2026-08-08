@@ -1007,6 +1007,47 @@ mod tests {
     }
 
     #[test]
+    fn frames_held_kitty_ctrl_n_as_press_repeats_and_release() {
+        let events = parse_raw_input_bytes_sync(
+            b"\x1b[110;5:1u\x1b[110;5:2u\x1b[110;5:2u\x1b[110;5:3u",
+        );
+        let kinds = events
+            .into_iter()
+            .map(|event| match event {
+                RawInputEvent::Key(key) => {
+                    assert_eq!(key.code, KeyCode::Char('n'));
+                    assert_eq!(key.modifiers, KeyModifiers::CONTROL);
+                    key.kind
+                }
+                _ => panic!("expected key"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                KeyEventKind::Press,
+                KeyEventKind::Repeat,
+                KeyEventKind::Repeat,
+                KeyEventKind::Release,
+            ]
+        );
+    }
+
+    #[test]
+    fn frames_held_legacy_ctrl_n_as_repeated_presses() {
+        let events = parse_raw_input_bytes_sync(b"\x0e\x0e\x0e");
+        assert_eq!(events.len(), 3);
+        for event in events {
+            let RawInputEvent::Key(key) = event else {
+                panic!("expected key");
+            };
+            assert_eq!(key.code, KeyCode::Char('n'));
+            assert_eq!(key.modifiers, KeyModifiers::CONTROL);
+            assert_eq!(key.kind, KeyEventKind::Press);
+        }
+    }
+
+    #[test]
     fn parses_bracketed_paste() {
         let (RawInputEvent::Paste(text), consumed) =
             extract_one_event(b"\x1b[200~hello\x1b[201~rest").unwrap()

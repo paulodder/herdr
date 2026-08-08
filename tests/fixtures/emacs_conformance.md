@@ -36,6 +36,19 @@ completed command's canonical key sequence,
 individual key event descriptions, command identity, and before/after state.
 It is useful on its own when diagnosing a mismatch.
 
+Analyze it before importing. This reports command coverage and adjacent
+single-key runs that must also work through terminal auto-repeat:
+
+```bash
+python3 scripts/emacs_conformance.py analyze-trace /tmp/my-motion.json
+```
+
+For example, a held `C-n` is reported as a repeat candidate with its exact
+step range and count. Emacs command hooks cannot prove whether the key was
+physically held or pressed quickly, so imported runs deliberately enforce the
+stronger contract: the first command is delivered as a key press and every
+adjacent identical command as a repeat event.
+
 To turn a simple, non-minibuffer trace into a permanent parity test:
 
 ```bash
@@ -73,6 +86,11 @@ redisplay objects:
   direction, and failure state;
 - transition identity: canonical keys, constituent key event descriptions,
   Emacs command, nesting relationship, and complete before/after snapshots.
+
+The parity runner additionally supports `"input_kind": "repeat"` on a
+single-chord step. Interactive imports add this automatically to adjacent
+identical commands, which keeps keyboard delivery semantics in the test rather
+than reducing every completed command to an independent press.
 
 This deliberately excludes pixel-level redisplay, overlays, faces, and other
 Emacs internals that Herdr TEXT mode neither exposes nor implements. Add an
