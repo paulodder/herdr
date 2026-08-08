@@ -35,6 +35,8 @@ use crossterm::execute;
 use interprocess::local_socket::traits::Stream as _;
 use interprocess::TryClone as _;
 use tracing::{debug, info, warn};
+#[cfg(unix)]
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::ipc::LocalStream;
 use crate::protocol::render_ansi;
@@ -61,6 +63,8 @@ struct ClientLoopConfig {
     host_cursor: crate::config::HostCursorModeConfig,
     kitty_graphics_enabled: bool,
     mouse_capture_active: bool,
+    #[cfg(unix)]
+    palette: crate::app::state::Palette,
     #[cfg(unix)]
     remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
 }
@@ -89,6 +93,39 @@ struct ClientState {
     redraw_on_focus_gained: bool,
     /// Whether this client draws the cursor into frame cells instead of using the host cursor.
     draw_host_cursor: bool,
+    /// Last authoritative semantic frame, before client-local overlays.
+    #[cfg(unix)]
+    last_semantic_frame: Option<crate::protocol::FrameData>,
+    /// First-connect progress owned by this client, not either server runtime.
+    #[cfg(unix)]
+    federation_connecting: Option<FederationConnectingUi>,
+    #[cfg(unix)]
+    palette: crate::app::state::Palette,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FederationConnectingUi {
+    member_label: String,
+    tick: u64,
+}
+
+#[cfg(unix)]
+impl FederationConnectingUi {
+    fn for_plan(plan: FederationConnectionPlan, member_label: &str) -> Option<Self> {
+        (plan == FederationConnectionPlan::New).then(|| Self {
+            member_label: member_label.to_string(),
+            tick: 0,
+        })
+    }
+
+    fn message(&self) -> String {
+        format!("Connecting to {}\u{2026}", self.member_label)
+    }
+
+    fn finish(active: &mut Option<Self>) -> bool {
+        active.take().is_some()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1407,6 +1444,8 @@ fn run_client_with_mode(
         kitty_graphics_enabled,
         mouse_capture_active: mouse_capture,
         #[cfg(unix)]
+        palette: client_palette(&loaded_config.config.theme),
+        #[cfg(unix)]
         remote_image_paste_key,
     };
 
@@ -1543,6 +1582,17 @@ fn run_client_with_mode(
 }
 
 #[cfg(unix)]
+fn client_palette(theme: &crate::config::ThemeConfig) -> crate::app::state::Palette {
+    let name = theme.name.as_deref().unwrap_or("catppuccin");
+    let mut palette = crate::app::state::Palette::from_name(name)
+        .unwrap_or_else(crate::app::state::Palette::catppuccin);
+    if let Some(custom) = &theme.custom {
+        palette = palette.with_overrides(custom);
+    }
+    palette
+}
+
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FederationConnectionPlan {
     Current,
@@ -1565,6 +1615,144 @@ fn federation_connection_plan<'a>(
             FederationConnectionPlan::New,
             FederationConnectionPlan::Suspended,
         )
+}
+
+#[cfg(unix)]
+fn federation_connecting_frame(
+    base: &crate::protocol::FrameData,
+    connecting: &FederationConnectingUi,
+    palette: &crate::app::state::Palette,
+) -> crate::protocol::FrameData {
+    use ratatui::style::Modifier;
+
+    let mut frame = base.clone();
+    frame.cursor = frame.cursor.map(|mut cursor| {
+        cursor.visible = false;
+        cursor
+    });
+    frame.graphics.clear();
+    if frame.width < 12 || frame.height < 3 {
+        return frame;
+    }
+
+    let max_content_width = frame.width.saturating_sub(6) as usize;
+    let message = crate::ui::text::truncate_end(&connecting.message(), max_content_width);
+    let message_width = UnicodeWidthStr::width(message.as_str()) as u16;
+    let popup_width = message_width.saturating_add(4).min(frame.width);
+    let x = frame.width.saturating_sub(popup_width) / 2;
+    let y = frame.height.saturating_sub(3) / 2;
+    let bg = crate::protocol::color_to_u32(palette.panel_bg);
+    let border_fg = crate::protocol::color_to_u32(palette.accent);
+    let text_fg = crate::protocol::color_to_u32(palette.text);
+    let bold = crate::protocol::modifier_to_u16(Modifier::BOLD);
+
+    let mut put = |column: u16, row: u16, symbol: &str, fg: u32, modifier: u16, skip: bool| {
+        let index = (row as usize)
+            .saturating_mul(frame.width as usize)
+            .saturating_add(column as usize);
+        if let Some(cell) = frame.cells.get_mut(index) {
+            cell.symbol = symbol.to_string();
+            cell.fg = fg;
+            cell.bg = bg;
+            cell.modifier = modifier;
+            cell.skip = skip;
+            cell.hyperlink = None;
+        }
+    };
+
+    for row in y..y.saturating_add(3) {
+        for column in x..x.saturating_add(popup_width) {
+            put(column, row, " ", text_fg, 0, false);
+        }
+    }
+    put(x, y, "\u{256d}", border_fg, 0, false);
+    put(x + popup_width - 1, y, "\u{256e}", border_fg, 0, false);
+    put(x, y + 1, "\u{2502}", border_fg, 0, false);
+    put(x + popup_width - 1, y + 1, "\u{2502}", border_fg, 0, false);
+    put(x, y + 2, "\u{2570}", border_fg, 0, false);
+    put(x + popup_width - 1, y + 2, "\u{256f}", border_fg, 0, false);
+    for column in x + 1..x + popup_width - 1 {
+        put(column, y, "\u{2500}", border_fg, 0, false);
+        put(column, y + 2, "\u{2500}", border_fg, 0, false);
+    }
+
+    let spinner = ["\u{25d0}", "\u{25d3}", "\u{25d1}", "\u{25d2}"][(connecting.tick as usize) % 4];
+    put(x + 1, y + 1, spinner, border_fg, bold, false);
+    let mut column = x + 3;
+    for ch in message.chars() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+        if width == 0 || column.saturating_add(width) > x + popup_width - 1 {
+            continue;
+        }
+        let mut encoded = [0_u8; 4];
+        put(
+            column,
+            y + 1,
+            ch.encode_utf8(&mut encoded),
+            text_fg,
+            bold,
+            false,
+        );
+        if width == 2 {
+            let trailing = column + 1;
+            put(trailing, y + 1, " ", text_fg, bold, true);
+        }
+        column = column.saturating_add(width);
+    }
+    frame
+}
+
+#[cfg(unix)]
+fn display_semantic_frame(
+    state: &mut ClientState,
+    frame: crate::protocol::FrameData,
+    remember_authoritative: bool,
+) {
+    if remember_authoritative {
+        state.last_semantic_frame = Some(frame.clone());
+    }
+    let frame = state
+        .federation_connecting
+        .as_ref()
+        .map_or(frame.clone(), |connecting| {
+            federation_connecting_frame(&frame, connecting, &state.palette)
+        });
+    let encoded = if state.draw_host_cursor {
+        state
+            .blit_encoder
+            .encode_with_suppressed_visible_cursor(&frame, false)
+    } else {
+        state.blit_encoder.encode(&frame, false)
+    };
+    let mut stdout = io::stdout();
+    let graphics = if state.kitty_graphics_enabled {
+        frame.graphics.as_slice()
+    } else {
+        &[]
+    };
+    let _ = write_encoded_frame_with_graphics(&mut stdout, &encoded.bytes, graphics);
+    let _ = stdout.flush();
+    state.blit_encoder.commit(frame, encoded);
+}
+
+#[cfg(unix)]
+fn redraw_connecting_ui(state: &mut ClientState) {
+    let Some(frame) = state.last_semantic_frame.clone() else {
+        return;
+    };
+    display_semantic_frame(state, frame, false);
+}
+
+#[cfg(unix)]
+fn clear_connecting_ui(state: &mut ClientState, restore_source: bool) {
+    if !FederationConnectingUi::finish(&mut state.federation_connecting) {
+        return;
+    }
+    if restore_source {
+        if let Some(frame) = state.last_semantic_frame.clone() {
+            display_semantic_frame(state, frame, false);
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -1764,6 +1952,12 @@ async fn run_client_loop(
         remote_image_paste_key: config.remote_image_paste_key,
         redraw_on_focus_gained: config.redraw_on_focus_gained,
         draw_host_cursor,
+        #[cfg(unix)]
+        last_semantic_frame: None,
+        #[cfg(unix)]
+        federation_connecting: None,
+        #[cfg(unix)]
+        palette: config.palette,
     };
     debug!(?negotiated_encoding, "client render encoding active");
     let host_mouse_capture_active = Arc::new(AtomicBool::new(state.mouse_capture_active));
@@ -2198,6 +2392,7 @@ async fn run_client_loop(
                             }
                             active_window_title = resumed_window_title;
                             active_prefix_input_source_active = resumed_prefix_input_source_active;
+                            clear_connecting_ui(&mut state, false);
                             state.request_full_redraw();
                             let (cols, rows, cell_width_px, cell_height_px) =
                                 current_terminal_geometry(state.kitty_graphics_enabled);
@@ -2225,6 +2420,7 @@ async fn run_client_loop(
                                 "federation member activation accepted"
                             );
                         } else {
+                            clear_connecting_ui(&mut state, pending.retain_current);
                             let detail = error.clone().unwrap_or_else(|| {
                                 format!(
                                     "receiver identity was {member_id}/{server_id}/{session_id}"
@@ -2314,26 +2510,31 @@ async fn run_client_loop(
                         } else {
                             frame_data
                         };
-                        let encoded = if state.draw_host_cursor {
-                            state
-                                .blit_encoder
-                                .encode_with_suppressed_visible_cursor(&frame_data, false)
-                        } else {
-                            state.blit_encoder.encode(&frame_data, false)
-                        };
-                        let mut stdout = io::stdout();
-                        let graphics = if state.kitty_graphics_enabled {
-                            frame_data.graphics.as_slice()
-                        } else {
-                            &[]
-                        };
-                        let _ = write_encoded_frame_with_graphics(
-                            &mut stdout,
-                            &encoded.bytes,
-                            graphics,
-                        );
-                        let _ = stdout.flush();
-                        state.blit_encoder.commit(frame_data, encoded);
+                        #[cfg(unix)]
+                        display_semantic_frame(&mut state, frame_data, true);
+                        #[cfg(windows)]
+                        {
+                            let encoded = if state.draw_host_cursor {
+                                state
+                                    .blit_encoder
+                                    .encode_with_suppressed_visible_cursor(&frame_data, false)
+                            } else {
+                                state.blit_encoder.encode(&frame_data, false)
+                            };
+                            let mut stdout = io::stdout();
+                            let graphics = if state.kitty_graphics_enabled {
+                                frame_data.graphics.as_slice()
+                            } else {
+                                &[]
+                            };
+                            let _ = write_encoded_frame_with_graphics(
+                                &mut stdout,
+                                &encoded.bytes,
+                                graphics,
+                            );
+                            let _ = stdout.flush();
+                            state.blit_encoder.commit(frame_data, encoded);
+                        }
                     }
                     ServerMessage::Terminal(frame) => {
                         if state.kitty_graphics_enabled
@@ -2620,6 +2821,11 @@ async fn run_client_loop(
                             }
                             let target = authoritative.endpoint.target.clone();
                             let session = authoritative.endpoint.session.clone();
+                            let member_label = authoritative
+                                .endpoint
+                                .label
+                                .clone()
+                                .unwrap_or_else(|| endpoint_id.clone());
                             if pending_federation_activation.is_some() {
                                 handle_notify(
                                     NotifyKind::Toast,
@@ -2654,6 +2860,10 @@ async fn run_client_loop(
                                 state.request_full_redraw();
                                 continue;
                             }
+
+                            state.federation_connecting =
+                                FederationConnectingUi::for_plan(plan, &member_label);
+                            redraw_connecting_ui(&mut state);
 
                             let switch_result = match plan {
                                 FederationConnectionPlan::Suspended(index) => {
@@ -2721,15 +2931,26 @@ async fn run_client_loop(
                                     let request_id = next_activation_request_id;
                                     next_activation_request_id =
                                         next_activation_request_id.wrapping_add(1);
-                                    activate_federation_connection(
+                                    if let Err(err) = activate_federation_connection(
                                         &mut resumed.stream,
                                         request_id,
                                         &endpoint_id,
                                         resource.clone(),
                                         &federation_directory,
                                         Some(presentation),
-                                    )
-                                    .map_err(ClientError::ConnectionLost)?;
+                                    ) {
+                                        clear_connecting_ui(&mut state, true);
+                                        warn!(endpoint_id, target, %err, "federation activation request failed; keeping current connection");
+                                        handle_notify(
+                                            NotifyKind::Toast,
+                                            "Could not open remote Herdr",
+                                            Some(&format!(
+                                                "{endpoint_id}: {err}. The current Herdr connection is still active."
+                                            )),
+                                            &state.sound_config,
+                                        );
+                                        continue;
+                                    }
                                     let resumed_id = resumed.connection_id;
                                     let reconnected_encoding = resumed.reconnected_encoding;
                                     pending_federation_activation =
@@ -2761,6 +2982,7 @@ async fn run_client_loop(
                                     );
                                 }
                                 Err(err) => {
+                                    clear_connecting_ui(&mut state, true);
                                     warn!(endpoint_id, target, %err, "federation connection switch failed; keeping current connection");
                                     handle_notify(
                                         NotifyKind::Toast,
@@ -2828,6 +3050,7 @@ async fn run_client_loop(
                     let pending = pending_federation_activation
                         .take()
                         .expect("pending connection id checked above");
+                    clear_connecting_ui(&mut state, pending.retain_current);
                     warn!(
                         endpoint_id = pending.endpoint_id,
                         "pending federation activation disconnected"
@@ -2909,6 +3132,14 @@ async fn run_client_loop(
             }
             ClientLoopEvent::Timer => {
                 #[cfg(unix)]
+                if pending_federation_activation.is_some() && state.federation_connecting.is_some()
+                {
+                    if let Some(connecting) = state.federation_connecting.as_mut() {
+                        connecting.tick = connecting.tick.wrapping_add(1);
+                    }
+                    redraw_connecting_ui(&mut state);
+                }
+                #[cfg(unix)]
                 if active_connection_id != directory_authority_connection_id
                     && pending_directory_authority_connection_id.is_none()
                     && next_directory_authority_reconnect_at
@@ -2959,6 +3190,7 @@ async fn run_client_loop(
                     let mut pending = pending_federation_activation
                         .take()
                         .expect("expired activation checked above");
+                    clear_connecting_ui(&mut state, pending.retain_current);
                     let _ = write_to_server(
                         &mut pending.connection.stream,
                         &ClientMessage::FederationSuspend,
@@ -4396,6 +4628,86 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["stl-agents-1", "x1"]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn first_federation_dial_shows_connecting_until_activation_finishes() {
+        let mut connecting =
+            FederationConnectingUi::for_plan(FederationConnectionPlan::New, "STL workbench");
+
+        assert_eq!(
+            connecting.as_ref().map(FederationConnectingUi::message),
+            Some("Connecting to STL workbench\u{2026}".into())
+        );
+        assert!(FederationConnectingUi::finish(&mut connecting));
+        assert!(connecting.is_none(), "ACK or failure must clear the state");
+        assert!(!FederationConnectingUi::finish(&mut connecting));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_federation_connection_skips_connecting_ui() {
+        assert!(FederationConnectingUi::for_plan(
+            FederationConnectionPlan::Suspended(0),
+            "STL workbench"
+        )
+        .is_none());
+        assert!(FederationConnectingUi::for_plan(
+            FederationConnectionPlan::Current,
+            "STL workbench"
+        )
+        .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn connecting_overlay_preserves_the_source_frame_outside_its_panel() {
+        let base_cell = crate::protocol::CellData {
+            symbol: "s".into(),
+            fg: crate::protocol::color_to_u32(ratatui::style::Color::Green),
+            bg: crate::protocol::color_to_u32(ratatui::style::Color::Black),
+            modifier: 0,
+            skip: false,
+            hyperlink: None,
+        };
+        let base = crate::protocol::FrameData {
+            cells: vec![base_cell; 60 * 11],
+            width: 60,
+            height: 11,
+            cursor: Some(crate::protocol::CursorState {
+                x: 2,
+                y: 3,
+                visible: true,
+                shape: 2,
+            }),
+            hyperlinks: Vec::new(),
+            graphics: b"source-graphics".to_vec(),
+        };
+        let connecting =
+            FederationConnectingUi::for_plan(FederationConnectionPlan::New, "STL workbench")
+                .expect("cold connection should have UI");
+
+        let overlay = federation_connecting_frame(
+            &base,
+            &connecting,
+            &crate::app::state::Palette::catppuccin(),
+        );
+
+        assert_eq!(base.cells[0].symbol, "s");
+        assert_eq!(overlay.cells[0], base.cells[0]);
+        assert_eq!(overlay.cells[overlay.cells.len() - 1], base.cells[0]);
+        assert_eq!(
+            overlay.cursor.as_ref().map(|cursor| cursor.visible),
+            Some(false)
+        );
+        assert!(overlay.graphics.is_empty());
+        let rendered = overlay
+            .cells
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect::<String>();
+        assert!(rendered.contains("Connecting to STL workbench\u{2026}"));
     }
 
     #[cfg(unix)]

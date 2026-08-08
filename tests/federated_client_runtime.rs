@@ -22,6 +22,7 @@ use support::{
 const REMOTE_SESSION: &str = "federated-e2e";
 const REMOTE_WORKSPACE: &str = "federation-test";
 const REMOTE_LOCATION: &str = "stl-agents-1";
+const REMOTE_CONNECTING: &str = "Connecting to STL workbench\u{2026}";
 const REMOTE_MARKER: &str = "HERDR_FEDERATED_REMOTE_MARKER";
 const HOME_MARKER: &str = "HERDR_FEDERATED_HOME_MARKER";
 const HOME_AFTER_FAILED_SWITCH: &str = "HERDR_HOME_AFTER_FAILED_FEDERATION_SWITCH";
@@ -54,6 +55,49 @@ fn app_dir_name() -> &'static str {
     } else {
         "herdr"
     }
+}
+
+fn terminal_text_payload(output: &str) -> String {
+    let bytes = output.as_bytes();
+    let mut text = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != 0x1b {
+            text.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        index += 1;
+        match bytes.get(index).copied() {
+            Some(b'[') => {
+                index += 1;
+                while index < bytes.len() {
+                    let byte = bytes[index];
+                    index += 1;
+                    if (0x40..=0x7e).contains(&byte) {
+                        break;
+                    }
+                }
+            }
+            Some(b']') => {
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == 0x07 {
+                        index += 1;
+                        break;
+                    }
+                    if bytes[index] == 0x1b && bytes.get(index + 1) == Some(&b'\\') {
+                        index += 2;
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+            Some(_) => index += 1,
+            None => {}
+        }
+    }
+    String::from_utf8_lossy(&text).into_owned()
 }
 
 struct SpawnedHerdr {
@@ -655,6 +699,7 @@ member_target = "fake-home"
 [[federation.endpoints]]
 id = "stl-agents-1"
 target = "fake-host"
+label = "STL workbench"
 session = "{REMOTE_SESSION}"
 enabled = true
 "#
@@ -695,7 +740,6 @@ enabled = true
         Duration::from_secs(15),
         &diagnostic_logs,
     );
-
     fs::write(&fail_bridge, b"fail the first activation").expect("arm bridge failure");
     clear_output(&output_rx, &mut output);
     navigate_to(&mut client, REMOTE_WORKSPACE);
@@ -708,6 +752,10 @@ enabled = true
         HOME_AFTER_FAILED_SWITCH,
         Duration::from_secs(15),
         &diagnostic_logs,
+    );
+    assert!(
+        terminal_text_payload(&output).contains(REMOTE_CONNECTING),
+        "a cold failed dial should expose its real connecting state"
     );
     assert_eq!(client.child.process_id(), Some(client_pid));
     assert_eq!(bridge_launch_count(&ssh_log), 1);
@@ -722,6 +770,10 @@ enabled = true
         REMOTE_MARKER,
         Duration::from_secs(20),
         &diagnostic_logs,
+    );
+    assert!(
+        terminal_text_payload(&output).contains(REMOTE_CONNECTING),
+        "a cold successful dial should remain visibly connecting until activation"
     );
     assert_eq!(client.child.process_id(), Some(client_pid));
     assert!(
@@ -759,6 +811,10 @@ enabled = true
         REMOTE_MARKER,
         Duration::from_secs(15),
         &diagnostic_logs,
+    );
+    assert!(
+        !terminal_text_payload(&output).contains(REMOTE_CONNECTING),
+        "a retained connection should switch without a visible loading state"
     );
     assert_eq!(
         bridge_launch_count(&ssh_log),

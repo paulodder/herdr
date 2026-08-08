@@ -18,7 +18,7 @@ mod settings;
 mod sidebar;
 mod status;
 mod tabs;
-mod text;
+pub(crate) mod text;
 mod widgets;
 
 use self::dialogs::{
