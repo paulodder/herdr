@@ -1201,9 +1201,11 @@ mod tests {
             agent: agent_label.and_then(crate::detect::parse_agent_label),
             state: AgentState::Idle,
             seen: true,
-            last_agent_state_change_seq: None,
             state_labels: std::collections::HashMap::new(),
             tokens: std::collections::HashMap::new(),
+            workspace_order: 0,
+            tab_order: 0,
+            pane_order: 0,
         }
     }
 

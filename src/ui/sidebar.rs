@@ -79,9 +79,13 @@ pub(crate) struct AgentPanelEntry {
     pub agent: Option<crate::detect::Agent>,
     pub state: AgentState,
     pub seen: bool,
-    pub last_agent_state_change_seq: Option<u64>,
     pub state_labels: std::collections::HashMap<String, String>,
     pub tokens: std::collections::HashMap<String, String>,
+    /// Canonical directory position, independent of which federation member
+    /// currently renders this entry as local.
+    pub(crate) workspace_order: usize,
+    pub(crate) tab_order: usize,
+    pub(crate) pane_order: usize,
 }
 
 fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
@@ -200,9 +204,11 @@ fn agent_panel_entries_with_runtimes(
                         agent: detail.agent,
                         state: detail.state,
                         seen: detail.seen,
-                        last_agent_state_change_seq: detail.last_agent_state_change_seq,
                         state_labels: detail.state_labels,
                         tokens: detail.tokens,
+                        workspace_order: ws_idx,
+                        tab_order: detail.tab_idx,
+                        pane_order: ws.public_pane_number(detail.pane_id).unwrap_or(usize::MAX),
                     }
                 })
         })
@@ -219,16 +225,21 @@ fn agent_panel_entries_with_runtimes(
         };
         let mut remote_entries = Vec::new();
         for agent in &snapshot.agents {
-            let workspace = snapshot
+            let Some((workspace_order, workspace)) = snapshot
                 .workspaces
                 .iter()
-                .find(|workspace| workspace.workspace_id == agent.workspace_id);
-            let tab = snapshot.tabs.iter().find(|tab| tab.tab_id == agent.tab_id);
-            let Some(workspace) = workspace else {
+                .enumerate()
+                .find(|(_, workspace)| workspace.workspace_id == agent.workspace_id)
+            else {
                 continue;
             };
+            let tab = snapshot
+                .tabs
+                .iter()
+                .enumerate()
+                .find(|(_, tab)| tab.tab_id == agent.tab_id);
             let multi_tab = workspace.tab_count > 1;
-            let tab_label = tab.map(|tab| {
+            let tab_label = tab.map(|(_, tab)| {
                 crate::metadata_tokens::unqualified_name(&tab.label, &endpoint.endpoint.id)
                     .to_string()
             });
@@ -263,9 +274,15 @@ fn agent_panel_entries_with_runtimes(
                 agent: parsed_agent,
                 state,
                 seen,
-                last_agent_state_change_seq: Some(agent.revision),
                 state_labels: agent.state_labels.clone(),
                 tokens: agent.tokens.clone(),
+                workspace_order,
+                tab_order: tab.map_or(usize::MAX, |(index, _)| index),
+                pane_order: snapshot
+                    .panes
+                    .iter()
+                    .position(|pane| pane.pane_id == agent.pane_id)
+                    .unwrap_or(usize::MAX),
             });
         }
         entries_by_member.insert(endpoint.endpoint.id.clone(), remote_entries);
@@ -273,15 +290,17 @@ fn agent_panel_entries_with_runtimes(
 
     let mut entries: Vec<_> = entries_by_member.into_values().flatten().collect();
 
-    if matches!(app.agent_panel_sort, AgentPanelSort::Priority) {
-        entries.sort_by_key(|entry| {
-            (
-                std::cmp::Reverse(workspace_attention_priority(entry.state, entry.seen)),
-                entry.location.clone(),
-                std::cmp::Reverse(entry.last_agent_state_change_seq),
-            )
-        });
-    }
+    entries.sort_by_key(|entry| {
+        let priority = matches!(app.agent_panel_sort, AgentPanelSort::Priority)
+            .then(|| std::cmp::Reverse(workspace_attention_priority(entry.state, entry.seen)));
+        (
+            priority,
+            entry.location.clone(),
+            entry.workspace_order,
+            entry.tab_order,
+            entry.pane_order,
+        )
+    });
 
     entries
 }
@@ -2671,6 +2690,22 @@ mod tests {
         set_state(&mut app, 1, AgentState::Idle);
         set_state(&mut app, 2, AgentState::Working);
         set_state(&mut app, 3, AgentState::Blocked);
+        let working_terminal = |app: &crate::app::state::AppState, ws_idx: usize| {
+            let pane = app.workspaces[ws_idx].tabs[0].root_pane;
+            app.workspaces[ws_idx].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone()
+        };
+        let first_working = working_terminal(&app, 0);
+        let later_working = working_terminal(&app, 2);
+        app.terminals
+            .get_mut(&first_working)
+            .unwrap()
+            .last_agent_state_change_seq = Some(1);
+        app.terminals
+            .get_mut(&later_working)
+            .unwrap()
+            .last_agent_state_change_seq = Some(99);
 
         let done_pane = app.workspaces[1].tabs[0].root_pane;
         app.workspaces[1].tabs[0]
@@ -2684,7 +2719,11 @@ mod tests {
             .map(|entry| entry.primary_label)
             .collect();
 
-        assert_eq!(labels, ["four", "two", "one", "three"]);
+        assert_eq!(
+            labels,
+            ["four", "two", "one", "three"],
+            "equal-priority agents keep canonical workspace order instead of reshuffling by runtime-local revision"
+        );
     }
 
     #[test]

@@ -914,6 +914,98 @@ fn upsert_by<T>(items: &mut Vec<T>, item: T, same: impl Fn(&T, &T) -> bool) {
     }
 }
 
+fn snapshot_agent_status_priority(status: crate::api::schema::AgentStatus) -> u8 {
+    use crate::api::schema::AgentStatus;
+
+    match status {
+        AgentStatus::Blocked => 4,
+        AgentStatus::Done => 3,
+        AgentStatus::Working => 2,
+        AgentStatus::Idle => 1,
+        AgentStatus::Unknown => 0,
+    }
+}
+
+fn agent_info_from_pane(pane: &crate::api::schema::PaneInfo) -> crate::api::schema::AgentInfo {
+    crate::api::schema::AgentInfo {
+        terminal_id: pane.terminal_id.clone(),
+        name: None,
+        agent: pane.agent.clone(),
+        title: pane.title.clone(),
+        terminal_title: pane.terminal_title.clone(),
+        terminal_title_stripped: pane.terminal_title_stripped.clone(),
+        display_agent: pane.display_agent.clone(),
+        agent_status: pane.agent_status,
+        screen_detection_skipped: false,
+        state_labels: pane.state_labels.clone(),
+        tokens: pane.tokens.clone(),
+        agent_session: pane.agent_session.clone(),
+        workspace_id: pane.workspace_id.clone(),
+        tab_id: pane.tab_id.clone(),
+        pane_id: pane.pane_id.clone(),
+        focused: pane.focused,
+        cwd: pane.cwd.clone(),
+        foreground_cwd: pane.foreground_cwd.clone(),
+        revision: pane.revision,
+    }
+}
+
+fn sync_agent_info_from_pane(
+    agent: &mut crate::api::schema::AgentInfo,
+    pane: &crate::api::schema::PaneInfo,
+) {
+    // Preserve agent-only metadata (`name` and detection authority), but source
+    // every live presentation/status field from the pane event stream.
+    let name = agent.name.clone();
+    let screen_detection_skipped = agent.screen_detection_skipped;
+    *agent = agent_info_from_pane(pane);
+    agent.name = name;
+    agent.screen_detection_skipped = screen_detection_skipped;
+}
+
+fn reconcile_snapshot_agents(snapshot: &mut SessionSnapshot) {
+    snapshot.agents.retain(|agent| {
+        snapshot
+            .panes
+            .iter()
+            .any(|pane| pane.pane_id == agent.pane_id)
+    });
+
+    for pane in &snapshot.panes {
+        if let Some(agent) = snapshot
+            .agents
+            .iter_mut()
+            .find(|agent| agent.pane_id == pane.pane_id)
+        {
+            sync_agent_info_from_pane(agent, pane);
+        } else if pane.agent.is_some()
+            || pane.display_agent.is_some()
+            || pane.agent_session.is_some()
+        {
+            snapshot.agents.push(agent_info_from_pane(pane));
+        }
+    }
+
+    for tab in &mut snapshot.tabs {
+        tab.agent_status = snapshot
+            .panes
+            .iter()
+            .filter(|pane| pane.tab_id == tab.tab_id)
+            .map(|pane| pane.agent_status)
+            .max_by_key(|status| snapshot_agent_status_priority(*status))
+            .unwrap_or(crate::api::schema::AgentStatus::Unknown);
+    }
+    for workspace in &mut snapshot.workspaces {
+        workspace.agent_status = snapshot
+            .panes
+            .iter()
+            .filter(|pane| pane.workspace_id == workspace.workspace_id)
+            .map(|pane| pane.agent_status)
+            .max_by_key(|status| snapshot_agent_status_priority(*status))
+            .unwrap_or(crate::api::schema::AgentStatus::Unknown);
+    }
+}
+
 /// Reduce a sequenced event into a cached snapshot used by the combined navigator.
 pub fn apply_event(snapshot: &mut SessionSnapshot, envelope: &SequencedEventEnvelope) {
     match &envelope.event.data {
@@ -1111,6 +1203,10 @@ pub fn apply_event(snapshot: &mut SessionSnapshot, envelope: &SequencedEventEnve
             })
         }
     }
+    // Session-watch deltas carry pane-level lifecycle/status changes. Keep the
+    // cached agent list and workspace/tab aggregates derived from those panes
+    // so an inactive federation member remains as live as the active one.
+    reconcile_snapshot_agents(snapshot);
 }
 
 #[cfg(test)]
@@ -1349,5 +1445,121 @@ mod tests {
         assert!(error
             .to_string()
             .contains("reported federation member local"));
+    }
+
+    #[test]
+    fn watched_pane_events_keep_inactive_agent_projection_live() {
+        use crate::api::schema::{
+            AgentStatus, EventEnvelope, EventKind, PaneInfo, TabInfo, WorkspaceInfo,
+        };
+
+        let pane = PaneInfo {
+            pane_id: "w3:p1".into(),
+            terminal_id: "terminal-1".into(),
+            workspace_id: "w3".into(),
+            tab_id: "w3:t1".into(),
+            focused: false,
+            cwd: Some("/srv/project".into()),
+            foreground_cwd: None,
+            label: None,
+            agent: Some("codex".into()),
+            title: Some("implementation".into()),
+            terminal_title: None,
+            terminal_title_stripped: None,
+            display_agent: Some("Codex".into()),
+            agent_status: AgentStatus::Idle,
+            state_labels: Default::default(),
+            tokens: Default::default(),
+            agent_session: None,
+            scroll: None,
+            revision: 4,
+        };
+        let mut snapshot = SessionSnapshot {
+            identity: crate::api::schema::RuntimeIdentity::default(),
+            version: crate::build_info::version(),
+            protocol: crate::protocol::PROTOCOL_VERSION,
+            event_cursor: 0,
+            focused_workspace_id: None,
+            focused_tab_id: None,
+            focused_pane_id: None,
+            workspaces: vec![WorkspaceInfo {
+                workspace_id: "w3".into(),
+                number: 3,
+                label: "project".into(),
+                focused: false,
+                pane_count: 1,
+                tab_count: 1,
+                active_tab_id: "w3:t1".into(),
+                agent_status: AgentStatus::Idle,
+                terminal_launcher_argv: None,
+                tokens: Default::default(),
+                worktree: None,
+                branch: None,
+                git_ahead_behind: None,
+            }],
+            tabs: vec![TabInfo {
+                tab_id: "w3:t1".into(),
+                workspace_id: "w3".into(),
+                number: 1,
+                label: "main".into(),
+                focused: false,
+                pane_count: 1,
+                agent_status: AgentStatus::Idle,
+            }],
+            panes: vec![pane.clone()],
+            layouts: Vec::new(),
+            agents: vec![agent_info_from_pane(&pane)],
+        };
+
+        apply_event(
+            &mut snapshot,
+            &SequencedEventEnvelope {
+                cursor: 1,
+                event: EventEnvelope {
+                    event: EventKind::PaneAgentStatusChanged,
+                    data: EventData::PaneAgentStatusChanged {
+                        pane_id: "w3:p1".into(),
+                        workspace_id: "w3".into(),
+                        agent_status: AgentStatus::Blocked,
+                        agent: Some("codex".into()),
+                        title: Some("needs input".into()),
+                        display_agent: Some("Codex".into()),
+                        state_labels: std::collections::HashMap::from([(
+                            "summary".into(),
+                            "Waiting for review".into(),
+                        )]),
+                    },
+                },
+            },
+        );
+
+        assert_eq!(snapshot.agents[0].agent_status, AgentStatus::Blocked);
+        assert_eq!(snapshot.agents[0].title.as_deref(), Some("needs input"));
+        assert_eq!(
+            snapshot.agents[0]
+                .state_labels
+                .get("summary")
+                .map(String::as_str),
+            Some("Waiting for review")
+        );
+        assert_eq!(snapshot.tabs[0].agent_status, AgentStatus::Blocked);
+        assert_eq!(snapshot.workspaces[0].agent_status, AgentStatus::Blocked);
+
+        apply_event(
+            &mut snapshot,
+            &SequencedEventEnvelope {
+                cursor: 2,
+                event: EventEnvelope {
+                    event: EventKind::PaneClosed,
+                    data: EventData::PaneClosed {
+                        pane_id: "w3:p1".into(),
+                        workspace_id: "w3".into(),
+                    },
+                },
+            },
+        );
+        assert!(snapshot.agents.is_empty());
+        assert_eq!(snapshot.tabs[0].agent_status, AgentStatus::Unknown);
+        assert_eq!(snapshot.workspaces[0].agent_status, AgentStatus::Unknown);
     }
 }
