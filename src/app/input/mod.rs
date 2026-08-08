@@ -94,6 +94,7 @@ impl App {
                 Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
                     self.handle_rename_key_via_api(key_event)
                 }
+                Mode::NewWorkspace => self.handle_workspace_create_key(key_event),
                 Mode::NewLinkedWorktree => self.handle_worktree_create_key(key_event),
                 Mode::OpenExistingWorktree => self.handle_worktree_open_key(key_event),
                 Mode::ConfirmRemoveWorktree => self.handle_worktree_remove_key(key_event),
@@ -149,6 +150,7 @@ impl App {
                 insert_rename_input_text(&mut self.state, text);
                 true
             }
+            Mode::NewWorkspace => self.insert_workspace_create_text(text),
             Mode::NewLinkedWorktree => {
                 self.insert_worktree_create_text(text);
                 true
@@ -635,6 +637,10 @@ pub(crate) fn is_modal_paste_shortcut(key: &KeyEvent) -> bool {
 
 pub(crate) fn modal_paste_target_active(state: &AppState) -> bool {
     match state.mode {
+        Mode::NewWorkspace => state
+            .workspace_create
+            .as_ref()
+            .is_some_and(|create| create.step == crate::app::state::WorkspaceCreateStep::Directory),
         Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::NewLinkedWorktree => {
             true
         }
