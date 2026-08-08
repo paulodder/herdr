@@ -521,14 +521,25 @@ impl App {
         };
         match crate::federation::request(&endpoint.endpoint, &request) {
             Ok(response) => {
-                let crate::api::schema::ResponseResult::WorkspaceCreated { workspace, .. } =
-                    response.result
+                let crate::api::schema::ResponseResult::WorkspaceCreated {
+                    workspace,
+                    tab,
+                    root_pane,
+                } = response.result
                 else {
                     self.workspace_create_failed(
                         "The remote server returned an unexpected workspace response.",
                     );
                     return;
                 };
+                if let Some(snapshot) = self
+                    .state
+                    .federation
+                    .get_mut(endpoint_id)
+                    .and_then(|endpoint| endpoint.snapshot.as_mut())
+                {
+                    record_federated_workspace_created(snapshot, &workspace, &tab, &root_pane);
+                }
                 self.state.workspace_create = None;
                 if open_after_creation {
                     if !self.state.request_federation_target(
@@ -575,6 +586,26 @@ impl App {
             Mode::Navigate
         };
     }
+}
+
+fn record_federated_workspace_created(
+    snapshot: &mut crate::api::schema::SessionSnapshot,
+    workspace: &crate::api::schema::WorkspaceInfo,
+    tab: &crate::api::schema::TabInfo,
+    pane: &crate::api::schema::PaneInfo,
+) {
+    snapshot
+        .workspaces
+        .retain(|existing| existing.workspace_id != workspace.workspace_id);
+    snapshot
+        .tabs
+        .retain(|existing| existing.tab_id != tab.tab_id);
+    snapshot
+        .panes
+        .retain(|existing| existing.pane_id != pane.pane_id);
+    snapshot.workspaces.push(workspace.clone());
+    snapshot.tabs.push(tab.clone());
+    snapshot.panes.push(pane.clone());
 }
 
 pub(crate) fn workspace_server_status(
@@ -843,5 +874,53 @@ mod tests {
         assert_eq!(entries[0].name, "project");
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn create_response_immediately_populates_the_remote_navigation_snapshot() {
+        let workspace: crate::api::schema::WorkspaceInfo =
+            serde_json::from_value(serde_json::json!({
+                "workspace_id": "wB", "number": 3, "label": "project",
+                "focused": false, "pane_count": 1, "tab_count": 1,
+                "active_tab_id": "wB:t1", "agent_status": "unknown"
+            }))
+            .unwrap();
+        let tab: crate::api::schema::TabInfo = serde_json::from_value(serde_json::json!({
+            "tab_id": "wB:t1", "workspace_id": "wB", "number": 1,
+            "label": "1", "focused": false, "pane_count": 1,
+            "agent_status": "unknown"
+        }))
+        .unwrap();
+        let pane: crate::api::schema::PaneInfo = serde_json::from_value(serde_json::json!({
+            "pane_id": "wB:p1", "terminal_id": "terminal-B",
+            "workspace_id": "wB", "tab_id": "wB:t1", "focused": false,
+            "cwd": "/tmp/project", "agent_status": "unknown", "revision": 0
+        }))
+        .unwrap();
+        let mut snapshot = crate::api::schema::SessionSnapshot {
+            identity: crate::api::schema::RuntimeIdentity::default(),
+            version: crate::build_info::version(),
+            protocol: crate::protocol::PROTOCOL_VERSION,
+            event_cursor: 0,
+            focused_workspace_id: None,
+            focused_tab_id: None,
+            focused_pane_id: None,
+            workspaces: Vec::new(),
+            tabs: Vec::new(),
+            panes: Vec::new(),
+            layouts: Vec::new(),
+            agents: Vec::new(),
+        };
+
+        record_federated_workspace_created(&mut snapshot, &workspace, &tab, &pane);
+
+        assert!(snapshot
+            .workspaces
+            .iter()
+            .any(|candidate| candidate.workspace_id == "wB"));
+        assert!(snapshot
+            .panes
+            .iter()
+            .any(|candidate| candidate.cwd.as_deref() == Some("/tmp/project")));
     }
 }
