@@ -1,0 +1,10 @@
+alpha one
+bravo six
+charlie
+delta
+echo
+foxtrot
+golf
+hotel
+india
+juliet
