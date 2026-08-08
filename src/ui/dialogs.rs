@@ -60,9 +60,17 @@ pub(super) fn render_new_workspace_overlay(app: &AppState, frame: &mut Frame, ar
     match create.step {
         WorkspaceCreateStep::Server => {
             let mut lines = vec![Line::styled(
-                " where should this workspace live?",
+                " choose a location",
                 Style::default().fg(app.palette.subtext0),
             )];
+            let location_width = create
+                .servers
+                .iter()
+                .take(8)
+                .map(|server| display_width_u16(&server.member_id))
+                .max()
+                .unwrap_or(0)
+                .min(32);
             for (idx, server) in create.servers.iter().take(8).enumerate() {
                 let selected = idx == create.selected_server;
                 let status =
@@ -78,7 +86,11 @@ pub(super) fn render_new_workspace_overlay(app: &AppState, frame: &mut Frame, ar
                         Style::default().fg(app.palette.accent),
                     ),
                     Span::styled(
-                        server.label.clone(),
+                        format!(
+                            "{:<width$}",
+                            truncate_end(&server.member_id, usize::from(location_width)),
+                            width = usize::from(location_width)
+                        ),
                         Style::default()
                             .fg(if selected {
                                 app.palette.text
@@ -92,10 +104,26 @@ pub(super) fn render_new_workspace_overlay(app: &AppState, frame: &mut Frame, ar
                             }),
                     ),
                     Span::styled(
-                        format!("  {}", server.member_id),
+                        format!(
+                            "  {}",
+                            match &server.kind {
+                                crate::app::state::WorkspaceCreateServerKind::Local => "local",
+                                crate::app::state::WorkspaceCreateServerKind::Federation { .. } =>
+                                    "remote",
+                            }
+                        ),
                         Style::default().fg(app.palette.overlay0),
                     ),
-                    Span::styled(format!("  {status}"), Style::default().fg(status_color)),
+                    Span::styled(
+                        if server.status
+                            == crate::federation::EndpointConnectionStatus::Connected
+                        {
+                            String::new()
+                        } else {
+                            format!("  · {status}")
+                        },
+                        Style::default().fg(status_color),
+                    ),
                 ]));
             }
             frame.render_widget(Paragraph::new(lines), rows[2]);
@@ -111,7 +139,7 @@ pub(super) fn render_new_workspace_overlay(app: &AppState, frame: &mut Frame, ar
             ])
             .areas::<3>(rows[2]);
             frame.render_widget(
-                Paragraph::new(format!(" browse on {server_label}"))
+                Paragraph::new(format!(" find a directory on {server_label}"))
                     .style(Style::default().fg(app.palette.subtext0)),
                 content[0],
             );
@@ -235,9 +263,9 @@ pub(super) fn render_new_workspace_overlay(app: &AppState, frame: &mut Frame, ar
         error
     } else {
         match create.step {
-            WorkspaceCreateStep::Server => " C-n/C-p choose · RET enter · C-g cancel",
+            WorkspaceCreateStep::Server => " C-n/C-p move · RET select · C-g cancel",
             WorkspaceCreateStep::Directory => {
-                " C-n/C-p choose · RET enter · C-c use here · C-g back"
+                " type a path · C-n/C-p move · TAB/RET enter · C-c use here · C-g back"
             }
             WorkspaceCreateStep::AfterCreation => " C-f/C-b choose · RET create · C-g back",
         }
@@ -1074,8 +1102,12 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(server_screen.contains("where should this workspace live?"));
-        assert!(server_screen.contains("STL Agents"));
+        assert!(server_screen.contains("choose a location"));
+        assert!(server_screen.contains("x1"));
+        assert!(server_screen.contains("local"));
+        assert!(server_screen.contains("stl-agents-1"));
+        assert!(server_screen.contains("remote"));
+        assert!(!server_screen.contains("STL Agents"));
         assert!(!server_screen.contains("/srv/projects/herdr"));
         assert!(!server_screen.contains("use this directory"));
         assert!(!server_screen.contains("create and open"));
@@ -1094,6 +1126,7 @@ mod tests {
 
         assert!(rendered.contains("location  ›  directory"));
         assert!(rendered.contains("STL Agents"));
+        assert!(rendered.contains("find a directory"));
         assert!(rendered.contains("/srv/projects/herdr"));
         assert!(rendered.contains("use this directory"));
         assert!(rendered.contains("src/"));

@@ -121,6 +121,8 @@ fn render_emacs_onboarding(app: &AppState, frame: &mut Frame, area: Rect, page: 
             "move through the session",
             vec![
                 emacs_key_line(app, "workspace", "C-M-p / C-M-n", "previous / next"),
+                emacs_key_line(app, "new workspace", "C-x C-f", "location, then directory"),
+                emacs_key_line(app, "rename workspace", "C-c w", "rename current"),
                 emacs_key_line(app, "tab", "C-x p / C-x n", "previous / next"),
                 emacs_key_line(app, "agent", "M-p / M-n", "previous / next"),
                 emacs_key_line(app, "pane", "C-x o", "cycle through panes"),
@@ -321,6 +323,8 @@ mod tests {
 
         let navigation = render_page(1);
         assert!(navigation.contains("C-M-p / C-M-n"));
+        assert!(navigation.contains("C-x C-f"));
+        assert!(navigation.contains("C-c w"));
         assert!(navigation.contains("C-x p / C-x n"));
         assert!(navigation.contains("M-p / M-n"));
 

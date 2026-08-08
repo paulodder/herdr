@@ -1763,6 +1763,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn c_x_c_f_requests_the_workspace_location_picker() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
+        app.state.federation_member_id = "x1".into();
+        app.route_client_input(vec![0x18]);
+        app.route_client_input(vec![0x06]);
+
+        assert!(app.state.request_new_workspace);
+        app.open_workspace_create_dialog();
+        let create = app
+            .state
+            .workspace_create
+            .as_ref()
+            .expect("workspace creation state");
+        assert_eq!(create.step, crate::app::state::WorkspaceCreateStep::Server);
+        assert_eq!(create.selected_server, 0);
+        assert_eq!(create.servers[0].member_id, "x1");
+        assert!(matches!(
+            create.servers[0].kind,
+            crate::app::state::WorkspaceCreateServerKind::Local
+        ));
+        assert!(sent_bytes(&mut rx).is_empty());
+    }
+
+    #[tokio::test]
     async fn c_x_t_opens_the_visible_tab_name_prompt() {
         let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
         app.route_client_input(vec![0x18, b't']);
@@ -1795,6 +1819,18 @@ mod tests {
 
         assert_eq!(app.state.mode, Mode::RenameTab);
         assert_eq!(app.state.name_input, "1");
+        assert!(sent_bytes(&mut rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn c_c_w_opens_the_visible_workspace_name_prompt() {
+        let (mut app, _pane, mut rx) = emacs_app_with_channel(b"");
+        let visible_name = app.state.workspaces[0].display_name().to_string();
+        app.route_client_input(vec![0x03, b'w']);
+
+        assert_eq!(app.state.mode, Mode::RenameWorkspace);
+        assert_eq!(app.state.name_input, visible_name);
+        assert_eq!(app.state.rename_pane_target, None);
         assert!(sent_bytes(&mut rx).is_empty());
     }
 
