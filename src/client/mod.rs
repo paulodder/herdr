@@ -1643,6 +1643,7 @@ fn activate_federation_connection(
     expected_member_id: &str,
     resource: Option<crate::federation::FederatedResourceRef>,
     directory: &[crate::federation::EndpointState],
+    presentation: Option<crate::protocol::FederationPresentation>,
 ) -> io::Result<()> {
     write_to_server(
         stream,
@@ -1651,6 +1652,7 @@ fn activate_federation_connection(
             expected_member_id: expected_member_id.to_string(),
             resource,
             directory: directory.to_vec(),
+            presentation,
         },
     )
 }
@@ -1704,6 +1706,7 @@ fn begin_suspended_fallback(
             &resumed.member_id,
             None,
             directory,
+            None,
         ) {
             warn!(member_id = resumed.member_id, %err, "skipping suspended Herdr connection that could not be activated");
             continue;
@@ -2400,6 +2403,7 @@ async fn run_client_loop(
                                             &active_member_id,
                                             None,
                                             &federation_directory,
+                                            None,
                                         )
                                         .map_err(ClientError::ConnectionLost)?;
                                         pending_federation_activation =
@@ -2559,9 +2563,11 @@ async fn run_client_loop(
                         session: _requested_session,
                         resource,
                         directory,
+                        presentation,
                     } => {
                         #[cfg(unix)]
                         {
+                            let resource = resource.map(|resource| *resource);
                             if connection_id == directory_authority_connection_id {
                                 merge_federation_directory(&mut federation_directory, directory);
                             }
@@ -2641,6 +2647,7 @@ async fn run_client_loop(
                                     &endpoint_id,
                                     resource,
                                     &federation_directory,
+                                    Some(presentation),
                                 ) {
                                     return Err(ClientError::ConnectionLost(err));
                                 }
@@ -2720,6 +2727,7 @@ async fn run_client_loop(
                                         &endpoint_id,
                                         resource.clone(),
                                         &federation_directory,
+                                        Some(presentation),
                                     )
                                     .map_err(ClientError::ConnectionLost)?;
                                     let resumed_id = resumed.connection_id;

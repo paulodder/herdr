@@ -346,6 +346,7 @@ pub(crate) enum ServerEvent {
         expected_member_id: String,
         resource: Option<crate::federation::FederatedResourceRef>,
         directory: Vec<crate::federation::EndpointState>,
+        presentation: Option<crate::protocol::FederationPresentation>,
     },
     /// A TUI client retained this member but switched its visible surface away.
     ClientFederationSuspend { client_id: u64 },
@@ -743,12 +744,14 @@ fn client_read_loop(
                 expected_member_id,
                 resource,
                 directory,
+                presentation,
             } => ServerEvent::ClientFederationActivate {
                 client_id,
                 request_id,
                 expected_member_id,
                 resource,
                 directory,
+                presentation,
             },
             ClientMessage::FederationSuspend => ServerEvent::ClientFederationSuspend { client_id },
             ClientMessage::FederationDirectoryUpdate { directory } => {

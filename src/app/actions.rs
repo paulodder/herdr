@@ -3607,6 +3607,8 @@ mod tests {
                 agent_status: crate::api::schema::AgentStatus::Blocked,
                 terminal_launcher_argv: None,
                 tokens: Default::default(),
+                branch: None,
+                git_ahead_behind: None,
                 worktree: None,
             }],
             tabs: vec![

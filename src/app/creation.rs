@@ -456,6 +456,8 @@ impl App {
             agent_status: pane_agent_status(agg_state, seen),
             terminal_launcher_argv: ws.terminal_launcher_argv.clone(),
             tokens: ws.metadata_tokens.values(),
+            branch: ws.branch(),
+            git_ahead_behind: ws.git_ahead_behind(),
             worktree: ws
                 .worktree_space()
                 .map(|space| crate::api::schema::WorkspaceWorktreeInfo {

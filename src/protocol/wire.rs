@@ -43,7 +43,16 @@ pub const LIVE_HANDOFF_RECONNECT_REASON: &str =
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 18;
+pub const PROTOCOL_VERSION: u32 = 19;
+
+/// Client-visible layout state that follows one TUI across federation members.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FederationPresentation {
+    pub sidebar_width: u16,
+    pub sidebar_section_split: f32,
+    pub sidebar_collapsed: bool,
+    pub collapsed_space_keys: Vec<String>,
+}
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -437,6 +446,7 @@ pub enum ClientMessage {
         resource: Option<crate::federation::FederatedResourceRef>,
         #[serde(with = "federation_directory_wire")]
         directory: Vec<crate::federation::EndpointState>,
+        presentation: Option<FederationPresentation>,
     },
 
     /// Stop rendering this full-app connection while retaining its protocol
@@ -723,9 +733,10 @@ pub enum ServerMessage {
         endpoint_id: String,
         target: String,
         session: String,
-        resource: Option<crate::federation::FederatedResourceRef>,
+        resource: Option<Box<crate::federation::FederatedResourceRef>>,
         #[serde(with = "federation_directory_wire")]
         directory: Vec<crate::federation::EndpointState>,
+        presentation: FederationPresentation,
     },
 
     /// A destination member's authoritative response to FederationActivate.
@@ -1135,6 +1146,7 @@ mod tests {
                 expected_member_id: "x1".into(),
                 resource: None,
                 directory: Vec::new(),
+                presentation: None,
             }),
             10
         );
@@ -2061,14 +2073,20 @@ mod tests {
             endpoint_id: "tana".into(),
             target: "tana".into(),
             session: "default".into(),
-            resource: Some(crate::federation::FederatedResourceRef {
+            resource: Some(Box::new(crate::federation::FederatedResourceRef {
                 endpoint_id: "tana".into(),
                 server_id: "server-tana".into(),
                 session_id: "session-tana".into(),
                 kind: crate::federation::FederatedResourceKind::Pane,
                 resource_id: "w1:p1".into(),
-            }),
+            })),
             directory: Vec::new(),
+            presentation: FederationPresentation {
+                sidebar_width: 36,
+                sidebar_section_split: 0.5,
+                sidebar_collapsed: false,
+                collapsed_space_keys: vec!["/repo/herdr/.git".into()],
+            },
         };
         let mut bytes = Vec::new();
         write_message(&mut bytes, &message).unwrap();
@@ -2084,6 +2102,7 @@ mod tests {
                 expected_member_id: "tana".into(),
                 resource: None,
                 directory: Vec::new(),
+                presentation: None,
             },
             ClientMessage::FederationSuspend,
             ClientMessage::FederationDirectoryUpdate {

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 18,
+  "protocol": 19,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -1030,8 +1030,34 @@
             "agent_status": {
               "$ref": "#/schemas/event/$defs/AgentStatus"
             },
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "focused": {
               "type": "boolean"
+            },
+            "git_ahead_behind": {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              ],
+              "type": [
+                "array",
+                "null"
+              ]
             },
             "label": {
               "type": "string"
@@ -6322,8 +6348,34 @@
             "agent_status": {
               "$ref": "#/schemas/sequenced_event/$defs/AgentStatus"
             },
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "focused": {
               "type": "boolean"
+            },
+            "git_ahead_behind": {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              ],
+              "type": [
+                "array",
+                "null"
+              ]
             },
             "label": {
               "type": "string"
@@ -10359,8 +10411,34 @@
             "agent_status": {
               "$ref": "#/schemas/success_response/$defs/AgentStatus"
             },
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "focused": {
               "type": "boolean"
+            },
+            "git_ahead_behind": {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              ],
+              "type": [
+                "array",
+                "null"
+              ]
             },
             "label": {
               "type": "string"

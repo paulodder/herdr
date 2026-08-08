@@ -2152,6 +2152,27 @@ impl HeadlessServer {
                 self.broadcast_federation_directory();
                 true
             }
+            AppEvent::GitStatusRefreshed { .. } => {
+                let before = self
+                    .app
+                    .state
+                    .workspaces
+                    .iter()
+                    .map(|workspace| (workspace.branch(), workspace.git_ahead_behind()))
+                    .collect::<Vec<_>>();
+                self.app.handle_internal_event(ev);
+                let changed = self
+                    .app
+                    .state
+                    .workspaces
+                    .iter()
+                    .map(|workspace| (workspace.branch(), workspace.git_ahead_behind()))
+                    .ne(before);
+                if changed {
+                    self.broadcast_federation_directory();
+                }
+                true
+            }
             _ => {
                 self.app.handle_internal_event(ev);
                 true
@@ -2561,8 +2582,24 @@ impl HeadlessServer {
                     endpoint_id,
                     target: request.target,
                     session: request.session,
-                    resource: request.resource,
+                    resource: request.resource.map(Box::new),
                     directory,
+                    presentation: crate::protocol::FederationPresentation {
+                        sidebar_width: self.app.state.sidebar_width,
+                        sidebar_section_split: self.app.state.sidebar_section_split,
+                        sidebar_collapsed: self.app.state.sidebar_collapsed,
+                        collapsed_space_keys: {
+                            let mut keys = self
+                                .app
+                                .state
+                                .collapsed_space_keys
+                                .iter()
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            keys.sort();
+                            keys
+                        },
+                    },
                 },
             );
             return true;
@@ -2802,6 +2839,7 @@ impl HeadlessServer {
                 expected_member_id,
                 resource,
                 directory,
+                presentation,
             } => {
                 let identity = self.app.session_snapshot().identity;
                 let member_id = self.app.state.federation_member_id.clone();
@@ -2816,6 +2854,20 @@ impl HeadlessServer {
                 };
                 let accepted = activation_error.is_none();
                 if accepted {
+                    if let Some(presentation) = presentation {
+                        self.app.state.sidebar_width = presentation.sidebar_width.clamp(
+                            self.app.state.sidebar_min_width,
+                            self.app.state.sidebar_max_width,
+                        );
+                        self.app.state.sidebar_width_source =
+                            crate::app::state::SidebarWidthSource::Manual;
+                        self.app.state.sidebar_section_split =
+                            presentation.sidebar_section_split.clamp(0.1, 0.9);
+                        self.app.state.sidebar_collapsed = presentation.sidebar_collapsed;
+                        self.app.state.collapsed_space_keys =
+                            presentation.collapsed_space_keys.into_iter().collect();
+                        self.app.state.mark_session_dirty();
+                    }
                     if let Some(client) = self.clients.get_mut(&client_id) {
                         client.federation_directory = directory;
                         client.suspended = false;
@@ -4761,6 +4813,36 @@ mod tests {
             .iter()
             .any(|state| state.endpoint.id == "tana.stl.dev"));
 
+        let workspace_id = server.app.state.workspaces[0].id.to_string();
+        let resolved_identity_cwd = server.app.state.workspaces[0]
+            .resolved_identity_cwd()
+            .expect("workspace identity cwd");
+        server.handle_internal_event_with_forwarding(AppEvent::GitStatusRefreshed {
+            results: vec![crate::workspace::WorkspaceGitStatus {
+                workspace_id,
+                resolved_identity_cwd,
+                branch: Some("feature/consistent-sidebar".into()),
+                ahead_behind: Some((2, 1)),
+                space: None,
+            }],
+            cache_updates: Vec::new(),
+        });
+        let git_update = read_server_message(control_rx.recv().expect("git snapshot update"));
+        let ServerMessage::FederationDirectoryUpdate { directory } = git_update else {
+            panic!("expected git directory update, got {git_update:?}");
+        };
+        let home_workspace = directory
+            .iter()
+            .find(|state| state.endpoint.id == "x1")
+            .and_then(|state| state.snapshot.as_ref())
+            .and_then(|snapshot| snapshot.workspaces.first())
+            .expect("home workspace snapshot");
+        assert_eq!(
+            home_workspace.branch.as_deref(),
+            Some("feature/consistent-sidebar")
+        );
+        assert_eq!(home_workspace.git_ahead_behind, Some((2, 1)));
+
         server.app.state.federation.clear();
         server.broadcast_federation_directory();
         let second = read_server_message(control_rx.recv().expect("removal update"));
@@ -4802,8 +4884,23 @@ mod tests {
                 expected_member_id: "stl-agents-1".into(),
                 resource: None,
                 directory: Vec::new(),
+                presentation: Some(crate::protocol::FederationPresentation {
+                    sidebar_width: 36,
+                    sidebar_section_split: 0.62,
+                    sidebar_collapsed: true,
+                    collapsed_space_keys: vec!["/repo/herdr/.git".into()],
+                }),
             })
         );
+
+        assert_eq!(server.app.state.sidebar_width, 36);
+        assert_eq!(server.app.state.sidebar_section_split, 0.62);
+        assert!(server.app.state.sidebar_collapsed);
+        assert!(server
+            .app
+            .state
+            .collapsed_space_keys
+            .contains("/repo/herdr/.git"));
 
         assert!(matches!(
             read_server_message(control_rx.recv().expect("activation result")),

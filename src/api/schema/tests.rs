@@ -692,6 +692,8 @@ fn worktree_request_and_response_round_trip() {
                 agent_status: AgentStatus::Unknown,
                 terminal_launcher_argv: None,
                 tokens: HashMap::new(),
+                branch: Some("worktree/api".into()),
+                git_ahead_behind: None,
                 worktree: Some(WorkspaceWorktreeInfo {
                     repo_key: "/repo/herdr/.git".into(),
                     repo_name: "herdr".into(),
@@ -779,6 +781,8 @@ fn worktree_lifecycle_events_round_trip() {
         agent_status: AgentStatus::Unknown,
         terminal_launcher_argv: None,
         tokens: HashMap::new(),
+        branch: Some("worktree/api".into()),
+        git_ahead_behind: None,
         worktree: Some(WorkspaceWorktreeInfo {
             repo_key: "/repo/herdr/.git".into(),
             repo_name: "herdr".into(),

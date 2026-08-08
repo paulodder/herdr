@@ -1954,6 +1954,8 @@ mod tests {
                         agent_status: crate::api::schema::AgentStatus::Idle,
                         terminal_launcher_argv: None,
                         tokens: Default::default(),
+                        branch: None,
+                        git_ahead_behind: None,
                         worktree: None,
                     }],
                     tabs: Vec::new(),

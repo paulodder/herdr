@@ -674,6 +674,7 @@ fn remote_workspace_row_height(
     app: &AppState,
     endpoint_id: &str,
     workspace_id: &str,
+    indented: bool,
     body_height: u16,
 ) -> u16 {
     let Some((endpoint, workspace)) = remote_workspace(app, endpoint_id, workspace_id) else {
@@ -685,11 +686,11 @@ fn remote_workspace_row_height(
         &app.sidebar_spaces,
         SpaceTokenContext {
             workspace: label,
-            branch: None,
+            branch: workspace.branch.as_deref(),
             state_text: state_label(state, seen),
-            ahead_behind: None,
+            ahead_behind: workspace.git_ahead_behind,
             tokens: &workspace.tokens,
-            suppress_git_details: true,
+            suppress_git_details: indented,
         },
     )
     .len()
@@ -740,7 +741,7 @@ fn workspace_list_visible_count(app: &AppState, area: Rect, scroll: usize) -> us
                 workspace_id,
                 indented,
             } => (
-                remote_workspace_row_height(app, endpoint_id, workspace_id, body.height),
+                remote_workspace_row_height(app, endpoint_id, workspace_id, *indented, body.height),
                 workspace_entry_gap(&entries, entry_idx, *indented),
             ),
         };
@@ -777,7 +778,7 @@ fn workspace_list_bottom_start(app: &AppState, area: Rect) -> usize {
                 workspace_id,
                 indented,
             } => (
-                remote_workspace_row_height(app, endpoint_id, workspace_id, body.height),
+                remote_workspace_row_height(app, endpoint_id, workspace_id, *indented, body.height),
                 *indented,
             ),
         };
@@ -1002,8 +1003,13 @@ pub(crate) fn compute_workspace_list_areas(
                 workspace_id,
                 indented,
             } => {
-                let row_height =
-                    remote_workspace_row_height(app, endpoint_id, workspace_id, body.height);
+                let row_height = remote_workspace_row_height(
+                    app,
+                    endpoint_id,
+                    workspace_id,
+                    *indented,
+                    body.height,
+                );
                 let gap = workspace_entry_gap(&entries, entry_idx, *indented);
                 if row_y.saturating_add(row_height) > body_bottom {
                     break;
@@ -1254,11 +1260,11 @@ fn render_remote_workspace_card(
         &app.sidebar_spaces,
         SpaceTokenContext {
             workspace: label,
-            branch: None,
+            branch: workspace.branch.as_deref(),
             state_text: state_label(state, seen),
-            ahead_behind: None,
+            ahead_behind: workspace.git_ahead_behind,
             tokens: &workspace.tokens,
-            suppress_git_details: true,
+            suppress_git_details: card.indented,
         },
     );
     for (row_index, resolved) in rows.iter().enumerate() {
@@ -2056,6 +2062,8 @@ mod tests {
                     agent_status: crate::api::schema::AgentStatus::Idle,
                     terminal_launcher_argv: None,
                     tokens: Default::default(),
+                    branch: None,
+                    git_ahead_behind: None,
                     worktree: None,
                 }],
                 tabs: Vec::new(),
@@ -2214,6 +2222,14 @@ mod tests {
             "stl-agents-1".into(),
             remote_endpoint("stl-agents-1", "w9", "checking@stl-agents-1"),
         );
+        let remote_workspace = app
+            .federation_client_overlay
+            .get_mut("stl-agents-1")
+            .and_then(|endpoint| endpoint.snapshot.as_mut())
+            .and_then(|snapshot| snapshot.workspaces.first_mut())
+            .expect("remote workspace");
+        remote_workspace.branch = Some("handoff/abc123".into());
+        remote_workspace.git_ahead_behind = Some((2, 1));
 
         let area = Rect::new(0, 0, 32, 18);
         app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
@@ -2240,6 +2256,16 @@ mod tests {
         assert!(
             rendered.ends_with("stl-agents-1"),
             "rendered row: {rendered:?}"
+        );
+        assert_eq!(remote.rect.height, 2);
+        let subtitle = row_text(
+            terminal.backend().buffer(),
+            remote.rect.y + 1,
+            remote.rect.width,
+        );
+        assert!(
+            subtitle.contains("handoff/abc123"),
+            "rendered subtitle: {subtitle:?}"
         );
         let location_x = remote.rect.x + remote.rect.width - "stl-agents-1".len() as u16;
         assert_eq!(
