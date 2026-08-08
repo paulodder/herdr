@@ -22,6 +22,15 @@ build_our_herdr() {
 
     local build_id
     build_id="$(git rev-parse --short HEAD)"
+    local active_version
+    active_version="$(client_version "$our_herdr_active_binary")"
+    if [[ "$active_version" != *".stl.$build_id" ]]; then
+        printf 'our-herdr: refusing to build local cohort %s while the active cohort is %s\n' \
+            "$build_id" "$active_version" >&2
+        printf '%s\n' \
+            'our-herdr: deploy this commit to the paired federation members first' >&2
+        exit 1
+    fi
     env \
         PATH="$our_herdr_rust_bin:/usr/local/bin:/usr/bin:/bin" \
         ZIG="${ZIG:-/usr/bin/true}" \
