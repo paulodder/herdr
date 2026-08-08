@@ -110,6 +110,7 @@ pub struct App {
     pub(crate) api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
     pub(crate) event_hub: crate::api::EventHub,
     pub(crate) federation_watch_generation: Arc<AtomicU64>,
+    pub(crate) federation_watch_controller: crate::federation::EndpointWatchController,
     pub(crate) last_focus: Option<(usize, crate::layout::PaneId)>,
     pub(crate) no_session: bool,
     pub(crate) input_rx: Option<mpsc::Receiver<crate::raw_input::RawInputEvent>>,
@@ -737,7 +738,7 @@ impl App {
             });
         }
         let federation_watch_generation = Arc::new(AtomicU64::new(1));
-        crate::federation::start_app_watchers(
+        let federation_watch_controller = crate::federation::start_app_watchers(
             &config.federation,
             event_tx.clone(),
             federation_watch_generation.clone(),
@@ -792,6 +793,7 @@ impl App {
             api_rx,
             event_hub,
             federation_watch_generation,
+            federation_watch_controller,
             last_focus,
             no_session,
             input_rx: None,
@@ -1506,6 +1508,7 @@ impl App {
         }
 
         if !invalid_section("federation") && config.federation.diagnostics().is_empty() {
+            self.federation_watch_controller.shutdown();
             let generation = self
                 .federation_watch_generation
                 .fetch_add(1, Ordering::AcqRel)
@@ -1522,7 +1525,7 @@ impl App {
                 .into_iter()
                 .map(|state| (state.endpoint.id.clone(), state))
                 .collect();
-            crate::federation::start_app_watchers(
+            self.federation_watch_controller = crate::federation::start_app_watchers(
                 &config.federation,
                 self.event_tx.clone(),
                 self.federation_watch_generation.clone(),

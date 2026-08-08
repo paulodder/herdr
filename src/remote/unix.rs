@@ -1998,6 +1998,7 @@ fn bridge_connection(
         .stdout
         .take()
         .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "ssh bridge stdout missing"))?;
+    let shutdown_stream = stream.try_clone()?;
     let mut stream_to_child = stream.try_clone()?;
     let mut child_to_stream = stream;
 
@@ -2009,7 +2010,12 @@ fn bridge_connection(
         let _ = child_to_stream.shutdown(std::net::Shutdown::Write);
     });
 
-    let status = child.wait()?;
+    let wait_result = child.wait();
+    // The remote bridge can exit first during a server live handoff. Wake only
+    // the upload copier's read half before joining it; the download copier may
+    // still need to flush the final ServerShutdown frame to the local client.
+    let _ = shutdown_bridge_upload(&shutdown_stream);
+    let status = wait_result?;
     let _ = upload.join();
     let _ = download.join();
 
@@ -2021,6 +2027,10 @@ fn bridge_connection(
             format!("ssh bridge exited with {status}"),
         ))
     }
+}
+
+fn shutdown_bridge_upload(stream: &UnixStream) -> io::Result<()> {
+    stream.shutdown(std::net::Shutdown::Read)
 }
 
 fn copy_flush<R: io::Read, W: io::Write>(reader: &mut R, writer: &mut W) -> io::Result<u64> {
@@ -2165,6 +2175,39 @@ mod tests {
 
         drop(bridge);
         let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn shutting_down_bridge_upload_preserves_final_download_write() {
+        use std::io::{Read as _, Write as _};
+        use std::os::unix::net::UnixStream;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (bridge_stream, mut client_stream) = UnixStream::pair().unwrap();
+        let shutdown_stream = bridge_stream.try_clone().unwrap();
+        let mut upload_stream = bridge_stream.try_clone().unwrap();
+        let mut download_stream = bridge_stream;
+        let (upload_done_tx, upload_done_rx) = mpsc::channel();
+        let upload = std::thread::spawn(move || {
+            let mut byte = [0_u8; 1];
+            let _ = upload_done_tx.send(upload_stream.read(&mut byte));
+        });
+
+        shutdown_bridge_upload(&shutdown_stream).unwrap();
+        let upload_result = upload_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("bridge upload read stayed blocked");
+        assert_eq!(upload_result.unwrap(), 0);
+
+        download_stream.write_all(b"final-shutdown-frame").unwrap();
+        let mut received = [0_u8; 20];
+        client_stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        client_stream.read_exact(&mut received).unwrap();
+        assert_eq!(&received, b"final-shutdown-frame");
+        upload.join().unwrap();
     }
 
     #[test]

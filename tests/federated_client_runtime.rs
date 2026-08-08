@@ -26,6 +26,7 @@ const REMOTE_MARKER: &str = "HERDR_FEDERATED_REMOTE_MARKER";
 const HOME_MARKER: &str = "HERDR_FEDERATED_HOME_MARKER";
 const HOME_AFTER_FAILED_SWITCH: &str = "HERDR_HOME_AFTER_FAILED_FEDERATION_SWITCH";
 const HOME_AFTER_REMOTE_DISCONNECT: &str = "HERDR_HOME_AFTER_REMOTE_DISCONNECT";
+const REMOTE_AFTER_LIVE_HANDOFF: &str = "HERDR_REMOTE_AFTER_LIVE_HANDOFF";
 const MEMBER_B_MARKER: &str = "HERDR_FEDERATED_MEMBER_B_MARKER";
 const MEMBER_B_AFTER_REVOCATION: &str = "HERDR_FEDERATED_MEMBER_B_AFTER_REVOCATION";
 const MEMBER_C_MARKER: &str = "HERDR_FEDERATED_MEMBER_C_MARKER";
@@ -763,6 +764,36 @@ enabled = true
         bridge_launch_count(&ssh_log),
         2,
         "reselecting a suspended member must reuse its existing connection"
+    );
+
+    // A live handoff on the active remote member must recycle only that
+    // member's SSH transport. The originating TUI stays alive and remains on
+    // the remote workspace instead of falling back to its retained home.
+    clear_output(&output_rx, &mut output);
+    send_json_request(
+        &remote_api,
+        serde_json::json!({
+            "id": "handoff:active-remote",
+            "method": "server.live_handoff",
+            "params": {}
+        }),
+    );
+    wait_for_bridge_launches(&ssh_log, 3, Duration::from_secs(15));
+    write_pane_marker(&remote_api, &remote_pane, REMOTE_AFTER_LIVE_HANDOFF);
+    wait_for_output(
+        &mut client,
+        &output_rx,
+        &mut output,
+        REMOTE_AFTER_LIVE_HANDOFF,
+        Duration::from_secs(20),
+        &diagnostic_logs,
+    );
+    assert_eq!(client.child.process_id(), Some(client_pid));
+    assert!(client.child.try_wait().ok().flatten().is_none());
+    assert_eq!(
+        bridge_launch_count(&ssh_log),
+        3,
+        "active remote live handoff must launch exactly one replacement bridge"
     );
 
     clear_output(&output_rx, &mut output);

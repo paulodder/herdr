@@ -3,8 +3,13 @@
 //! Every endpoint remains authoritative for its own PTYs and session state.
 //! This module only transports qualified references, snapshots, and events.
 
+#[cfg(windows)]
+use std::io::Write as _;
 use std::io::{self, BufReader, Read as _};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -108,6 +113,14 @@ pub fn run_endpoint_watch(
     endpoint: FederationEndpointConfig,
     mut publish: impl FnMut(EndpointState) -> bool,
 ) {
+    run_endpoint_watch_controlled(endpoint, &mut publish, None);
+}
+
+fn run_endpoint_watch_controlled(
+    endpoint: FederationEndpointConfig,
+    publish: &mut impl FnMut(EndpointState) -> bool,
+    control: Option<&Arc<EndpointWatchControl>>,
+) {
     if !endpoint.enabled {
         let _ = publish(EndpointState::configured(endpoint));
         return;
@@ -116,6 +129,9 @@ pub fn run_endpoint_watch(
     let mut snapshot = None;
     let mut backoff = Duration::from_secs(1);
     loop {
+        if control.is_some_and(|control| control.is_stopped()) {
+            return;
+        }
         if !publish(EndpointState {
             endpoint: endpoint.clone(),
             status: EndpointConnectionStatus::Connecting,
@@ -126,7 +142,8 @@ pub fn run_endpoint_watch(
             return;
         }
         let resume_identity = snapshot.as_ref().map(|snapshot| &snapshot.identity);
-        match EndpointWatch::connect(endpoint.clone(), cursor, resume_identity) {
+        match EndpointWatch::connect_controlled(endpoint.clone(), cursor, resume_identity, control)
+        {
             Ok(mut watch) => {
                 if watch.state.snapshot.is_none() {
                     watch.state.snapshot = snapshot.take();
@@ -140,6 +157,9 @@ pub fn run_endpoint_watch(
                 loop {
                     match watch.next() {
                         Ok(Some(_)) => {
+                            if control.is_some_and(|control| control.is_stopped()) {
+                                return;
+                            }
                             cursor = watch.state.cursor;
                             snapshot = watch.state.snapshot.clone();
                             if !publish(watch.state.clone()) {
@@ -147,6 +167,9 @@ pub fn run_endpoint_watch(
                             }
                         }
                         Ok(None) => {
+                            if control.is_some_and(|control| control.is_stopped()) {
+                                return;
+                            }
                             if !publish(EndpointState {
                                 endpoint: endpoint.clone(),
                                 status: EndpointConnectionStatus::Disconnected,
@@ -159,6 +182,9 @@ pub fn run_endpoint_watch(
                             break;
                         }
                         Err(err) => {
+                            if control.is_some_and(|control| control.is_stopped()) {
+                                return;
+                            }
                             if !publish(EndpointState {
                                 endpoint: endpoint.clone(),
                                 status: classify_error(&err),
@@ -174,6 +200,9 @@ pub fn run_endpoint_watch(
                 }
             }
             Err(err) => {
+                if control.is_some_and(|control| control.is_stopped()) {
+                    return;
+                }
                 if !publish(EndpointState {
                     endpoint: endpoint.clone(),
                     status: classify_error(&err),
@@ -185,7 +214,13 @@ pub fn run_endpoint_watch(
                 }
             }
         }
-        std::thread::sleep(backoff);
+        if let Some(control) = control {
+            if !control.wait_while_running(backoff) {
+                return;
+            }
+        } else {
+            std::thread::sleep(backoff);
+        }
         backoff = (backoff * 2).min(Duration::from_secs(30));
     }
 }
@@ -204,30 +239,134 @@ pub fn start_app_watchers(
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
     generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
     expected_generation: u64,
-) {
+) -> EndpointWatchController {
+    let control = Arc::new(EndpointWatchControl::default());
+    let mut controller = EndpointWatchController {
+        control: control.clone(),
+        workers: Vec::new(),
+    };
     if !config.enabled {
-        return;
+        return controller;
     }
     for endpoint in config.endpoints.iter().filter(|endpoint| endpoint.enabled) {
         let endpoint = endpoint.clone();
         let event_tx = event_tx.clone();
         let generation = generation.clone();
-        std::thread::spawn(move || {
-            run_endpoint_watch(endpoint, |state| {
-                if generation.load(std::sync::atomic::Ordering::Acquire) != expected_generation {
-                    return false;
-                }
-                event_tx
-                    .blocking_send(crate::events::AppEvent::FederationUpdated(Box::new(state)))
-                    .is_ok()
-            });
-        });
+        let worker_control = control.clone();
+        controller.workers.push(std::thread::spawn(move || {
+            run_endpoint_watch_controlled(
+                endpoint,
+                &mut |state| {
+                    if generation.load(std::sync::atomic::Ordering::Acquire) != expected_generation
+                    {
+                        return false;
+                    }
+                    let mut event = crate::events::AppEvent::FederationUpdated(Box::new(state));
+                    loop {
+                        match event_tx.try_send(event) {
+                            Ok(()) => return true,
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(returned)) => {
+                                event = returned;
+                                if !worker_control.wait_while_running(Duration::from_millis(10)) {
+                                    return false;
+                                }
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return false,
+                        }
+                    }
+                },
+                Some(&worker_control),
+            );
+        }));
+    }
+    controller
+}
+
+/// Owns the endpoint-watch workers for one application configuration.
+///
+/// Shutdown interrupts each SSH transport before joining its worker so a
+/// headless-server handoff cannot leave the old transport reparented.
+pub struct EndpointWatchController {
+    control: Arc<EndpointWatchControl>,
+    workers: Vec<JoinHandle<()>>,
+}
+
+impl EndpointWatchController {
+    pub fn shutdown(&mut self) {
+        self.control.stop();
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for EndpointWatchController {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+#[derive(Default)]
+struct EndpointWatchControl {
+    stopped: AtomicBool,
+    children: Mutex<Vec<Weak<WatchChild>>>,
+    backoff: Mutex<()>,
+    wake: Condvar,
+}
+
+impl EndpointWatchControl {
+    fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Acquire)
+    }
+
+    fn register(&self, child: &Arc<WatchChild>) -> io::Result<()> {
+        let mut children = self.children.lock().unwrap_or_else(|err| err.into_inner());
+        children.retain(|child| child.strong_count() > 0);
+        if self.is_stopped() {
+            drop(children);
+            child.terminate_and_reap();
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "federation endpoint watch is shutting down",
+            ));
+        }
+        children.push(Arc::downgrade(child));
+        Ok(())
+    }
+
+    fn wait_while_running(&self, duration: Duration) -> bool {
+        if self.is_stopped() {
+            return false;
+        }
+        let backoff = self.backoff.lock().unwrap_or_else(|err| err.into_inner());
+        let (_backoff, _) = self
+            .wake
+            .wait_timeout_while(backoff, duration, |_| !self.is_stopped())
+            .unwrap_or_else(|err| err.into_inner());
+        !self.is_stopped()
+    }
+
+    fn stop(&self) {
+        if self.stopped.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.wake.notify_all();
+        let children = {
+            let mut registered = self.children.lock().unwrap_or_else(|err| err.into_inner());
+            registered
+                .drain(..)
+                .filter_map(|child| child.upgrade())
+                .collect::<Vec<_>>()
+        };
+        for child in children {
+            child.terminate_and_reap();
+        }
     }
 }
 
 /// A live `session.watch` stream transported through one SSH process.
 pub struct EndpointWatch {
-    child: Child,
+    child: Arc<WatchChild>,
     // Keep the request side of the SSH transport open for the watch lifetime.
     // Dropping it after the one-shot session.watch request makes the remote
     // bridge observe EOF even though the watch is still healthy.
@@ -236,15 +375,37 @@ pub struct EndpointWatch {
     pub state: EndpointState,
 }
 
+struct WatchChild {
+    child: Mutex<Child>,
+}
+
+impl WatchChild {
+    fn new(child: Child) -> Self {
+        Self {
+            child: Mutex::new(child),
+        }
+    }
+
+    fn terminate_and_reap(&self) {
+        let mut child = self.child.lock().unwrap_or_else(|err| err.into_inner());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+impl Drop for WatchChild {
+    fn drop(&mut self) {
+        let child = self.child.get_mut().unwrap_or_else(|err| err.into_inner());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
 struct ReapedChild(Option<Child>);
 
 impl ReapedChild {
     fn new(child: Child) -> Self {
         Self(Some(child))
-    }
-
-    fn take(&mut self) -> Child {
-        self.0.take().expect("child already transferred")
     }
 }
 
@@ -277,15 +438,27 @@ impl EndpointWatch {
         after_cursor: Option<u64>,
         resume_identity: Option<&crate::api::schema::RuntimeIdentity>,
     ) -> io::Result<Self> {
+        Self::connect_controlled(endpoint, after_cursor, resume_identity, None)
+    }
+
+    fn connect_controlled(
+        endpoint: FederationEndpointConfig,
+        after_cursor: Option<u64>,
+        resume_identity: Option<&crate::api::schema::RuntimeIdentity>,
+        control: Option<&Arc<EndpointWatchControl>>,
+    ) -> io::Result<Self> {
         validate_endpoint(&endpoint)?;
-        let mut child = ReapedChild::new(
+        let child = Arc::new(WatchChild::new(
             ssh_bridge_command(&endpoint)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
                 .map_err(|err| io::Error::new(err.kind(), format!("failed to start ssh: {err}")))?,
-        );
+        ));
+        if let Some(control) = control {
+            control.register(&child)?;
+        }
 
         let request = Request {
             id: format!("federation:{}:watch", endpoint.id),
@@ -296,20 +469,24 @@ impl EndpointWatch {
                 session_id: resume_identity.map(|identity| identity.session_id.clone()),
             }),
         };
-        let mut stdin = child.stdin.take().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::BrokenPipe, "ssh bridge stdin is unavailable")
-        })?;
+        let (mut stdin, stdout) = {
+            let mut process = child.child.lock().unwrap_or_else(|err| err.into_inner());
+            let stdin = process.stdin.take().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "ssh bridge stdin is unavailable")
+            })?;
+            let stdout = process.stdout.take().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "ssh bridge stdout is unavailable",
+                )
+            })?;
+            (stdin, stdout)
+        };
         write_json_line(&mut stdin, &request)?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "ssh bridge stdout is unavailable",
-            )
-        })?;
         let reader = BufReader::new(stdout);
         let (reader, ack) =
-            read_success_response_with_timeout(&mut child, reader).map_err(|err| {
-                endpoint_stream_error(&mut child, &endpoint, "watch handshake failed", err)
+            read_watch_success_response_with_timeout(&child, reader).map_err(|err| {
+                endpoint_watch_stream_error(&child, &endpoint, "watch handshake failed", err)
             })?;
         let ResponseResult::SessionWatchStarted {
             cursor,
@@ -335,7 +512,7 @@ impl EndpointWatch {
             error: None,
         };
         Ok(Self {
-            child: child.take(),
+            child,
             _stdin: stdin,
             reader,
             state,
@@ -345,7 +522,7 @@ impl EndpointWatch {
     pub fn next(&mut self) -> io::Result<Option<SequencedEventEnvelope>> {
         let event: Option<SequencedEventEnvelope> = read_optional_json_line(&mut self.reader)?;
         let Some(event) = event else {
-            let message = child_stderr(&mut self.child);
+            let message = watch_child_stderr(&self.child);
             return if message.is_empty() {
                 Ok(None)
             } else {
@@ -379,8 +556,7 @@ fn validate_snapshot_member(
 
 impl Drop for EndpointWatch {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.child.terminate_and_reap();
     }
 }
 
@@ -462,11 +638,20 @@ fn copy_bridge_stream<R: io::Read>(
         let mut input = input();
         copy_bridge_input(&mut input, &mut upload_stream, &shutdown_stream)
     });
-    io::copy(&mut download_stream, output)?;
+    let download_result = io::copy(&mut download_stream, output);
+    // Server EOF is the normal live-handoff boundary. The upload thread can
+    // still be blocked reading SSH stdin, so close the socket to wake any
+    // pending write and only join when the uploader has already completed.
+    let _ = shutdown_local_stream(&download_stream);
+    download_result?;
     output.flush()?;
-    upload
-        .join()
-        .map_err(|_| io::Error::other("federation bridge input thread panicked"))?
+    if upload.is_finished() {
+        upload
+            .join()
+            .map_err(|_| io::Error::other("federation bridge input thread panicked"))?
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(unix)]
@@ -576,6 +761,41 @@ fn read_success_response(reader: &mut impl io::BufRead) -> io::Result<SuccessRes
     crate::api::client::parse_response_value(value).map_err(io::Error::other)
 }
 
+fn read_watch_success_response_with_timeout(
+    child: &WatchChild,
+    mut reader: BufReader<std::process::ChildStdout>,
+) -> io::Result<(BufReader<std::process::ChildStdout>, SuccessResponse)> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let response = read_success_response(&mut reader);
+        let _ = tx.send((reader, response));
+    });
+    match rx.recv_timeout(HANDSHAKE_TIMEOUT) {
+        Ok((reader, response)) => {
+            let _ = worker.join();
+            response.map(|response| (reader, response))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            child.terminate_and_reap();
+            drop(worker);
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "federation bridge produced no response within {} seconds",
+                    HANDSHAKE_TIMEOUT.as_secs()
+                ),
+            ))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            let _ = worker.join();
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "federation bridge response worker stopped",
+            ))
+        }
+    }
+}
+
 fn read_success_response_with_timeout(
     child: &mut Child,
     mut reader: BufReader<std::process::ChildStdout>,
@@ -645,8 +865,40 @@ fn endpoint_stream_error(
     )
 }
 
+fn endpoint_watch_stream_error(
+    child: &WatchChild,
+    endpoint: &FederationEndpointConfig,
+    context: &str,
+    source: io::Error,
+) -> io::Error {
+    child.terminate_and_reap();
+    let stderr = watch_child_stderr(child);
+    let detail = if stderr.is_empty() {
+        source.to_string()
+    } else {
+        format!("{source}: {stderr}")
+    };
+    io::Error::new(
+        source.kind(),
+        format!("endpoint {} {context}: {detail}", endpoint.id),
+    )
+}
+
 fn child_stderr(child: &mut Child) -> String {
     let Some(mut stderr) = child.stderr.take() else {
+        return String::new();
+    };
+    let mut output = String::new();
+    let _ = stderr.read_to_string(&mut output);
+    output.trim().to_string()
+}
+
+fn watch_child_stderr(child: &WatchChild) -> String {
+    let stderr = {
+        let mut child = child.child.lock().unwrap_or_else(|err| err.into_inner());
+        child.stderr.take()
+    };
+    let Some(mut stderr) = stderr else {
         return String::new();
     };
     let mut output = String::new();
@@ -867,6 +1119,113 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn endpoint_watch_controller_drop_terminates_and_reaps_registered_child() {
+        let control = Arc::new(EndpointWatchControl::default());
+        let controller = EndpointWatchController {
+            control: control.clone(),
+            workers: Vec::new(),
+        };
+        let child = Arc::new(WatchChild::new(
+            Command::new("sh")
+                .args(["-c", "exec sleep 30"])
+                .spawn()
+                .expect("spawn sleeping endpoint transport"),
+        ));
+        control.register(&child).unwrap();
+        assert!(child
+            .child
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .try_wait()
+            .unwrap()
+            .is_none());
+
+        drop(controller);
+
+        assert!(child
+            .child
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .try_wait()
+            .unwrap()
+            .is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn endpoint_watch_shutdown_is_not_blocked_by_open_stderr_after_stdout_eof() {
+        let control = Arc::new(EndpointWatchControl::default());
+        let controller = EndpointWatchController {
+            control: control.clone(),
+            workers: Vec::new(),
+        };
+        let child = Arc::new(WatchChild::new(
+            Command::new("sh")
+                .args(["-c", "exec 1>&-; read _"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn endpoint transport with stdout EOF"),
+        ));
+        control.register(&child).unwrap();
+        let (stdin, stdout) = {
+            let mut process = child.child.lock().unwrap_or_else(|err| err.into_inner());
+            (
+                process.stdin.take().expect("child stdin"),
+                process.stdout.take().expect("child stdout"),
+            )
+        };
+        let mut watch = EndpointWatch {
+            child: child.clone(),
+            _stdin: stdin,
+            reader: BufReader::new(stdout),
+            state: EndpointState::configured(FederationEndpointConfig::default()),
+        };
+        let (watch_done_tx, watch_done_rx) = std::sync::mpsc::channel();
+        let watch_thread = std::thread::spawn(move || {
+            let result = watch.next();
+            let _ = watch_done_tx.send(result);
+        });
+
+        // Wait until next() has entered its stderr diagnostic path. The fixed
+        // path has already detached stderr and released the child mutex; the
+        // old path is identifiable because it still holds that mutex.
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            match child.child.try_lock() {
+                Ok(process) if process.stderr.is_none() => break,
+                Ok(_) => {}
+                Err(std::sync::TryLockError::WouldBlock) => break,
+                Err(std::sync::TryLockError::Poisoned(err)) => {
+                    panic!("endpoint child mutex poisoned: {err}")
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "watch did not reach stderr diagnostic path"
+            );
+            std::thread::yield_now();
+        }
+
+        let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
+        let shutdown_thread = std::thread::spawn(move || {
+            drop(controller);
+            let _ = shutdown_tx.send(());
+        });
+        shutdown_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("controller shutdown deadlocked behind stderr read");
+        watch_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("watch did not wake after child termination")
+            .unwrap();
+        shutdown_thread.join().unwrap();
+        watch_thread.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn bridge_relay_exits_promptly_when_input_closes_and_server_stays_open() {
         use std::os::unix::net::UnixStream;
         use std::sync::mpsc;
@@ -891,6 +1250,36 @@ mod tests {
         result.unwrap();
         relay.join().unwrap();
         drop(server_socket);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_relay_exits_promptly_when_server_closes_and_input_stays_open() {
+        use std::os::unix::net::UnixStream;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (bridge_socket, server_socket) = UnixStream::pair().unwrap();
+        let bridge_socket = crate::ipc::LocalStream::UdSocket(
+            interprocess::os::unix::uds_local_socket::Stream::from(bridge_socket),
+        );
+        let (input_reader, input_writer) = UnixStream::pair().unwrap();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let relay = std::thread::spawn(move || {
+            let mut output = io::sink();
+            let result = copy_bridge_stream(bridge_socket, move || input_reader, &mut output);
+            let _ = finished_tx.send(result);
+        });
+
+        // Keep input alive and silent while the server side reaches EOF. A
+        // blocking upload join would keep the bridge process alive forever.
+        drop(server_socket);
+        let result = finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("bridge relay did not exit promptly after server EOF");
+        result.unwrap();
+        drop(input_writer);
+        relay.join().unwrap();
     }
 
     #[test]
