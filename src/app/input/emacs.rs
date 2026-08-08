@@ -108,6 +108,24 @@ impl App {
             return text_active || self.state.emacs.minibuffer.is_some();
         };
 
+        // Host key auto-repeat can overlap the next chord: in particular a
+        // trailing C-SPC Repeat may arrive after the first C-n Press. Treating
+        // that stale repeat as another set-mark-command moves the mark to the
+        // new point and makes an otherwise growing region appear stuck.
+        // TEXT-mode motion commands repeat; one-shot state commands are
+        // consumed without re-execution. Isearch/minibuffer retain their own
+        // editing repeat behavior.
+        if key.kind == KeyEventKind::Repeat && ctx == MapContext::Text {
+            let repeatable = self.state.emacs.pending.is_empty()
+                && matches!(
+                    self.state.emacs.keymaps.lookup(ctx, &[chord]),
+                    Lookup::Bound(command) if emacs_text_command_accepts_repeat(command)
+                );
+            if !repeatable {
+                return true;
+            }
+        }
+
         // M-x and feedback are Herdr-owned text fields. Give their structural
         // editing keys to the same pure input engine used by rename/search
         // prompts. Live terminal-owned Codex/Claude drafts never enter here.
@@ -1473,6 +1491,29 @@ impl App {
     }
 }
 
+fn emacs_text_command_accepts_repeat(command: EmacsCommand) -> bool {
+    matches!(
+        command,
+        EmacsCommand::Builtin(
+            EmacsBuiltin::ForwardChar
+                | EmacsBuiltin::BackwardChar
+                | EmacsBuiltin::NextLine
+                | EmacsBuiltin::PreviousLine
+                | EmacsBuiltin::ForwardWord
+                | EmacsBuiltin::BackwardWord
+                | EmacsBuiltin::ForwardSexp
+                | EmacsBuiltin::BackwardSexp
+                | EmacsBuiltin::MoveBeginningOfLine
+                | EmacsBuiltin::MoveEndOfLine
+                | EmacsBuiltin::RecenterTopBottom
+                | EmacsBuiltin::ScrollUp
+                | EmacsBuiltin::ScrollDown
+                | EmacsBuiltin::BeginningOfBuffer
+                | EmacsBuiltin::EndOfBuffer
+        )
+    )
+}
+
 /// `TextBuffer` over a live pane runtime.
 struct RuntimeBuffer<'a> {
     rt: &'a crate::terminal::TerminalRuntime,
@@ -2319,6 +2360,42 @@ mod tests {
         assert_eq!(text.point.row, 3, "press plus two repeats move three rows");
         assert_eq!(text.mark.map(|mark| mark.row), Some(0));
         assert!(text.mark_active);
+    }
+
+    #[tokio::test]
+    async fn overlapping_c_spc_repeat_does_not_reset_a_moving_region() {
+        let (mut app, _pane, _rx) = emacs_app_with_channel(FIVE_LINES);
+        enter_text_mode(&mut app);
+        app.route_client_input(vec![0x1b, b'<']); // M-<
+
+        // A fast key roll can leave a Space auto-repeat queued after C-n has
+        // already moved point. The late one-shot repeat must not set mark
+        // again at row 1; C-n repeats must continue to row 3.
+        app.route_client_input(
+            b"\x1b[32;5:1u\x1b[110;5:1u\x1b[32;5:2u\x1b[110;5:2u\x1b[110;5:2u"
+                .to_vec(),
+        );
+
+        let text = app.state.emacs.text_mode.as_ref().unwrap();
+        assert_eq!(text.point.row, 3);
+        assert_eq!(text.mark.map(|mark| mark.row), Some(0));
+        assert!(text.mark_active);
+    }
+
+    #[tokio::test]
+    async fn kitty_shifted_meta_comma_runs_beginning_of_buffer() {
+        let (mut app, _pane, _rx) = emacs_app_with_channel(FIVE_LINES);
+        enter_text_mode(&mut app);
+        app.state.emacs.text_mode.as_mut().unwrap().point = Pos { row: 3, col: 2 };
+
+        // Ghostty REPORT_ALTERNATE_KEYS: physical comma, shifted `<`,
+        // Shift+Alt modifiers, press event.
+        app.route_client_input(b"\x1b[44:60;4:1u".to_vec());
+
+        assert_eq!(
+            app.state.emacs.text_mode.as_ref().unwrap().point,
+            Pos { row: 0, col: 0 }
+        );
     }
 
     #[tokio::test]
