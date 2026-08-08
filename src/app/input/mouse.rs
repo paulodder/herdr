@@ -210,7 +210,10 @@ impl AppState {
 
         if matches!(
             self.mode,
-            Mode::NewLinkedWorktree | Mode::OpenExistingWorktree | Mode::ConfirmRemoveWorktree
+            Mode::NewWorkspace
+                | Mode::NewLinkedWorktree
+                | Mode::OpenExistingWorktree
+                | Mode::ConfirmRemoveWorktree
         ) && !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
             return None;
@@ -221,6 +224,12 @@ impl AppState {
                 self.selection = None;
                 self.selection_autoscroll = None;
                 self.workspace_press = None;
+
+                if self.mode == Mode::NewWorkspace {
+                    // The prototype is keyboard-complete. Keep clicks modal so
+                    // they cannot leak into the workspace behind it.
+                    return None;
+                }
 
                 if self.mode == Mode::ConfirmClose {
                     let popup = self.confirm_close_rect();
