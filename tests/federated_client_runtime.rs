@@ -20,8 +20,8 @@ use support::{
 };
 
 const REMOTE_SESSION: &str = "federated-e2e";
-const REMOTE_QUALIFIED: &str = "federation-test@stl-agents-1";
-const REMOTE_VISIBLE_PREFIX: &str = "federation-test@stl-a";
+const REMOTE_WORKSPACE: &str = "federation-test";
+const REMOTE_LOCATION: &str = "stl-agents-1";
 const REMOTE_MARKER: &str = "HERDR_FEDERATED_REMOTE_MARKER";
 const HOME_MARKER: &str = "HERDR_FEDERATED_HOME_MARKER";
 const HOME_AFTER_FAILED_SWITCH: &str = "HERDR_HOME_AFTER_FAILED_FEDERATION_SWITCH";
@@ -691,14 +691,14 @@ enabled = true
         &mut client,
         &output_rx,
         &mut output,
-        REMOTE_VISIBLE_PREFIX,
+        REMOTE_LOCATION,
         Duration::from_secs(15),
         &diagnostic_logs,
     );
 
     fs::write(&fail_bridge, b"fail the first activation").expect("arm bridge failure");
     clear_output(&output_rx, &mut output);
-    navigate_to(&mut client, REMOTE_QUALIFIED);
+    navigate_to(&mut client, REMOTE_WORKSPACE);
     wait_for_bridge_launches(&ssh_log, 1, Duration::from_secs(15));
     write_pane_marker(&home_api, &home_pane, HOME_AFTER_FAILED_SWITCH);
     wait_for_output(
@@ -714,7 +714,7 @@ enabled = true
     fs::remove_file(&fail_bridge).expect("disarm bridge failure");
 
     clear_output(&output_rx, &mut output);
-    navigate_to(&mut client, REMOTE_QUALIFIED);
+    navigate_to(&mut client, REMOTE_WORKSPACE);
     wait_for_output(
         &mut client,
         &output_rx,
@@ -751,7 +751,7 @@ enabled = true
     assert_eq!(client.child.process_id(), Some(client_pid));
 
     clear_output(&output_rx, &mut output);
-    navigate_to(&mut client, REMOTE_QUALIFIED);
+    navigate_to(&mut client, REMOTE_WORKSPACE);
     wait_for_output(
         &mut client,
         &output_rx,
@@ -969,7 +969,7 @@ enabled = true
         &mut client,
         &output_rx,
         &mut output,
-        "workspace-b@member-b",
+        "member-b",
         Duration::from_secs(15),
         &diagnostic_logs,
     );
@@ -977,7 +977,7 @@ enabled = true
         &mut client,
         &output_rx,
         &mut output,
-        "workspace-c@member-c",
+        "member-c",
         Duration::from_secs(15),
         &diagnostic_logs,
     );
@@ -985,7 +985,7 @@ enabled = true
     // A -> B -> C -> B -> A all happens inside this one TUI process. Returning
     // to B must resume the suspended connection rather than launching SSH twice.
     clear_output(&output_rx, &mut output);
-    navigate_to(&mut client, "workspace-b@member-b");
+    navigate_to(&mut client, "workspace-b");
     wait_for_output(
         &mut client,
         &output_rx,
@@ -998,7 +998,7 @@ enabled = true
     assert_eq!(bridge_launch_count_for_target(&ssh_log, "fake-host-b"), 1);
 
     clear_output(&output_rx, &mut output);
-    navigate_to(&mut client, "workspace-c@member-c");
+    navigate_to(&mut client, "workspace-c");
     wait_for_output(
         &mut client,
         &output_rx,
@@ -1011,7 +1011,7 @@ enabled = true
     assert_eq!(bridge_launch_count_for_target(&ssh_log, "fake-host-c"), 1);
 
     clear_output(&output_rx, &mut output);
-    navigate_to(&mut client, "workspace-b@member-b");
+    navigate_to(&mut client, "workspace-b");
     wait_for_output(
         &mut client,
         &output_rx,
@@ -1023,7 +1023,7 @@ enabled = true
     assert_eq!(bridge_launch_count_for_target(&ssh_log, "fake-host-b"), 1);
 
     clear_output(&output_rx, &mut output);
-    navigate_to(&mut client, "workspace-a@member-a");
+    navigate_to(&mut client, "workspace-a");
     wait_for_output(
         &mut client,
         &output_rx,
@@ -1037,7 +1037,7 @@ enabled = true
     // Resume B, then revoke C at the pinned home authority while B remains the
     // active server. The replacement directory must flow A -> client -> B.
     clear_output(&output_rx, &mut output);
-    navigate_to(&mut client, "workspace-b@member-b");
+    navigate_to(&mut client, "workspace-b");
     wait_for_output(
         &mut client,
         &output_rx,
@@ -1087,19 +1087,19 @@ enabled = true
         &mut client,
         &output_rx,
         &mut output,
-        "workspace-a@member-a",
+        "member-a",
         Duration::from_secs(15),
         &diagnostic_logs,
     );
     assert!(
-        !strip_terminal_control_sequences(&output).contains("workspace-c@member-c"),
+        !strip_terminal_control_sequences(&output).contains("member-c"),
         "the active remote view must replace, rather than merge, the authoritative directory"
     );
 
     let member_c_launches_before_revoked_selection =
         bridge_launch_count_for_target(&ssh_log, "fake-host-c");
     clear_output(&output_rx, &mut output);
-    navigate_to(&mut client, "workspace-c@member-c");
+    navigate_to(&mut client, "workspace-c");
     thread::sleep(Duration::from_millis(700));
     client
         .writer

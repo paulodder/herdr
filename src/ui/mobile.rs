@@ -9,14 +9,13 @@ use ratatui::{
 use super::sidebar::{
     agent_panel_entries, agent_panel_entries_from, grouped_child_display_label,
     next_entry_is_indented_workspace, workspace_list_entries_expanded, AgentPanelEntry,
-    WorkspaceListEntry,
+    AgentPanelTarget, WorkspaceListEntry,
 };
 use super::status::{agent_icon, state_dot};
 use super::text::{display_width_u16, truncate_end};
 use crate::app::state::{Palette, ToastKind, ToastNotification};
 use crate::app::AppState;
 use crate::detect::AgentState;
-use crate::layout::PaneId;
 use crate::terminal::TerminalRuntimeRegistry;
 
 const SWITCH_BUTTON_WIDTH: u16 = 10;
@@ -42,11 +41,7 @@ pub(crate) enum MobileSwitcherTarget {
     },
     NewTab,
     Tab(usize),
-    Agent {
-        ws_idx: usize,
-        tab_idx: usize,
-        pane_id: PaneId,
-    },
+    Agent(AgentPanelTarget),
     Menu(usize),
 }
 
@@ -156,11 +151,9 @@ pub(crate) fn mobile_switcher_target_at(
         let agents_end = cursor + agents.len() * 2;
         if doc_row >= cursor && doc_row < agents_end {
             let idx = (doc_row - cursor) / 2;
-            return agents.get(idx).map(|entry| MobileSwitcherTarget::Agent {
-                ws_idx: entry.ws_idx,
-                tab_idx: entry.tab_idx,
-                pane_id: entry.pane_id,
-            });
+            return agents
+                .get(idx)
+                .map(|entry| MobileSwitcherTarget::Agent(entry.target.clone()));
         }
         cursor = agents_end;
     }
@@ -183,6 +176,7 @@ pub(crate) fn mobile_switcher_target_at(
             WorkspaceListEntry::RemoteWorkspace {
                 endpoint_id,
                 workspace_id,
+                ..
             } => MobileSwitcherTarget::RemoteWorkspace {
                 endpoint_id: endpoint_id.clone(),
                 workspace_id: workspace_id.clone(),
@@ -508,11 +502,6 @@ fn render_mobile_switcher_content(
 
     let entries = agent_panel_entries_from(app, terminal_runtimes);
     if !entries.is_empty() {
-        let focused_agent = app.active.and_then(|ws_idx| {
-            let ws = app.workspaces.get(ws_idx)?;
-            ws.focused_pane_id()
-                .map(|pane_id| (ws_idx, ws.active_tab, pane_id))
-        });
         render_section_title_at(
             frame,
             viewport,
@@ -524,9 +513,7 @@ fn render_mobile_switcher_content(
         );
         doc_y += 1;
         for entry in &entries {
-            let active = focused_agent.is_some_and(|(ws_idx, tab_idx, pane_id)| {
-                entry.ws_idx == ws_idx && entry.tab_idx == tab_idx && entry.pane_id == pane_id
-            });
+            let active = entry.target.is_active(app);
             let bg = mobile_item_bg(false, active, p);
             let (icon, icon_style) = agent_icon(entry.state, entry.seen, app.spinner_tick, p);
             let title = Line::from(vec![
@@ -586,6 +573,7 @@ fn render_mobile_switcher_content(
             let WorkspaceListEntry::RemoteWorkspace {
                 endpoint_id,
                 workspace_id,
+                indented,
             } = entry
             else {
                 continue;
@@ -597,16 +585,23 @@ fn render_mobile_switcher_content(
             };
             let (state, seen) = super::sidebar::agent_status_state(workspace.agent_status);
             let (dot, dot_style) = state_dot(state, seen, p);
-            let name = crate::metadata_tokens::location_qualified_name(
-                &workspace.label,
-                &endpoint.endpoint.id,
-            );
+            let name =
+                crate::metadata_tokens::unqualified_name(&workspace.label, &endpoint.endpoint.id);
+            let prefix = if *indented {
+                if next_entry_is_indented_workspace(&space_entries, entry_idx) {
+                    "  ├─ "
+                } else {
+                    "  └─ "
+                }
+            } else {
+                "  "
+            };
             let title = Line::from(vec![
-                Span::raw("  "),
+                Span::raw(prefix),
                 Span::styled(dot, dot_style),
                 Span::raw(" "),
                 Span::styled(
-                    truncate_end(&name, content.width.saturating_sub(5) as usize),
+                    truncate_end(name, content.width.saturating_sub(5) as usize),
                     Style::default().fg(p.text).add_modifier(Modifier::BOLD),
                 ),
             ]);
@@ -618,7 +613,10 @@ fn render_mobile_switcher_content(
                 app.mobile_switcher_scroll,
                 mobile_item_bg(false, false, p),
                 title,
-                format!("  {} panes", workspace.pane_count),
+                format!(
+                    "  {} · {} panes",
+                    endpoint.endpoint.id, workspace.pane_count
+                ),
                 p.overlay0,
             );
             doc_y += 2;
@@ -654,7 +652,7 @@ fn render_mobile_switcher_content(
 
         title_spans.push(Span::styled(dot, dot_style.bg(bg)));
         title_spans.push(Span::styled(" ", Style::default().bg(bg)));
-        let raw_label = ws.display_name_from(&app.terminals, terminal_runtimes);
+        let raw_label = ws.base_display_name_from(&app.terminals, terminal_runtimes);
         let name = if *indented {
             grouped_child_display_label(
                 &raw_label,
@@ -674,7 +672,8 @@ fn render_mobile_switcher_content(
         ));
 
         let detail = format!(
-            "{detail_prefix}{} · {}",
+            "{detail_prefix}{} · {} · {}",
+            app.federation_member_id,
             ws.branch().unwrap_or_else(|| "shell".into()),
             mobile_tab_status(ws)
         );
@@ -786,6 +785,7 @@ fn mobile_agent_detail(entry: &AgentPanelEntry) -> String {
     if let Some(agent_label) = entry.agent_label.as_deref() {
         parts.push(agent_label.to_string());
     }
+    parts.push(entry.location.clone());
     format!("  {}", parts.join(" · "))
 }
 
@@ -1186,10 +1186,13 @@ mod tests {
 
     fn agent_entry(primary_tab_label: Option<&str>, agent_label: Option<&str>) -> AgentPanelEntry {
         AgentPanelEntry {
-            ws_idx: 0,
-            tab_idx: 0,
-            pane_id: PaneId::from_raw(1),
+            target: AgentPanelTarget::Local {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id: crate::layout::PaneId::from_raw(1),
+            },
             primary_label: "herdr".into(),
+            location: "x1".into(),
             primary_tab_label: primary_tab_label.map(str::to_string),
             pane_label: None,
             terminal_title: None,
@@ -1308,10 +1311,7 @@ mod tests {
 
         let viewport = mobile_switcher_areas(&app).viewport;
         let agent_hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 1);
-        assert!(matches!(
-            agent_hit,
-            Some(MobileSwitcherTarget::Agent { .. })
-        ));
+        assert!(matches!(agent_hit, Some(MobileSwitcherTarget::Agent(_))));
         let workspace_hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 7);
         assert_eq!(workspace_hit, Some(MobileSwitcherTarget::Workspace(0)));
     }
@@ -1376,14 +1376,17 @@ mod tests {
     fn mobile_agent_detail_includes_tab_context_when_available() {
         let entry = agent_entry(Some("mobile-state"), Some("pi"));
 
-        assert_eq!(mobile_agent_detail(&entry), "  mobile-state · idle · pi");
+        assert_eq!(
+            mobile_agent_detail(&entry),
+            "  mobile-state · idle · pi · x1"
+        );
     }
 
     #[test]
     fn mobile_agent_detail_keeps_existing_compact_detail_without_tab_context() {
         let entry = agent_entry(None, Some("pi"));
 
-        assert_eq!(mobile_agent_detail(&entry), "  idle · pi");
+        assert_eq!(mobile_agent_detail(&entry), "  idle · pi · x1");
     }
 
     #[test]

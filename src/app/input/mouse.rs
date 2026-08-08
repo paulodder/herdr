@@ -527,11 +527,9 @@ impl AppState {
                             return Some(MouseAction::FocusWorkspace { ws_idx: idx });
                         }
 
-                        if let Some((ws_idx, _tab_idx, pane_id)) =
-                            self.collapsed_agent_detail_target_at(mouse.row)
-                        {
-                            self.mode = Mode::Terminal;
-                            return Some(MouseAction::FocusPane { ws_idx, pane_id });
+                        if let Some(target) = self.collapsed_agent_detail_target_at(mouse.row) {
+                            self.focus_navigator_target(target);
+                            return None;
                         }
                         return None;
                     }
@@ -579,9 +577,8 @@ impl AppState {
                             && mouse.column == card.rect.x
                             && mouse.column < card.rect.x + card.rect.width
                     }) {
-                        if let Some((key, collapsed)) =
-                            crate::ui::workspace_parent_group_state(self, card.ws_idx)
-                        {
+                        if let Some(key) = card.group_key.clone().filter(|_| card.group_parent) {
+                            let collapsed = self.collapsed_space_keys.contains(&key);
                             if collapsed {
                                 self.collapsed_space_keys.remove(&key);
                             } else {
@@ -627,11 +624,9 @@ impl AppState {
                         return None;
                     }
 
-                    if let Some((ws_idx, _tab_idx, pane_id)) =
-                        self.agent_detail_target_at(mouse.row)
-                    {
-                        self.mode = Mode::Terminal;
-                        return Some(MouseAction::FocusPane { ws_idx, pane_id });
+                    if let Some(target) = self.agent_detail_target_at(mouse.row) {
+                        self.focus_navigator_target(target);
+                        return None;
                     }
                 } else if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
                     if self.mode != Mode::Terminal {
@@ -1184,13 +1179,9 @@ impl AppState {
                 self.mode = Mode::Terminal;
                 return MobileMouseResult::Action(MouseAction::FocusTab { tab_idx });
             }
-            Some(crate::ui::MobileSwitcherTarget::Agent {
-                ws_idx,
-                tab_idx: _,
-                pane_id,
-            }) => {
-                self.mode = Mode::Terminal;
-                return MobileMouseResult::Action(MouseAction::FocusPane { ws_idx, pane_id });
+            Some(crate::ui::MobileSwitcherTarget::Agent(target)) => {
+                self.focus_navigator_target(target.navigator_target());
+                return MobileMouseResult::Consumed;
             }
             Some(crate::ui::MobileSwitcherTarget::Menu(action_idx)) => {
                 let actions = global_menu_actions(self);

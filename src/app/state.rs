@@ -581,6 +581,8 @@ pub struct WorkspaceCardArea {
     pub remote: Option<FederatedWorkspaceTarget>,
     pub rect: Rect,
     pub indented: bool,
+    pub group_key: Option<String>,
+    pub group_parent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

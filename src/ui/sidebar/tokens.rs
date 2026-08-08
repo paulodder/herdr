@@ -123,10 +123,13 @@ mod tests {
 
     fn entry() -> AgentPanelEntry {
         AgentPanelEntry {
-            ws_idx: 0,
-            tab_idx: 0,
-            pane_id: crate::layout::PaneId::from_raw(1),
+            target: crate::ui::AgentPanelTarget::Local {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id: crate::layout::PaneId::from_raw(1),
+            },
             primary_label: "repo".into(),
+            location: "x1".into(),
             primary_tab_label: None,
             pane_label: None,
             terminal_title: None,

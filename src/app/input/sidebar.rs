@@ -1,6 +1,6 @@
 use ratatui::layout::Rect;
 
-use crate::app::state::{AppState, ViewLayout};
+use crate::app::state::{AppState, NavigatorTarget, ViewLayout};
 
 use super::ScrollbarClickTarget;
 
@@ -370,6 +370,7 @@ impl AppState {
             crate::ui::WorkspaceListEntry::RemoteWorkspace {
                 endpoint_id,
                 workspace_id,
+                ..
             } => Some(crate::app::state::FederatedWorkspaceTarget {
                 endpoint_id: endpoint_id.clone(),
                 workspace_id: workspace_id.clone(),
@@ -378,10 +379,7 @@ impl AppState {
         }
     }
 
-    pub(super) fn collapsed_agent_detail_target_at(
-        &self,
-        row: u16,
-    ) -> Option<(usize, usize, crate::layout::PaneId)> {
+    pub(super) fn collapsed_agent_detail_target_at(&self, row: u16) -> Option<NavigatorTarget> {
         if !self.sidebar_collapsed {
             return None;
         }
@@ -403,7 +401,7 @@ impl AppState {
         let detail_idx = (row - detail_content_area.y) as usize;
         let details = crate::ui::agent_panel_entries(self);
         let detail = details.get(detail_idx)?;
-        Some((detail.ws_idx, detail.tab_idx, detail.pane_id))
+        Some(detail.target.navigator_target())
     }
 
     pub(super) fn workspace_drop_index_at_row(&self, row: u16) -> Option<usize> {
@@ -481,10 +479,7 @@ impl AppState {
             && row < rect.y + rect.height
     }
 
-    pub(super) fn agent_detail_target_at(
-        &self,
-        row: u16,
-    ) -> Option<(usize, usize, crate::layout::PaneId)> {
+    pub(super) fn agent_detail_target_at(&self, row: u16) -> Option<NavigatorTarget> {
         if self.sidebar_collapsed {
             return None;
         }
@@ -509,7 +504,7 @@ impl AppState {
                 break;
             }
             if row >= row_y && row < row_y.saturating_add(height) {
-                return Some((detail.ws_idx, detail.tab_idx, detail.pane_id));
+                return Some(detail.target.navigator_target());
             }
             row_y = row_y.saturating_add(height);
             if row_y < body.y + body.height {
@@ -529,7 +524,7 @@ mod tests {
 
     use super::super::{app_for_mouse_test, capture_snapshot, mouse, unique_temp_path};
     use crate::{
-        app::state::{AgentPanelSort, DragTarget, Mode},
+        app::state::{AgentPanelSort, DragTarget, Mode, NavigatorTarget},
         config::SidebarCollapsedModeConfig,
         detect::{Agent, AgentState},
         workspace::Workspace,
@@ -815,12 +810,20 @@ mod tests {
 
         assert_eq!(
             app.state.agent_detail_target_at(body.y),
-            Some((0, 0, first_pane))
+            Some(NavigatorTarget::Pane {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id: first_pane,
+            })
         );
         assert_eq!(app.state.agent_detail_target_at(body.y + 1), None);
         assert_eq!(
             app.state.agent_detail_target_at(body.y + 3),
-            Some((1, 0, second_pane))
+            Some(NavigatorTarget::Pane {
+                ws_idx: 1,
+                tab_idx: 0,
+                pane_id: second_pane,
+            })
         );
     }
 

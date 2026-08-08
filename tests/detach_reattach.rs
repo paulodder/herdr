@@ -99,6 +99,7 @@ fn spawn_server(
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", api_socket_path);
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
+    cmd.env_remove("HERDR_CONFIG_PATH");
     cmd.env("SHELL", "/bin/sh");
     cmd.env_remove("HERDR_ENV");
 

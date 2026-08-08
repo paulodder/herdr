@@ -20,11 +20,57 @@ use crate::terminal::TerminalRuntimeRegistry;
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 2;
 const AGENT_PANEL_HEADER_ROWS: u16 = 3;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AgentPanelTarget {
+    Local {
+        ws_idx: usize,
+        tab_idx: usize,
+        pane_id: crate::layout::PaneId,
+    },
+    Remote {
+        endpoint_id: String,
+        pane_id: String,
+    },
+}
+
+impl AgentPanelTarget {
+    pub(crate) fn navigator_target(&self) -> crate::app::state::NavigatorTarget {
+        match self {
+            Self::Local {
+                ws_idx,
+                tab_idx,
+                pane_id,
+            } => crate::app::state::NavigatorTarget::Pane {
+                ws_idx: *ws_idx,
+                tab_idx: *tab_idx,
+                pane_id: *pane_id,
+            },
+            Self::Remote {
+                endpoint_id,
+                pane_id,
+            } => crate::app::state::NavigatorTarget::RemotePane {
+                endpoint_id: endpoint_id.clone(),
+                pane_id: pane_id.clone(),
+            },
+        }
+    }
+
+    pub(crate) fn is_active(&self, app: &AppState) -> bool {
+        match self {
+            Self::Local {
+                ws_idx,
+                tab_idx,
+                pane_id,
+            } => app.is_active_pane(*ws_idx, *tab_idx, *pane_id),
+            Self::Remote { .. } => false,
+        }
+    }
+}
+
 pub(crate) struct AgentPanelEntry {
-    pub ws_idx: usize,
-    pub tab_idx: usize,
-    pub pane_id: crate::layout::PaneId,
+    pub target: AgentPanelTarget,
     pub primary_label: String,
+    pub location: String,
     pub primary_tab_label: Option<String>,
     pub pane_label: Option<String>,
     pub terminal_title: Option<String>,
@@ -123,13 +169,13 @@ fn agent_panel_entries_with_runtimes(
         }
     };
 
-    let mut entries: Vec<_> = app
+    let local_entries: Vec<_> = app
         .workspaces
         .iter()
         .enumerate()
         .flat_map(|(ws_idx, ws)| {
             let multi_tab = ws.tabs.len() > 1;
-            let workspace_label = ws.display_name_from(&app.terminals, terminal_runtimes);
+            let workspace_label = ws.base_display_name_from(&app.terminals, terminal_runtimes);
             ws.pane_details(&app.terminals)
                 .into_iter()
                 .map(move |detail| {
@@ -139,10 +185,13 @@ fn agent_panel_entries_with_runtimes(
                             .get(detail.tab_idx)
                             .is_some_and(|tab| !tab.is_auto_named());
                     AgentPanelEntry {
-                        ws_idx,
-                        tab_idx: detail.tab_idx,
-                        pane_id: detail.pane_id,
+                        target: AgentPanelTarget::Local {
+                            ws_idx,
+                            tab_idx: detail.tab_idx,
+                            pane_id: detail.pane_id,
+                        },
                         primary_label: workspace_label.clone(),
+                        location: app.federation_member_id.clone(),
                         primary_tab_label: show_tab.then_some(detail.tab_label),
                         pane_label: detail.pane_label,
                         terminal_title: detail.terminal_title,
@@ -159,10 +208,76 @@ fn agent_panel_entries_with_runtimes(
         })
         .collect();
 
+    let mut entries_by_member = std::collections::BTreeMap::new();
+    entries_by_member.insert(app.federation_member_id.clone(), local_entries);
+    for endpoint in app.federation_states() {
+        if endpoint.endpoint.id == app.federation_member_id {
+            continue;
+        }
+        let Some(snapshot) = endpoint.snapshot.as_ref() else {
+            continue;
+        };
+        let mut remote_entries = Vec::new();
+        for agent in &snapshot.agents {
+            let workspace = snapshot
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.workspace_id == agent.workspace_id);
+            let tab = snapshot.tabs.iter().find(|tab| tab.tab_id == agent.tab_id);
+            let Some(workspace) = workspace else {
+                continue;
+            };
+            let multi_tab = workspace.tab_count > 1;
+            let tab_label = tab.map(|tab| {
+                crate::metadata_tokens::unqualified_name(&tab.label, &endpoint.endpoint.id)
+                    .to_string()
+            });
+            let show_tab = multi_tab || tab_label.as_deref().is_some_and(|label| !label.is_empty());
+            let agent_label = agent
+                .display_agent
+                .clone()
+                .or_else(|| agent.name.clone())
+                .or_else(|| agent.agent.clone());
+            let parsed_agent = agent
+                .agent
+                .as_deref()
+                .or(agent.display_agent.as_deref())
+                .and_then(crate::detect::parse_agent_label);
+            let (state, seen) = agent_status_state(agent.agent_status);
+            remote_entries.push(AgentPanelEntry {
+                target: AgentPanelTarget::Remote {
+                    endpoint_id: endpoint.endpoint.id.clone(),
+                    pane_id: agent.pane_id.clone(),
+                },
+                primary_label: crate::metadata_tokens::unqualified_name(
+                    &workspace.label,
+                    &endpoint.endpoint.id,
+                )
+                .to_string(),
+                location: endpoint.endpoint.id.clone(),
+                primary_tab_label: show_tab.then_some(tab_label).flatten(),
+                pane_label: agent.title.clone(),
+                terminal_title: agent.terminal_title.clone(),
+                terminal_title_stripped: agent.terminal_title_stripped.clone(),
+                agent_label,
+                agent: parsed_agent,
+                state,
+                seen,
+                last_agent_state_change_seq: Some(agent.revision),
+                state_labels: agent.state_labels.clone(),
+                tokens: agent.tokens.clone(),
+            });
+        }
+        entries_by_member.insert(endpoint.endpoint.id.clone(), remote_entries);
+    }
+
+    let mut entries: Vec<_> = entries_by_member.into_values().flatten().collect();
+
     if matches!(app.agent_panel_sort, AgentPanelSort::Priority) {
         entries.sort_by_key(|entry| {
             (
                 std::cmp::Reverse(workspace_attention_priority(entry.state, entry.seen)),
+                entry.location.clone(),
                 std::cmp::Reverse(entry.last_agent_state_change_seq),
             )
         });
@@ -185,12 +300,12 @@ fn workspace_row_height(app: &AppState, ws: &crate::workspace::Workspace, indent
     let (state, seen) = ws.aggregate_state(&app.terminals);
     let label = if indented {
         grouped_child_display_label(
-            &ws.display_name(),
+            &ws.base_display_name(),
             ws.branch().as_deref(),
             ws.custom_name.is_some(),
         )
     } else {
-        ws.display_name()
+        ws.base_display_name()
     };
     let token_values = ws.metadata_tokens.values();
     tokens::space_rows(
@@ -246,10 +361,26 @@ pub(crate) fn agent_status_state(status: crate::api::schema::AgentStatus) -> (Ag
 }
 
 fn space_aggregate_state(app: &AppState, key: &str) -> (AgentState, bool) {
-    app.workspaces
+    let local = app
+        .workspaces
         .iter()
         .filter(|ws| ws.worktree_space().is_some_and(|space| space.key == key))
-        .map(|ws| ws.aggregate_state(&app.terminals))
+        .map(|ws| ws.aggregate_state(&app.terminals));
+    let remote = app.federation_states().flat_map(|endpoint| {
+        endpoint
+            .snapshot
+            .iter()
+            .flat_map(|snapshot| snapshot.workspaces.iter())
+            .filter(|workspace| {
+                workspace
+                    .worktree
+                    .as_ref()
+                    .is_some_and(|worktree| worktree.repo_key == key)
+            })
+            .map(|workspace| agent_status_state(workspace.agent_status))
+    });
+    local
+        .chain(remote)
         .max_by_key(|(state, seen)| workspace_attention_priority(*state, *seen))
         .unwrap_or((AgentState::Unknown, true))
 }
@@ -304,13 +435,17 @@ pub(crate) enum WorkspaceListEntry {
     RemoteWorkspace {
         endpoint_id: String,
         workspace_id: String,
+        indented: bool,
     },
 }
 
 pub(crate) fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], idx: usize) -> bool {
     matches!(
         entries.get(idx.saturating_add(1)),
-        Some(WorkspaceListEntry::Workspace { indented: true, .. })
+        Some(
+            WorkspaceListEntry::Workspace { indented: true, .. }
+                | WorkspaceListEntry::RemoteWorkspace { indented: true, .. }
+        )
     )
 }
 
@@ -340,112 +475,160 @@ pub(crate) fn workspace_list_entries_expanded(app: &AppState) -> Vec<WorkspaceLi
 }
 
 fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<WorkspaceListEntry> {
+    #[derive(Clone)]
+    struct Candidate {
+        entry: WorkspaceListEntry,
+        worktree_key: Option<String>,
+        linked_worktree: bool,
+    }
+
+    // The active member changes when the client crosses a federation boundary,
+    // but the sidebar must not. Build one canonical member-ordered directory,
+    // then group worktrees across that whole directory by repository identity.
+    let mut entries_by_member = std::collections::BTreeMap::<String, Vec<Candidate>>::new();
+    entries_by_member.insert(
+        app.federation_member_id.clone(),
+        app.workspaces
+            .iter()
+            .enumerate()
+            .map(|(ws_idx, workspace)| Candidate {
+                entry: WorkspaceListEntry::Workspace {
+                    ws_idx,
+                    indented: false,
+                },
+                worktree_key: workspace.worktree_space().map(|space| space.key.clone()),
+                linked_worktree: workspace
+                    .worktree_space()
+                    .is_some_and(|space| space.is_linked_worktree),
+            })
+            .collect(),
+    );
+    for endpoint in app.federation_states() {
+        if endpoint.endpoint.id == app.federation_member_id {
+            continue;
+        }
+        let Some(snapshot) = endpoint.snapshot.as_ref() else {
+            continue;
+        };
+        entries_by_member.insert(
+            endpoint.endpoint.id.clone(),
+            snapshot
+                .workspaces
+                .iter()
+                .map(|workspace| Candidate {
+                    entry: WorkspaceListEntry::RemoteWorkspace {
+                        endpoint_id: endpoint.endpoint.id.clone(),
+                        workspace_id: workspace.workspace_id.clone(),
+                        indented: false,
+                    },
+                    worktree_key: workspace
+                        .worktree
+                        .as_ref()
+                        .map(|worktree| worktree.repo_key.clone()),
+                    linked_worktree: workspace
+                        .worktree
+                        .as_ref()
+                        .is_some_and(|worktree| worktree.is_linked_worktree),
+                })
+                .collect(),
+        );
+    }
+
+    let candidates = entries_by_member
+        .into_values()
+        .flatten()
+        .collect::<Vec<_>>();
     let mut members_by_key = std::collections::HashMap::<String, Vec<usize>>::new();
-    for (ws_idx, ws) in app.workspaces.iter().enumerate() {
-        if let Some(space) = ws.worktree_space() {
-            members_by_key
-                .entry(space.key.clone())
-                .or_default()
-                .push(ws_idx);
+    for (index, candidate) in candidates.iter().enumerate() {
+        if let Some(key) = &candidate.worktree_key {
+            members_by_key.entry(key.clone()).or_default().push(index);
         }
     }
     let grouped_keys = members_by_key
         .iter()
         .filter(|(_, members)| {
             members.len() >= 2
-                && members.iter().any(|idx| {
-                    app.workspaces
-                        .get(*idx)
-                        .and_then(|ws| ws.worktree_space())
-                        .is_some_and(|space| !space.is_linked_worktree)
-                })
+                && members
+                    .iter()
+                    .any(|index| !candidates[*index].linked_worktree)
         })
         .map(|(key, _)| key.clone())
         .collect::<std::collections::HashSet<_>>();
 
-    let visible_group_idx = if matches!(app.mode, Mode::Navigate) {
+    let visible_workspace_idx = if matches!(app.mode, Mode::Navigate) {
         Some(app.selected)
     } else {
         app.active
     };
-    let active_group = visible_group_idx.and_then(|idx| {
-        app.workspaces
-            .get(idx)
-            .and_then(|ws| ws.worktree_space())
-            .map(|space| space.key.clone())
+    let active_candidate = visible_workspace_idx.and_then(|ws_idx| {
+        candidates.iter().position(|candidate| {
+            matches!(
+                candidate.entry,
+                WorkspaceListEntry::Workspace {
+                    ws_idx: candidate_ws_idx,
+                    ..
+                } if candidate_ws_idx == ws_idx
+            )
+        })
     });
+    let active_group = active_candidate
+        .and_then(|index| candidates[index].worktree_key.as_deref())
+        .map(str::to_string);
+
+    let with_indentation = |entry: &WorkspaceListEntry, indented| match entry {
+        WorkspaceListEntry::Workspace { ws_idx, .. } => WorkspaceListEntry::Workspace {
+            ws_idx: *ws_idx,
+            indented,
+        },
+        WorkspaceListEntry::RemoteWorkspace {
+            endpoint_id,
+            workspace_id,
+            ..
+        } => WorkspaceListEntry::RemoteWorkspace {
+            endpoint_id: endpoint_id.clone(),
+            workspace_id: workspace_id.clone(),
+            indented,
+        },
+    };
 
     let mut emitted_groups = std::collections::HashSet::<String>::new();
     let mut entries = Vec::new();
-    for (ws_idx, ws) in app.workspaces.iter().enumerate() {
-        let Some(space) = ws
-            .worktree_space()
-            .filter(|space| grouped_keys.contains(&space.key))
+    for (index, candidate) in candidates.iter().enumerate() {
+        let Some(key) = candidate
+            .worktree_key
+            .as_ref()
+            .filter(|key| grouped_keys.contains(*key))
         else {
-            entries.push(WorkspaceListEntry::Workspace {
-                ws_idx,
-                indented: false,
-            });
+            entries.push(with_indentation(&candidate.entry, false));
             continue;
         };
-
-        if !emitted_groups.insert(space.key.clone()) {
+        if !emitted_groups.insert(key.clone()) {
             continue;
         }
 
-        let Some(members) = members_by_key.get(&space.key) else {
+        let Some(members) = members_by_key.get(key) else {
             continue;
         };
-        let Some(parent_idx) = members.iter().copied().find(|idx| {
-            app.workspaces
-                .get(*idx)
-                .and_then(|member| member.worktree_space())
-                .is_some_and(|member_space| !member_space.is_linked_worktree)
-        }) else {
-            entries.push(WorkspaceListEntry::Workspace {
-                ws_idx,
-                indented: false,
-            });
-            continue;
-        };
-        let collapsed = !force_expanded && app.collapsed_space_keys.contains(&space.key);
-        entries.push(WorkspaceListEntry::Workspace {
-            ws_idx: parent_idx,
-            indented: false,
-        });
+        let parent = members
+            .iter()
+            .copied()
+            .find(|member| !candidates[*member].linked_worktree)
+            .unwrap_or(index);
+        entries.push(with_indentation(&candidates[parent].entry, false));
 
+        let collapsed = !force_expanded && app.collapsed_space_keys.contains(key);
         if collapsed {
-            if let Some(active_idx) = visible_group_idx
-                .filter(|idx| *idx != parent_idx)
-                .filter(|_| active_group.as_deref() == Some(space.key.as_str()))
+            if let Some(active) = active_candidate
+                .filter(|active| *active != parent)
+                .filter(|_| active_group.as_deref() == Some(key.as_str()))
             {
-                entries.push(WorkspaceListEntry::Workspace {
-                    ws_idx: active_idx,
-                    indented: true,
-                });
+                entries.push(with_indentation(&candidates[active].entry, true));
             }
         } else {
-            for member_idx in members {
-                if *member_idx == parent_idx {
-                    continue;
-                }
-                entries.push(WorkspaceListEntry::Workspace {
-                    ws_idx: *member_idx,
-                    indented: true,
-                });
+            for member in members.iter().copied().filter(|member| *member != parent) {
+                entries.push(with_indentation(&candidates[member].entry, true));
             }
         }
-    }
-    for endpoint in app.federation_states() {
-        let Some(snapshot) = endpoint.snapshot.as_ref() else {
-            continue;
-        };
-        entries.extend(snapshot.workspaces.iter().map(|workspace| {
-            WorkspaceListEntry::RemoteWorkspace {
-                endpoint_id: endpoint.endpoint.id.clone(),
-                workspace_id: workspace.workspace_id.clone(),
-            }
-        }));
     }
     entries
 }
@@ -468,6 +651,25 @@ pub(crate) fn remote_workspace<'a>(
     Some((endpoint, workspace))
 }
 
+fn workspace_entry_group_key(app: &AppState, entry: &WorkspaceListEntry) -> Option<String> {
+    match entry {
+        WorkspaceListEntry::Workspace { ws_idx, .. } => app
+            .workspaces
+            .get(*ws_idx)?
+            .worktree_space()
+            .map(|space| space.key.clone()),
+        WorkspaceListEntry::RemoteWorkspace {
+            endpoint_id,
+            workspace_id,
+            ..
+        } => remote_workspace(app, endpoint_id, workspace_id)?
+            .1
+            .worktree
+            .as_ref()
+            .map(|worktree| worktree.repo_key.clone()),
+    }
+}
+
 fn remote_workspace_row_height(
     app: &AppState,
     endpoint_id: &str,
@@ -478,12 +680,11 @@ fn remote_workspace_row_height(
         return 0;
     };
     let (state, seen) = agent_status_state(workspace.agent_status);
-    let label =
-        crate::metadata_tokens::location_qualified_name(&workspace.label, &endpoint.endpoint.id);
+    let label = crate::metadata_tokens::unqualified_name(&workspace.label, &endpoint.endpoint.id);
     (tokens::space_rows(
         &app.sidebar_spaces,
         SpaceTokenContext {
-            workspace: &label,
+            workspace: label,
             branch: None,
             state_text: state_label(state, seen),
             ahead_behind: None,
@@ -537,9 +738,10 @@ fn workspace_list_visible_count(app: &AppState, area: Rect, scroll: usize) -> us
             WorkspaceListEntry::RemoteWorkspace {
                 endpoint_id,
                 workspace_id,
+                indented,
             } => (
                 remote_workspace_row_height(app, endpoint_id, workspace_id, body.height),
-                workspace_entry_gap(&entries, entry_idx, false),
+                workspace_entry_gap(&entries, entry_idx, *indented),
             ),
         };
         if used_rows.saturating_add(row_height) > body.height {
@@ -573,9 +775,10 @@ fn workspace_list_bottom_start(app: &AppState, area: Rect) -> usize {
             WorkspaceListEntry::RemoteWorkspace {
                 endpoint_id,
                 workspace_id,
+                indented,
             } => (
                 remote_workspace_row_height(app, endpoint_id, workspace_id, body.height),
-                false,
+                *indented,
             ),
         };
         let gap = workspace_entry_gap(&entries, entry_idx, indented);
@@ -763,6 +966,14 @@ pub(crate) fn compute_workspace_list_areas(
 
     let entries = workspace_list_entries(app);
     for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
+        let indented = match entry {
+            WorkspaceListEntry::Workspace { indented, .. }
+            | WorkspaceListEntry::RemoteWorkspace { indented, .. } => *indented,
+        };
+        let group_parent = !indented && next_entry_is_indented_workspace(&entries, entry_idx);
+        let group_key = group_parent
+            .then(|| workspace_entry_group_key(app, entry))
+            .flatten();
         match entry {
             WorkspaceListEntry::Workspace { ws_idx, indented } => {
                 let Some(ws) = app.workspaces.get(*ws_idx) else {
@@ -778,6 +989,8 @@ pub(crate) fn compute_workspace_list_areas(
                     remote: None,
                     rect: Rect::new(body.x, row_y, body.width, row_height),
                     indented: *indented,
+                    group_key,
+                    group_parent,
                 });
                 row_y = row_y.saturating_add(row_height);
                 if gap > 0 && row_y < body_bottom {
@@ -787,10 +1000,11 @@ pub(crate) fn compute_workspace_list_areas(
             WorkspaceListEntry::RemoteWorkspace {
                 endpoint_id,
                 workspace_id,
+                indented,
             } => {
                 let row_height =
                     remote_workspace_row_height(app, endpoint_id, workspace_id, body.height);
-                let gap = workspace_entry_gap(&entries, entry_idx, false);
+                let gap = workspace_entry_gap(&entries, entry_idx, *indented);
                 if row_y.saturating_add(row_height) > body_bottom {
                     break;
                 }
@@ -801,7 +1015,9 @@ pub(crate) fn compute_workspace_list_areas(
                         workspace_id: workspace_id.clone(),
                     }),
                     rect: Rect::new(body.x, row_y, body.width, row_height),
-                    indented: false,
+                    indented: *indented,
+                    group_key,
+                    group_parent,
                 });
                 row_y = row_y.saturating_add(row_height);
                 if gap > 0 && row_y < body_bottom {
@@ -888,6 +1104,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
             WorkspaceListEntry::RemoteWorkspace {
                 endpoint_id,
                 workspace_id,
+                ..
             } => {
                 let Some((_, workspace)) = remote_workspace(app, endpoint_id, workspace_id) else {
                     continue;
@@ -1017,9 +1234,17 @@ fn render_remote_workspace_card(
         return true;
     };
     let p = &app.palette;
-    let (state, seen) = agent_status_state(workspace.agent_status);
-    let label =
-        crate::metadata_tokens::location_qualified_name(&workspace.label, &endpoint.endpoint.id);
+    let parent_group = card
+        .group_key
+        .as_ref()
+        .filter(|_| card.group_parent)
+        .map(|key| (key, app.collapsed_space_keys.contains(key.as_str())));
+    let (state, seen) = parent_group
+        .as_ref()
+        .filter(|(_, collapsed)| *collapsed)
+        .map(|(key, _)| space_aggregate_state(app, key))
+        .unwrap_or_else(|| agent_status_state(workspace.agent_status));
+    let label = crate::metadata_tokens::unqualified_name(&workspace.label, &endpoint.endpoint.id);
     let state_icon = state_dot(state, seen, p);
     let state_text_style = Style::default()
         .fg(state_label_color(state, seen, p))
@@ -1028,7 +1253,7 @@ fn render_remote_workspace_card(
     let rows = tokens::space_rows(
         &app.sidebar_spaces,
         SpaceTokenContext {
-            workspace: &label,
+            workspace: label,
             branch: None,
             state_text: state_label(state, seen),
             ahead_behind: None,
@@ -1040,7 +1265,48 @@ fn render_remote_workspace_card(
         if row_index as u16 >= card.rect.height || card.rect.y + row_index as u16 >= list_bottom {
             break;
         }
-        let mut spans = vec![Span::raw(if row_index == 0 { " " } else { "   " })];
+        let mut spans = Vec::new();
+        if row_index == 0 {
+            if card.indented {
+                spans.push(Span::raw("   "));
+            } else if let Some((_, collapsed)) = parent_group {
+                spans.push(Span::styled(
+                    if collapsed { "▸" } else { "▾" },
+                    Style::default().fg(p.accent),
+                ));
+                spans.push(Span::raw(" "));
+            } else {
+                spans.push(Span::raw(" "));
+            }
+        } else if card.indented {
+            spans.push(Span::raw("     "));
+        } else {
+            spans.push(Span::raw("   "));
+        }
+        let prefix_width = if row_index == 0 {
+            if card.indented {
+                3
+            } else if parent_group.is_some() {
+                2
+            } else {
+                1
+            }
+        } else if card.indented {
+            5
+        } else {
+            3
+        };
+        let location_width = if row_index == 0 {
+            workspace_location_width(&endpoint.endpoint.id, card.rect.width, prefix_width)
+        } else {
+            0
+        };
+        let content_width = card
+            .rect
+            .width
+            .saturating_sub(prefix_width)
+            .saturating_sub(location_width)
+            .saturating_sub(u16::from(location_width > 0));
         spans.extend(resolved_token_spans(
             resolved,
             state_icon,
@@ -1050,9 +1316,7 @@ fn render_remote_workspace_card(
             secondary_style,
             secondary_style,
             p,
-            card.rect
-                .width
-                .saturating_sub(if row_index == 0 { 1 } else { 3 }) as usize,
+            content_width as usize,
         ));
         frame.render_widget(
             Paragraph::new(Line::from(spans)),
@@ -1063,8 +1327,39 @@ fn render_remote_workspace_card(
                 1,
             ),
         );
+        if row_index == 0 {
+            render_workspace_location(frame, card.rect, &endpoint.endpoint.id, location_width, p);
+        }
     }
     true
+}
+
+fn workspace_location_width(location: &str, row_width: u16, prefix_width: u16) -> u16 {
+    let available = row_width.saturating_sub(prefix_width);
+    let max_location_width = available / 2;
+    display_width_u16(location).min(max_location_width)
+}
+
+fn render_workspace_location(
+    frame: &mut Frame,
+    row: Rect,
+    location: &str,
+    width: u16,
+    palette: &Palette,
+) {
+    if width == 0 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            truncate_end(location, width as usize),
+            Style::default()
+                .fg(palette.overlay0)
+                .add_modifier(Modifier::DIM),
+        ))
+        .alignment(Alignment::Right),
+        Rect::new(row.x + row.width.saturating_sub(width), row.y, width, 1),
+    );
 }
 
 pub(super) fn render_sidebar(
@@ -1351,15 +1646,17 @@ fn render_workspace_list(
             Style::default().fg(p.subtext0)
         };
 
-        let label = ws.display_name_from(&app.terminals, terminal_runtimes);
+        let label = ws.base_display_name_from(&app.terminals, terminal_runtimes);
         let display_label = if card.indented {
             grouped_child_display_label(&label, ws.branch().as_deref(), ws.custom_name.is_some())
         } else {
             label
         };
-        let parent_group = (!card.indented)
-            .then(|| workspace_parent_group_state(app, i))
-            .flatten();
+        let parent_group = card
+            .group_key
+            .as_ref()
+            .filter(|_| card.group_parent)
+            .map(|key| (key.clone(), app.collapsed_space_keys.contains(key)));
         let (display_state, display_seen) = parent_group
             .as_ref()
             .filter(|(_, collapsed)| *collapsed)
@@ -1420,6 +1717,17 @@ fn render_workspace_list(
             } else {
                 3
             };
+            let location_width = if row_index == 0 && app.federation_states().next().is_some() {
+                workspace_location_width(&app.federation_member_id, card.rect.width, prefix_width)
+            } else {
+                0
+            };
+            let content_width = card
+                .rect
+                .width
+                .saturating_sub(prefix_width)
+                .saturating_sub(location_width)
+                .saturating_sub(u16::from(location_width > 0));
             spans.extend(resolved_token_spans(
                 resolved,
                 state_icon,
@@ -1429,12 +1737,21 @@ fn render_workspace_list(
                 branch_style,
                 branch_style,
                 p,
-                card.rect.width.saturating_sub(prefix_width) as usize,
+                content_width as usize,
             ));
             frame.render_widget(
                 Paragraph::new(Line::from(spans)),
                 Rect::new(card.rect.x, row_y + row_index as u16, card.rect.width, 1),
             );
+            if row_index == 0 {
+                render_workspace_location(
+                    frame,
+                    card.rect,
+                    &app.federation_member_id,
+                    location_width,
+                    p,
+                );
+            }
         }
     }
 
@@ -1534,7 +1851,7 @@ fn render_agent_detail(
             break;
         }
 
-        let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
+        let is_active = detail.target.is_active(app);
         let row_style = if is_active {
             Style::default().bg(p.surface_dim)
         } else {
@@ -1699,12 +2016,278 @@ mod tests {
     use crate::{detect::Agent, workspace::Workspace};
     use ratatui::{backend::TestBackend, Terminal};
 
+    fn remote_endpoint(
+        member_id: &str,
+        workspace_id: &str,
+        label: &str,
+    ) -> crate::federation::EndpointState {
+        crate::federation::EndpointState {
+            endpoint: crate::config::FederationEndpointConfig {
+                id: member_id.into(),
+                target: member_id.into(),
+                label: None,
+                session: "default".into(),
+                enabled: true,
+            },
+            status: crate::federation::EndpointConnectionStatus::Connected,
+            snapshot: Some(crate::api::schema::SessionSnapshot {
+                identity: crate::api::schema::RuntimeIdentity {
+                    server_id: format!("server-{member_id}"),
+                    session_id: format!("session-{member_id}"),
+                    session_name: "default".into(),
+                    member_id: member_id.into(),
+                    member_target: member_id.into(),
+                    member_label: None,
+                },
+                version: "test".into(),
+                protocol: crate::protocol::PROTOCOL_VERSION,
+                event_cursor: 1,
+                focused_workspace_id: Some(workspace_id.into()),
+                focused_tab_id: None,
+                focused_pane_id: None,
+                workspaces: vec![crate::api::schema::WorkspaceInfo {
+                    workspace_id: workspace_id.into(),
+                    number: 1,
+                    label: label.into(),
+                    focused: true,
+                    pane_count: 1,
+                    tab_count: 1,
+                    active_tab_id: format!("{workspace_id}:t1"),
+                    agent_status: crate::api::schema::AgentStatus::Idle,
+                    terminal_launcher_argv: None,
+                    tokens: Default::default(),
+                    worktree: None,
+                }],
+                tabs: Vec::new(),
+                panes: Vec::new(),
+                layouts: Vec::new(),
+                agents: Vec::new(),
+            }),
+            cursor: Some(1),
+            error: None,
+        }
+    }
+
+    fn remote_endpoint_with_agent(
+        member_id: &str,
+        workspace_id: &str,
+        label: &str,
+        agent_name: &str,
+    ) -> crate::federation::EndpointState {
+        let mut endpoint = remote_endpoint(member_id, workspace_id, label);
+        let snapshot = endpoint.snapshot.as_mut().unwrap();
+        let tab_id = format!("{workspace_id}:t1");
+        let pane_id = format!("{workspace_id}:p1");
+        snapshot.tabs.push(crate::api::schema::TabInfo {
+            tab_id: tab_id.clone(),
+            workspace_id: workspace_id.into(),
+            number: 1,
+            label: "main".into(),
+            focused: true,
+            pane_count: 1,
+            agent_status: crate::api::schema::AgentStatus::Working,
+        });
+        snapshot.focused_tab_id = Some(tab_id.clone());
+        snapshot.focused_pane_id = Some(pane_id.clone());
+        snapshot.agents.push(crate::api::schema::AgentInfo {
+            terminal_id: format!("terminal-{member_id}"),
+            name: Some(agent_name.into()),
+            agent: Some("codex".into()),
+            title: Some(agent_name.into()),
+            terminal_title: None,
+            terminal_title_stripped: None,
+            display_agent: Some("codex".into()),
+            agent_status: crate::api::schema::AgentStatus::Working,
+            screen_detection_skipped: false,
+            state_labels: Default::default(),
+            tokens: Default::default(),
+            agent_session: None,
+            workspace_id: workspace_id.into(),
+            tab_id,
+            pane_id,
+            focused: true,
+            cwd: None,
+            foreground_cwd: None,
+            revision: 1,
+        });
+        endpoint
+    }
+
     fn row_text(buffer: &ratatui::buffer::Buffer, row: u16, width: u16) -> String {
         (0..width)
             .map(|x| buffer[(x, row)].symbol())
             .collect::<String>()
             .trim_end()
             .to_string()
+    }
+
+    #[test]
+    fn agent_panel_is_a_location_aware_federation_wide_index() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.federation_member_id = "b-stl".into();
+        app.federation.insert(
+            "a-x1".into(),
+            remote_endpoint_with_agent("a-x1", "w1", "herdr@a-x1", "home-agent"),
+        );
+        app.federation.insert(
+            "c-tana".into(),
+            remote_endpoint_with_agent("c-tana", "w2", "geodeck@c-tana", "tana-agent"),
+        );
+
+        let entries = agent_panel_entries(&app);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].primary_label, "herdr");
+        assert_eq!(entries[0].location, "a-x1");
+        assert_eq!(entries[1].primary_label, "geodeck");
+        assert_eq!(entries[1].location, "c-tana");
+        assert!(matches!(
+            &entries[1].target,
+            AgentPanelTarget::Remote {
+                endpoint_id,
+                pane_id,
+            } if endpoint_id == "c-tana" && pane_id == "w2:p1"
+        ));
+    }
+
+    fn member_workspace_order(app: &AppState) -> Vec<(String, String)> {
+        workspace_list_entries(app)
+            .into_iter()
+            .map(|entry| match entry {
+                WorkspaceListEntry::Workspace { ws_idx, .. } => (
+                    app.federation_member_id.clone(),
+                    app.workspaces[ws_idx].base_display_name(),
+                ),
+                WorkspaceListEntry::RemoteWorkspace {
+                    endpoint_id,
+                    workspace_id,
+                    ..
+                } => (endpoint_id, workspace_id),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn federated_workspace_order_does_not_move_the_active_member_to_the_front() {
+        let mut on_a = AppState::test_new();
+        on_a.federation_member_id = "a".into();
+        on_a.workspaces = vec![Workspace::test_new("a-workspace")];
+        on_a.federation_client_overlay.insert(
+            "b".into(),
+            remote_endpoint("b", "b-workspace", "b workspace"),
+        );
+        on_a.federation_client_overlay.insert(
+            "c".into(),
+            remote_endpoint("c", "c-workspace", "c workspace"),
+        );
+
+        let mut on_b = AppState::test_new();
+        on_b.federation_member_id = "b".into();
+        on_b.workspaces = vec![Workspace::test_new("b-workspace")];
+        on_b.federation_client_overlay.insert(
+            "a".into(),
+            remote_endpoint("a", "a-workspace", "a workspace"),
+        );
+        on_b.federation_client_overlay.insert(
+            "c".into(),
+            remote_endpoint("c", "c-workspace", "c workspace"),
+        );
+
+        assert_eq!(
+            member_workspace_order(&on_a),
+            vec![
+                ("a".into(), "a-workspace".into()),
+                ("b".into(), "b-workspace".into()),
+                ("c".into(), "c-workspace".into()),
+            ]
+        );
+        assert_eq!(member_workspace_order(&on_b), member_workspace_order(&on_a));
+    }
+
+    #[test]
+    fn workspace_rows_render_semantic_name_with_muted_location_on_the_right() {
+        let mut app = AppState::test_new();
+        app.federation_member_id = "x1".into();
+        app.workspaces = vec![Workspace::test_new("home")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.federation_client_overlay.insert(
+            "stl-agents-1".into(),
+            remote_endpoint("stl-agents-1", "w9", "checking@stl-agents-1"),
+        );
+
+        let area = Rect::new(0, 0, 32, 18);
+        app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
+        let mut terminal = Terminal::new(TestBackend::new(32, 18)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let cards = compute_workspace_card_areas(&app, area);
+        let remote = cards
+            .iter()
+            .find(|card| card.remote.is_some())
+            .expect("remote workspace card");
+        let rendered = row_text(
+            terminal.backend().buffer(),
+            remote.rect.y,
+            remote.rect.width,
+        );
+
+        assert!(rendered.contains("checking"), "rendered row: {rendered:?}");
+        assert!(
+            !rendered.contains("checking@"),
+            "rendered row: {rendered:?}"
+        );
+        assert!(
+            rendered.ends_with("stl-agents-1"),
+            "rendered row: {rendered:?}"
+        );
+        let location_x = remote.rect.x + remote.rect.width - "stl-agents-1".len() as u16;
+        assert_eq!(
+            terminal.backend().buffer()[(location_x, remote.rect.y)].fg,
+            app.palette.overlay0
+        );
+    }
+
+    #[test]
+    fn remote_linked_worktree_is_nested_under_the_project_main_workspace() {
+        let mut app = AppState::test_new();
+        app.federation_member_id = "x1".into();
+        app.workspaces = vec![workspace_with_worktree_space(
+            "stl-agents",
+            Some("repo-key"),
+            "/repo/stl-agents",
+        )];
+        app.workspaces[0]
+            .worktree_space
+            .as_mut()
+            .unwrap()
+            .is_linked_worktree = false;
+        let mut remote = remote_endpoint("stl-agents-1", "rw1", "handoff-09f05a1afd99");
+        remote.snapshot.as_mut().unwrap().workspaces[0].worktree =
+            Some(crate::api::schema::WorkspaceWorktreeInfo {
+                repo_key: "repo-key".into(),
+                repo_name: "stl-agents".into(),
+                repo_root: "/repo/stl-agents".into(),
+                checkout_path: "/worktrees/09f05a1afd99".into(),
+                is_linked_worktree: true,
+            });
+        app.federation_client_overlay
+            .insert("stl-agents-1".into(), remote);
+
+        assert_eq!(
+            workspace_list_entries(&app),
+            vec![
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
+                    indented: false,
+                },
+                WorkspaceListEntry::RemoteWorkspace {
+                    endpoint_id: "stl-agents-1".into(),
+                    workspace_id: "rw1".into(),
+                    indented: true,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -2164,7 +2747,14 @@ mod tests {
         set_state(&mut app, 1, urgent_pane, AgentState::Blocked);
 
         assert_eq!(app.workspaces[1].public_pane_number(urgent_pane), Some(2));
-        assert_eq!(agent_panel_entries(&app)[0].pane_id, urgent_pane);
+        assert_eq!(
+            agent_panel_entries(&app)[0].target,
+            AgentPanelTarget::Local {
+                ws_idx: 1,
+                tab_idx: 0,
+                pane_id: urgent_pane,
+            }
+        );
 
         let area = Rect::new(0, 0, 4, 16);
         let (_, _, detail_area) = collapsed_sidebar_sections(area);
@@ -2326,6 +2916,8 @@ mod tests {
             remote: None,
             rect: Rect::new(0, 1, 15, 2),
             indented: false,
+            group_key: None,
+            group_parent: false,
         }];
 
         let mut terminal = Terminal::new(TestBackend::new(15, 6)).expect("test terminal");

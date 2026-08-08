@@ -13,7 +13,7 @@ use ratatui::layout::Direction;
 
 use crate::{
     app::{
-        state::{AppState, Mode},
+        state::{AppState, Mode, NavigatorTarget},
         App,
     },
     input::TerminalKey,
@@ -262,8 +262,8 @@ impl App {
                 }
             }
             NavigateAction::FocusAgent(idx) => {
-                if let Some((ws_idx, pane_id)) = self.agent_entry_target(idx) {
-                    self.focus_pane_internal_via_api(ws_idx, pane_id);
+                if let Some(target) = self.agent_entry_target(idx) {
+                    self.state.focus_navigator_target(target);
                     self.state.ensure_agent_panel_entry_visible(idx);
                     leave_navigate_mode(&mut self.state);
                 }
@@ -273,27 +273,25 @@ impl App {
                 self.state.mode = Mode::Navigate;
             }
             NavigateAction::PreviousWorkspace => {
-                if let Some(ws_idx) = self.relative_visible_workspace(-1) {
-                    self.focus_workspace_idx_via_api(ws_idx);
-                    leave_navigate_mode(&mut self.state);
+                if let Some(target) = self.relative_global_workspace(-1) {
+                    self.focus_global_workspace(target);
                 }
             }
             NavigateAction::NextWorkspace => {
-                if let Some(ws_idx) = self.relative_visible_workspace(1) {
-                    self.focus_workspace_idx_via_api(ws_idx);
-                    leave_navigate_mode(&mut self.state);
+                if let Some(target) = self.relative_global_workspace(1) {
+                    self.focus_global_workspace(target);
                 }
             }
             NavigateAction::PreviousAgent => {
-                if let Some((idx, ws_idx, pane_id)) = self.relative_agent_entry(false) {
-                    self.focus_pane_internal_via_api(ws_idx, pane_id);
+                if let Some((idx, target)) = self.relative_agent_entry(false) {
+                    self.state.focus_navigator_target(target);
                     self.state.ensure_agent_panel_entry_visible(idx);
                     leave_navigate_mode(&mut self.state);
                 }
             }
             NavigateAction::NextAgent => {
-                if let Some((idx, ws_idx, pane_id)) = self.relative_agent_entry(true) {
-                    self.focus_pane_internal_via_api(ws_idx, pane_id);
+                if let Some((idx, target)) = self.relative_agent_entry(true) {
+                    self.state.focus_navigator_target(target);
                     self.state.ensure_agent_panel_entry_visible(idx);
                     leave_navigate_mode(&mut self.state);
                 }
@@ -704,15 +702,44 @@ impl App {
         Some((ws_idx, focused.id, target))
     }
 
-    fn relative_visible_workspace(&self, delta: isize) -> Option<usize> {
-        let order = self.state.visible_workspace_order();
-        if order.is_empty() {
+    fn relative_global_workspace(&self, delta: isize) -> Option<crate::ui::WorkspaceListEntry> {
+        let entries = crate::ui::workspace_list_entries(&self.state);
+        if entries.is_empty() {
             return None;
         }
         let current = self.state.active.unwrap_or(self.state.selected);
-        let current_pos = order.iter().position(|idx| *idx == current).unwrap_or(0);
-        let next = (current_pos as isize + delta).rem_euclid(order.len() as isize) as usize;
-        order.get(next).copied()
+        let current_pos = entries
+            .iter()
+            .position(|entry| {
+                matches!(
+                    entry,
+                    crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. }
+                        if *ws_idx == current
+                )
+            })
+            .unwrap_or(0);
+        let next = (current_pos as isize + delta).rem_euclid(entries.len() as isize) as usize;
+        entries.get(next).cloned()
+    }
+
+    fn focus_global_workspace(&mut self, target: crate::ui::WorkspaceListEntry) {
+        match target {
+            crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. } => {
+                self.focus_workspace_idx_via_api(ws_idx);
+            }
+            crate::ui::WorkspaceListEntry::RemoteWorkspace {
+                endpoint_id,
+                workspace_id,
+                ..
+            } => {
+                self.state
+                    .focus_navigator_target(NavigatorTarget::RemoteWorkspace {
+                        endpoint_id,
+                        workspace_id,
+                    });
+            }
+        }
+        leave_navigate_mode(&mut self.state);
     }
 
     fn relative_tab(&self, delta: isize) -> Option<usize> {
@@ -726,13 +753,13 @@ impl App {
         Some((ws.active_tab as isize + delta).rem_euclid(ws.tabs.len() as isize) as usize)
     }
 
-    fn agent_entry_target(&self, idx: usize) -> Option<(usize, crate::layout::PaneId)> {
+    fn agent_entry_target(&self, idx: usize) -> Option<NavigatorTarget> {
         let entries = crate::ui::agent_panel_entries(&self.state);
         let target = entries.get(idx)?;
-        Some((target.ws_idx, target.pane_id))
+        Some(target.target.navigator_target())
     }
 
-    fn relative_agent_entry(&self, forward: bool) -> Option<(usize, usize, crate::layout::PaneId)> {
+    fn relative_agent_entry(&self, forward: bool) -> Option<(usize, NavigatorTarget)> {
         let entries = crate::ui::agent_panel_entries(&self.state);
         if entries.is_empty() {
             return None;
@@ -744,7 +771,10 @@ impl App {
             .and_then(crate::workspace::Workspace::focused_pane_id);
         let current_idx = entries
             .iter()
-            .position(|entry| Some(entry.pane_id) == focused)
+            .position(|entry| match entry.target {
+                crate::ui::AgentPanelTarget::Local { pane_id, .. } => Some(pane_id) == focused,
+                crate::ui::AgentPanelTarget::Remote { .. } => false,
+            })
             .unwrap_or(0);
         let next_idx = if forward {
             (current_idx + 1) % entries.len()
@@ -754,7 +784,7 @@ impl App {
             current_idx - 1
         };
         let target = entries.get(next_idx)?;
-        Some((next_idx, target.ws_idx, target.pane_id))
+        Some((next_idx, target.target.navigator_target()))
     }
 
     fn pass_through_key_to_focused_pane(&mut self, key: TerminalKey) -> bool {
@@ -1883,6 +1913,75 @@ mod tests {
         app.state.active = (!app.state.workspaces.is_empty()).then_some(0);
         app.state.selected = 0;
         app
+    }
+
+    fn add_remote_workspace(app: &mut App, member_id: &str, workspace_id: &str) {
+        let endpoint = crate::config::FederationEndpointConfig {
+            id: member_id.into(),
+            target: member_id.into(),
+            label: None,
+            session: "default".into(),
+            enabled: true,
+        };
+        app.state.federation_client_overlay.insert(
+            member_id.into(),
+            crate::federation::EndpointState {
+                endpoint,
+                status: crate::federation::EndpointConnectionStatus::Connected,
+                snapshot: Some(crate::api::schema::SessionSnapshot {
+                    identity: crate::api::schema::RuntimeIdentity {
+                        server_id: format!("server-{member_id}"),
+                        session_id: format!("session-{member_id}"),
+                        session_name: "default".into(),
+                        member_id: member_id.into(),
+                        member_target: member_id.into(),
+                        member_label: None,
+                    },
+                    version: "test".into(),
+                    protocol: crate::protocol::PROTOCOL_VERSION,
+                    event_cursor: 1,
+                    focused_workspace_id: Some(workspace_id.into()),
+                    focused_tab_id: None,
+                    focused_pane_id: None,
+                    workspaces: vec![crate::api::schema::WorkspaceInfo {
+                        workspace_id: workspace_id.into(),
+                        number: 1,
+                        label: "remote".into(),
+                        focused: true,
+                        pane_count: 1,
+                        tab_count: 1,
+                        active_tab_id: format!("{workspace_id}:t1"),
+                        agent_status: crate::api::schema::AgentStatus::Idle,
+                        terminal_launcher_argv: None,
+                        tokens: Default::default(),
+                        worktree: None,
+                    }],
+                    tabs: Vec::new(),
+                    panes: Vec::new(),
+                    layouts: Vec::new(),
+                    agents: Vec::new(),
+                }),
+                cursor: Some(1),
+                error: None,
+            },
+        );
+    }
+
+    #[test]
+    fn next_workspace_action_crosses_the_federation_boundary() {
+        let mut app = app_with_test_workspaces(&["home"]);
+        app.state.federation_member_id = "a-home".into();
+        add_remote_workspace(&mut app, "b-remote", "rw1");
+
+        app.execute_tui_navigate_action(NavigateAction::NextWorkspace, ActionContext::Direct);
+
+        let request = app
+            .state
+            .request_federation_attach
+            .take()
+            .expect("next workspace should request the remote member");
+        assert_eq!(request.endpoint_id, "b-remote");
+        assert_eq!(request.resource.unwrap().resource_id, "rw1");
     }
 
     #[test]

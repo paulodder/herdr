@@ -409,7 +409,7 @@ impl AppState {
         let query_kind = navigator_query_kind(&query, self.navigator.state_filter);
         let mut rows = Vec::new();
         for (ws_idx, ws) in self.workspaces.iter().enumerate() {
-            let workspace_label = ws.display_name_from(&self.terminals, terminal_runtimes);
+            let workspace_label = ws.base_display_name_from(&self.terminals, terminal_runtimes);
             let activity = workspace_activity_summary(ws, &self.terminals);
             let mut workspace_search_terms = vec![workspace_label.clone(), activity.clone()];
             if let Some(cwd) = ws.resolved_identity_cwd_from(&self.terminals, terminal_runtimes) {
@@ -517,10 +517,9 @@ impl AppState {
 
         let mut children = Vec::new();
         for workspace in &snapshot.workspaces {
-            let workspace_label = crate::metadata_tokens::location_qualified_name(
-                &workspace.label,
-                &endpoint.endpoint.id,
-            );
+            let workspace_label =
+                crate::metadata_tokens::unqualified_name(&workspace.label, &endpoint.endpoint.id)
+                    .to_string();
             let (state, seen) = agent_status_state(workspace.agent_status);
             let workspace_search = format!(
                 "{} {} {} {}",
@@ -537,10 +536,9 @@ impl AppState {
             let multi_tab = tabs.len() > 1;
             let mut workspace_children = Vec::new();
             for tab in tabs {
-                let tab_label = crate::metadata_tokens::location_qualified_name(
-                    &tab.label,
-                    &endpoint.endpoint.id,
-                );
+                let tab_label =
+                    crate::metadata_tokens::unqualified_name(&tab.label, &endpoint.endpoint.id)
+                        .to_string();
                 let panes = snapshot
                     .panes
                     .iter()
@@ -1791,16 +1789,18 @@ impl AppState {
         let Some(target) = entries.get(idx) else {
             return false;
         };
-        let ws_idx = target.ws_idx;
-        let pane_id = target.pane_id;
-
-        if self.active == Some(ws_idx) && self.workspaces[ws_idx].focused_pane_id() == Some(pane_id)
-        {
+        let navigator_target = target.target.navigator_target();
+        if matches!(
+            &navigator_target,
+            NavigatorTarget::Pane { ws_idx, pane_id, .. }
+                if self.active == Some(*ws_idx)
+                    && self.workspaces[*ws_idx].focused_pane_id() == Some(*pane_id)
+        ) {
             self.ensure_agent_panel_entry_visible(idx);
             return true;
         }
 
-        if self.focus_pane_in_workspace(ws_idx, pane_id) {
+        if self.focus_navigator_target(navigator_target) {
             self.ensure_agent_panel_entry_visible(idx);
             return true;
         }
@@ -1818,8 +1818,17 @@ impl AppState {
             .active
             .and_then(|idx| self.workspaces.get(idx))
             .and_then(crate::workspace::Workspace::focused_pane_id);
-        let current_idx =
-            focused.and_then(|pane_id| entries.iter().position(|entry| entry.pane_id == pane_id));
+        let current_idx = focused.and_then(|pane_id| {
+            entries.iter().position(|entry| {
+                matches!(
+                    entry.target,
+                    crate::ui::AgentPanelTarget::Local {
+                        pane_id: entry_pane_id,
+                        ..
+                    } if entry_pane_id == pane_id
+                )
+            })
+        });
         let target_idx = match (current_idx, forward) {
             (Some(idx), true) => (idx + 1) % entries.len(),
             (Some(0), false) => entries.len() - 1,
@@ -3657,7 +3666,7 @@ mod tests {
     }
 
     #[test]
-    fn navigator_qualifies_remote_workspaces_and_tabs_but_not_panes() {
+    fn navigator_keeps_remote_workspace_and_tab_names_semantic() {
         let mut state = app_with_workspaces(&["local"]);
         add_federated_pane(&mut state);
         assert!(crate::ui::workspace_list_entries(&state)
@@ -3668,6 +3677,7 @@ mod tests {
                     crate::ui::WorkspaceListEntry::RemoteWorkspace {
                         endpoint_id,
                         workspace_id,
+                        ..
                     } if endpoint_id == "stl-agents-1" && workspace_id == "rw1"
                 )
             }));
@@ -3692,7 +3702,7 @@ mod tests {
                 row.target,
                 NavigatorTarget::RemoteWorkspace { ref endpoint_id, .. }
                     if endpoint_id == "stl-agents-1"
-            ) && row.label == "GeoDeck@stl-agents-1"
+            ) && row.label == "GeoDeck"
                 && row.depth == 0
         }));
         assert!(rows.iter().any(|row| {
@@ -3700,7 +3710,7 @@ mod tests {
                 row.target,
                 NavigatorTarget::RemoteTab { ref endpoint_id, ref tab_id }
                     if endpoint_id == "stl-agents-1" && tab_id == "rt2"
-            ) && row.label == "checking@stl-agents-1"
+            ) && row.label == "checking"
         }));
         let remote_workspace = rows
             .iter()
@@ -4578,11 +4588,17 @@ mod tests {
 
         transition_agent_state(&mut state, first, AgentState::Idle);
         transition_agent_state(&mut state, second, AgentState::Working);
-        assert_eq!(crate::ui::agent_panel_entries(&state)[0].pane_id, second);
+        assert!(matches!(
+            crate::ui::agent_panel_entries(&state)[0].target,
+            crate::ui::AgentPanelTarget::Local { pane_id, .. } if pane_id == second
+        ));
 
         transition_agent_state(&mut state, second, AgentState::Idle);
 
-        assert_eq!(crate::ui::agent_panel_entries(&state)[0].pane_id, second);
+        assert!(matches!(
+            crate::ui::agent_panel_entries(&state)[0].target,
+            crate::ui::AgentPanelTarget::Local { pane_id, .. } if pane_id == second
+        ));
         state.assert_invariants_for_test();
     }
 
