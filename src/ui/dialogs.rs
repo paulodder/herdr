@@ -11,10 +11,210 @@ use super::widgets::{
     action_button_row_rects, centered_popup_rect, panel_contrast_fg, render_action_button,
     render_modal_header, render_modal_shell, render_panel_shell, ActionButtonSpec,
 };
-use crate::app::{state::WorktreeOpenState, AppState, Mode};
+use crate::app::{
+    state::{WorkspaceCreateStep, WorktreeOpenState},
+    AppState, Mode,
+};
 
 const NEW_LINKED_WORKTREE_POPUP_WIDTH: u16 = 68;
 const NEW_LINKED_WORKTREE_POPUP_HEIGHT: u16 = 12;
+const NEW_WORKSPACE_POPUP_WIDTH: u16 = 76;
+const NEW_WORKSPACE_POPUP_HEIGHT: u16 = 19;
+
+pub(super) fn render_new_workspace_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
+    let Some(create) = app.workspace_create.as_ref() else {
+        return;
+    };
+    super::dim_background(frame, area);
+    let Some(inner) = render_modal_shell(
+        frame,
+        area,
+        NEW_WORKSPACE_POPUP_WIDTH,
+        NEW_WORKSPACE_POPUP_HEIGHT,
+        &app.palette,
+    ) else {
+        return;
+    };
+    if inner.height < 15 {
+        return;
+    }
+
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(5),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas::<10>(inner);
+
+    render_modal_header(frame, rows[0], "new workspace", &app.palette);
+    let step_style = |step| {
+        if create.step == step {
+            Style::default()
+                .fg(app.palette.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.palette.overlay0)
+        }
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" 1 server ", step_style(WorkspaceCreateStep::Server)),
+            Span::styled("→", Style::default().fg(app.palette.overlay0)),
+            Span::styled(" 2 directory ", step_style(WorkspaceCreateStep::Directory)),
+            Span::styled("→", Style::default().fg(app.palette.overlay0)),
+            Span::styled(
+                " 3 after creation ",
+                step_style(WorkspaceCreateStep::AfterCreation),
+            ),
+        ])),
+        rows[1],
+    );
+
+    let mut server_lines = Vec::new();
+    for (idx, server) in create.servers.iter().take(4).enumerate() {
+        let selected = idx == create.selected_server;
+        let active = create.step == WorkspaceCreateStep::Server && selected;
+        let marker = if active {
+            "›"
+        } else if selected {
+            "•"
+        } else {
+            " "
+        };
+        let status = super::super::app::workspace_creation::workspace_server_status(server.status);
+        let status_color = match server.status {
+            crate::federation::EndpointConnectionStatus::Connected => app.palette.green,
+            crate::federation::EndpointConnectionStatus::Connecting => app.palette.yellow,
+            crate::federation::EndpointConnectionStatus::Disabled
+            | crate::federation::EndpointConnectionStatus::Disconnected
+            | crate::federation::EndpointConnectionStatus::Incompatible => app.palette.overlay0,
+        };
+        let label_style = if selected {
+            Style::default()
+                .fg(app.palette.text)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.palette.subtext0)
+        };
+        server_lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {marker} "),
+                Style::default().fg(app.palette.accent),
+            ),
+            Span::styled(server.label.clone(), label_style),
+            Span::styled(
+                format!("  {}", server.member_id),
+                Style::default().fg(app.palette.overlay0),
+            ),
+            Span::styled(format!("  {status}"), Style::default().fg(status_color)),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(server_lines), rows[2]);
+
+    frame.render_widget(
+        Paragraph::new(" directory on selected server")
+            .style(Style::default().fg(app.palette.overlay0)),
+        rows[3],
+    );
+    let directory_style = if create.step == WorkspaceCreateStep::Directory {
+        Style::default()
+            .fg(app.palette.text)
+            .bg(app.palette.surface0)
+    } else {
+        Style::default()
+            .fg(app.palette.subtext0)
+            .bg(app.palette.surface0)
+    };
+    let directory = if create.step == WorkspaceCreateStep::Directory {
+        create.directory_input.with_cursor(&create.directory)
+    } else if create.directory.is_empty() {
+        "select a server first".into()
+    } else {
+        create.directory.clone()
+    };
+    frame.render_widget(Clear, rows[4]);
+    frame.render_widget(
+        Paragraph::new(format!(" {directory}")).style(directory_style),
+        rows[4],
+    );
+
+    let inferred_name = std::path::Path::new(create.directory.trim())
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("workspace");
+    frame.render_widget(
+        Paragraph::new(format!(" workspace: {inferred_name}"))
+            .style(Style::default().fg(app.palette.subtext0)),
+        rows[5],
+    );
+
+    let open_style =
+        if create.step == WorkspaceCreateStep::AfterCreation && create.open_after_creation {
+            Style::default()
+                .fg(panel_contrast_fg(&app.palette))
+                .bg(app.palette.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(app.palette.text)
+                .bg(app.palette.surface0)
+        };
+    let background_style =
+        if create.step == WorkspaceCreateStep::AfterCreation && !create.open_after_creation {
+            Style::default()
+                .fg(panel_contrast_fg(&app.palette))
+                .bg(app.palette.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(app.palette.text)
+                .bg(app.palette.surface0)
+        };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(" create and open ", open_style),
+            Span::raw("  "),
+            Span::styled(" create in background ", background_style),
+        ])),
+        rows[6],
+    );
+
+    let message = if create.creating {
+        " creating workspace…"
+    } else if let Some(error) = &create.error {
+        error
+    } else {
+        match create.step {
+            WorkspaceCreateStep::Server => " C-n/C-p choose server · RET continue · C-g cancel",
+            WorkspaceCreateStep::Directory => {
+                " edit path · C-n/RET continue · C-p back · C-g cancel"
+            }
+            WorkspaceCreateStep::AfterCreation => {
+                " C-f/C-b choose behavior · RET create · C-p back · C-g cancel"
+            }
+        }
+    };
+    let message_style = if create.error.is_some() {
+        Style::default().fg(app.palette.red)
+    } else {
+        Style::default().fg(app.palette.overlay0)
+    };
+    frame.render_widget(
+        Paragraph::new(message)
+            .style(message_style)
+            .wrap(Wrap { trim: false }),
+        rows[7],
+    );
+}
 
 pub(crate) fn rename_button_rects(inner: Rect) -> (Rect, Rect, Rect) {
     let rects = action_button_row_rects(
@@ -769,12 +969,74 @@ pub(crate) fn confirm_close_button_rects(inner: Rect) -> (Rect, Rect) {
 #[cfg(test)]
 mod tests {
     use crate::{
-        app::{state::WorktreeCreateState, AppState},
+        app::{
+            state::{
+                WorkspaceCreateServer, WorkspaceCreateServerKind, WorkspaceCreateState,
+                WorkspaceCreateStep, WorktreeCreateState,
+            },
+            text_input::TextInputState,
+            AppState,
+        },
         workspace::Workspace,
     };
     use ratatui::{backend::TestBackend, layout::Rect, Terminal};
 
-    use super::{confirm_close_overlay_text, render_new_linked_worktree_overlay};
+    use super::{
+        confirm_close_overlay_text, render_new_linked_worktree_overlay,
+        render_new_workspace_overlay,
+    };
+
+    #[test]
+    fn new_workspace_overlay_leads_with_server_then_directory() {
+        let mut app = AppState::test_new();
+        app.workspace_create = Some(WorkspaceCreateState {
+            servers: vec![
+                WorkspaceCreateServer {
+                    kind: WorkspaceCreateServerKind::Local,
+                    member_id: "x1".into(),
+                    label: "Local".into(),
+                    status: crate::federation::EndpointConnectionStatus::Connected,
+                    suggested_directory: None,
+                },
+                WorkspaceCreateServer {
+                    kind: WorkspaceCreateServerKind::Federation {
+                        endpoint_id: "stl-agents-1".into(),
+                    },
+                    member_id: "stl-agents-1".into(),
+                    label: "STL Agents".into(),
+                    status: crate::federation::EndpointConnectionStatus::Connected,
+                    suggested_directory: None,
+                },
+            ],
+            selected_server: 1,
+            step: WorkspaceCreateStep::Directory,
+            directory: "/srv/projects/herdr".into(),
+            directory_input: TextInputState::at_end("/srv/projects/herdr"),
+            open_after_creation: true,
+            error: None,
+            creating: false,
+        });
+
+        let mut terminal =
+            Terminal::new(TestBackend::new(100, 30)).expect("test terminal should initialize");
+        terminal
+            .draw(|frame| render_new_workspace_overlay(&app, frame, Rect::new(0, 0, 100, 30)))
+            .expect("new workspace overlay should render");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("1 server"));
+        assert!(rendered.contains("2 directory"));
+        assert!(rendered.contains("STL Agents"));
+        assert!(rendered.contains("/srv/projects/herdr"));
+        assert!(rendered.contains("workspace: herdr"));
+        assert!(rendered.contains("create and open"));
+    }
 
     #[test]
     fn confirm_close_text_reports_parent_group_scope() {

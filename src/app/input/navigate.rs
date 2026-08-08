@@ -191,15 +191,7 @@ impl App {
         let previous_mode = self.state.mode;
         match action {
             NavigateAction::NewWorkspace => {
-                self.runtime_workspace_create(
-                    "tui.key.workspace.create",
-                    crate::api::schema::WorkspaceCreateParams {
-                        cwd: None,
-                        focus: true,
-                        label: None,
-                        env: Default::default(),
-                    },
-                );
+                self.state.request_new_workspace = true;
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::NewWorktree => {
