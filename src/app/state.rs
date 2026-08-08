@@ -599,40 +599,6 @@ pub struct WorktreeCreateState {
     pub creating: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkspaceCreateStep {
-    Server,
-    Directory,
-    AfterCreation,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorkspaceCreateServerKind {
-    Local,
-    Federation { endpoint_id: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkspaceCreateServer {
-    pub kind: WorkspaceCreateServerKind,
-    pub member_id: String,
-    pub label: String,
-    pub status: crate::federation::EndpointConnectionStatus,
-    pub suggested_directory: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkspaceCreateState {
-    pub servers: Vec<WorkspaceCreateServer>,
-    pub selected_server: usize,
-    pub step: WorkspaceCreateStep,
-    pub directory: String,
-    pub(crate) directory_input: super::text_input::TextInputState,
-    pub open_after_creation: bool,
-    pub error: Option<String>,
-    pub creating: bool,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeRemoveState {
     pub workspace_id: String,
@@ -800,7 +766,6 @@ pub enum Mode {
     RenameWorkspace,
     RenameTab,
     RenamePane,
-    NewWorkspace,
     NewLinkedWorktree,
     OpenExistingWorktree,
     ConfirmRemoveWorktree,
@@ -1418,7 +1383,6 @@ pub struct AppState {
     pub request_new_linked_worktree: Option<usize>,
     pub request_open_existing_worktree: Option<usize>,
     pub request_new_workspace_cwd: Option<std::path::PathBuf>,
-    pub request_submit_workspace_create: bool,
     pub request_remove_linked_worktree: Option<usize>,
     pub request_submit_worktree_create: bool,
     pub request_submit_worktree_open: bool,
@@ -1438,7 +1402,6 @@ pub struct AppState {
     pub creating_new_tab: bool,
     pub requested_new_tab_name: Option<String>,
     pub rename_pane_target: Option<PaneId>,
-    pub workspace_create: Option<WorkspaceCreateState>,
     pub worktree_create: Option<WorktreeCreateState>,
     pub worktree_open: Option<WorktreeOpenState>,
     pub worktree_remove: Option<WorktreeRemoveState>,
@@ -1817,7 +1780,6 @@ impl AppState {
             request_new_linked_worktree: None,
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
-            request_submit_workspace_create: false,
             request_remove_linked_worktree: None,
             request_submit_worktree_create: false,
             request_submit_worktree_open: false,
@@ -1830,7 +1792,6 @@ impl AppState {
             creating_new_tab: false,
             requested_new_tab_name: None,
             rename_pane_target: None,
-            workspace_create: None,
             worktree_create: None,
             worktree_open: None,
             worktree_remove: None,

@@ -22,7 +22,6 @@ mod terminal_targets;
 mod terminal_titles;
 pub(crate) mod text_input;
 mod theme_sync;
-pub(crate) mod workspace_creation;
 mod worktrees;
 
 use std::collections::{HashMap, HashSet};
@@ -561,7 +560,6 @@ impl App {
             request_new_linked_worktree: None,
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
-            request_submit_workspace_create: false,
             request_remove_linked_worktree: None,
             request_submit_worktree_create: false,
             request_submit_worktree_open: false,
@@ -574,7 +572,6 @@ impl App {
             creating_new_tab: false,
             requested_new_tab_name: None,
             rename_pane_target: None,
-            workspace_create: None,
             worktree_create: None,
             worktree_open: None,
             worktree_remove: None,
@@ -981,13 +978,15 @@ impl App {
 
             if self.state.request_new_workspace {
                 self.state.request_new_workspace = false;
-                self.open_workspace_create_dialog();
-                needs_render = true;
-            }
-
-            if self.state.request_submit_workspace_create {
-                self.state.request_submit_workspace_create = false;
-                self.submit_workspace_create();
+                self.runtime_workspace_create(
+                    "tui.workspace.create",
+                    crate::api::schema::WorkspaceCreateParams {
+                        cwd: None,
+                        focus: true,
+                        label: None,
+                        env: Default::default(),
+                    },
+                );
                 needs_render = true;
             }
 
@@ -1777,9 +1776,6 @@ impl App {
             Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
                 self.handle_rename_key_via_api(key_event);
             }
-            Mode::NewWorkspace => {
-                self.handle_workspace_create_key(key_event);
-            }
             Mode::NewLinkedWorktree => {
                 self.handle_worktree_create_key(key_event);
             }
@@ -2011,7 +2007,6 @@ mod tests {
             Mode::RenameWorkspace,
             Mode::RenameTab,
             Mode::RenamePane,
-            Mode::NewWorkspace,
             Mode::NewLinkedWorktree,
             Mode::OpenExistingWorktree,
             Mode::Settings,

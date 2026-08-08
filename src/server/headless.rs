@@ -640,16 +640,16 @@ impl HeadlessServer {
 
         if self.app.state.request_new_workspace {
             self.app.state.request_new_workspace = false;
-            self.app.open_workspace_create_dialog();
+            let response = self.headless_workspace_create("headless.workspace.create", None, None);
+            if let Err(error) = response {
+                error!(
+                    code = %error.code,
+                    message = %error.message,
+                    "failed to create workspace"
+                );
+            }
             needs_render = true;
             crate::render_prof::event("full_render_cause.deferred_new_workspace");
-        }
-
-        if self.app.state.request_submit_workspace_create {
-            self.app.state.request_submit_workspace_create = false;
-            self.app.submit_workspace_create();
-            needs_render = true;
-            crate::render_prof::event("full_render_cause.deferred_workspace_create_submit");
         }
 
         if self.app.state.request_new_tab {
@@ -4684,7 +4684,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn headless_deferred_workspace_create_opens_server_first_dialog() {
+    async fn headless_deferred_workspace_create_uses_runtime_events() {
         let event_hub = api::EventHub::default();
         let mut server = test_headless_server_with_event_hub(event_hub.clone());
 
@@ -4692,17 +4692,19 @@ mod tests {
 
         assert!(server.handle_deferred_requests_headless());
         assert!(!server.app.state.request_new_workspace);
-        assert_eq!(server.app.state.mode, crate::app::Mode::NewWorkspace);
         assert_eq!(
-            server
-                .app
-                .state
-                .workspace_create
-                .as_ref()
-                .map(|create| create.step),
-            Some(crate::app::state::WorkspaceCreateStep::Server)
+            event_hub
+                .events_after(0)
+                .into_iter()
+                .map(|(_, event)| event.event)
+                .collect::<Vec<_>>(),
+            vec![
+                api::schema::EventKind::WorkspaceCreated,
+                api::schema::EventKind::TabCreated,
+                api::schema::EventKind::PaneCreated,
+                api::schema::EventKind::LayoutUpdated,
+            ]
         );
-        assert!(event_hub.events_after(0).is_empty());
         shutdown_test_runtimes(&mut server);
     }
 
