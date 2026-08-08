@@ -1,6 +1,6 @@
 use crate::app::App;
 
-use super::tests::emacs_app_with_channel;
+use super::tests::emacs_app_with_channel_at_size;
 
 #[derive(Debug, serde::Deserialize)]
 struct ConformanceCorpus {
@@ -17,6 +17,18 @@ struct ConformanceCase {
     comparison: String,
     reason: Option<String>,
     emacs: ConformanceSnapshot,
+    herdr: Option<ConformanceSnapshot>,
+    #[serde(default)]
+    steps: Vec<ConformanceStep>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ConformanceStep {
+    keys: String,
+    command: String,
+    emacs: ConformanceSnapshot,
+    comparison: Option<String>,
+    reason: Option<String>,
     herdr: Option<ConformanceSnapshot>,
 }
 
@@ -79,21 +91,21 @@ async fn emacs_conformance_corpus_matches() {
     assert_eq!(corpus.schema_version, 1, "unsupported corpus schema");
 
     for case in corpus.cases {
-        let lines: Vec<&str> = case.text.lines().collect();
-        assert_eq!(
-            lines.len(),
-            10,
-            "{}: fixtures must fill the ten-row test terminal",
-            case.name
-        );
-        assert!(
-            lines.iter().all(|line| line.chars().count() < 40),
-            "{}: fixture lines must not wrap in the test terminal",
-            case.name
-        );
+        let lines: Vec<&str> = case.text.split('\n').collect();
+        let width = lines
+            .iter()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let height = lines.len().max(1);
+        let width = u16::try_from(width)
+            .unwrap_or_else(|_| panic!("{}: fixture line is too wide", case.name));
+        let height = u16::try_from(height)
+            .unwrap_or_else(|_| panic!("{}: fixture has too many lines", case.name));
 
         let terminal_bytes = case.text.replace('\n', "\r\n").into_bytes();
-        let (mut app, _pane, _rx) = emacs_app_with_channel(&terminal_bytes);
+        let (mut app, _pane, _rx) = emacs_app_with_channel_at_size(&terminal_bytes, width, height);
         app.route_client_input(vec![0x18, b'[']); // C-x [: enter TEXT mode
         let text = app
             .state
@@ -108,15 +120,69 @@ async fn emacs_conformance_corpus_matches() {
         text.mark = None;
         text.mark_active = false;
 
-        let chords = crate::emacs::keymap::parse_key_seq(&case.keys)
-            .unwrap_or_else(|| panic!("{}: invalid key sequence {:?}", case.name, case.keys));
-        for chord in chords {
-            assert!(
-                app.emacs_intercept_key(terminal_key(chord)),
-                "{}: {} must be owned by Herdr TEXT mode",
-                case.name,
-                crate::emacs::keymap::format_seq(&[chord])
+        if case.steps.is_empty() {
+            replay_keys(&mut app, &case.name, &case.keys);
+        } else {
+            let joined = case
+                .steps
+                .iter()
+                .map(|step| step.keys.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert_eq!(
+                joined, case.keys,
+                "{}: steps must cover case.keys",
+                case.name
             );
+            for (index, step) in case.steps.iter().enumerate() {
+                replay_keys(&mut app, &case.name, &step.keys);
+                let expected = match step.comparison.as_deref().unwrap_or("exact") {
+                    "exact" => {
+                        assert!(
+                            step.herdr.is_none(),
+                            "{}: exact step {} must use the GNU Emacs snapshot",
+                            case.name,
+                            index
+                        );
+                        &step.emacs
+                    }
+                    "known-deviation" => {
+                        assert!(
+                            step.reason
+                                .as_deref()
+                                .is_some_and(|reason| !reason.is_empty()),
+                            "{}: known-deviation step {} requires a reason",
+                            case.name,
+                            index
+                        );
+                        let expected = step.herdr.as_ref().unwrap_or_else(|| {
+                            panic!(
+                                "{}: known-deviation step {} requires a Herdr snapshot",
+                                case.name, index
+                            )
+                        });
+                        assert_ne!(
+                            expected, &step.emacs,
+                            "{}: remove resolved deviation from step {}",
+                            case.name, index
+                        );
+                        expected
+                    }
+                    other => panic!(
+                        "{}: step {} has unknown comparison mode {other:?}",
+                        case.name, index
+                    ),
+                };
+                assert_eq!(
+                    herdr_snapshot(&app),
+                    *expected,
+                    "{}: step {} ({}, {})",
+                    case.name,
+                    index,
+                    step.command,
+                    step.keys
+                );
+            }
         }
 
         let actual = herdr_snapshot(&app);
@@ -150,5 +216,18 @@ async fn emacs_conformance_corpus_matches() {
             other => panic!("{}: unknown comparison mode {other:?}", case.name),
         };
         assert_eq!(&actual, expected, "{}: {}", case.name, case.keys);
+    }
+}
+
+fn replay_keys(app: &mut App, case_name: &str, keys: &str) {
+    let chords = crate::emacs::keymap::parse_key_seq(keys)
+        .unwrap_or_else(|| panic!("{case_name}: invalid key sequence {keys:?}"));
+    for chord in chords {
+        assert!(
+            app.emacs_intercept_key(terminal_key(chord)),
+            "{}: {} must be owned by Herdr TEXT mode",
+            case_name,
+            crate::emacs::keymap::format_seq(&[chord])
+        );
     }
 }

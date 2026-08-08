@@ -76,7 +76,49 @@
         "mark": { "row": 0, "col": 0 },
         "mark_active": false,
         "kill_ring_head": "al"
-      }
+      },
+      "steps": [
+        {
+          "keys": "C-SPC",
+          "command": "set-mark-command",
+          "emacs": {
+            "point": { "row": 0, "col": 0 },
+            "mark": { "row": 0, "col": 0 },
+            "mark_active": true,
+            "kill_ring_head": null
+          }
+        },
+        {
+          "keys": "C-f",
+          "command": "forward-char",
+          "emacs": {
+            "point": { "row": 0, "col": 1 },
+            "mark": { "row": 0, "col": 0 },
+            "mark_active": true,
+            "kill_ring_head": null
+          }
+        },
+        {
+          "keys": "C-f",
+          "command": "forward-char",
+          "emacs": {
+            "point": { "row": 0, "col": 2 },
+            "mark": { "row": 0, "col": 0 },
+            "mark_active": true,
+            "kill_ring_head": null
+          }
+        },
+        {
+          "keys": "M-w",
+          "command": "kill-ring-save",
+          "emacs": {
+            "point": { "row": 0, "col": 2 },
+            "mark": { "row": 0, "col": 0 },
+            "mark_active": false,
+            "kill_ring_head": "al"
+          }
+        }
+      ]
     },
     {
       "name": "successive-forward-word",

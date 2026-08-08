@@ -3,7 +3,7 @@
 # Run tests
 test:
     cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never
-    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_preview scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
+    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_emacs_conformance scripts.test_preview scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
     just integration-assets-test
     just plugin-marketplace-test
 
@@ -19,6 +19,14 @@ emacs-conformance:
 # Deliberately refresh committed oracle snapshots with the pinned GNU Emacs version
 emacs-conformance-update:
     python3 scripts/emacs_conformance.py update
+
+# Launch a clean, read-only Emacs fixture recorder. Finish with C-c C-c.
+emacs-record input output row='0' col='0':
+    python3 scripts/emacs_conformance.py record "{{input}}" --output "{{output}}" --row "{{row}}" --col "{{col}}"
+
+# Add a recorded session as an exact, step-by-step conformance case.
+emacs-conformance-import trace name:
+    python3 scripts/emacs_conformance.py import-trace "{{trace}}" --name "{{name}}"
 
 # Run fast local lint checks
 lint:
@@ -38,7 +46,7 @@ windows-lint:
 
 # Check formatting + run unit tests + Windows target lint + maintenance script tests
 check: ci windows-lint
-    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_preview scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
+    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_emacs_conformance scripts.test_preview scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
     @echo "docs reminder: if this changes user-facing behavior, make sure the relevant release docs are updated or called out before release."
 
 # Install repo-local git hooks

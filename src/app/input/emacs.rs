@@ -1499,6 +1499,20 @@ mod tests {
         crate::layout::PaneId,
         tokio::sync::mpsc::Receiver<bytes::Bytes>,
     ) {
+        emacs_app_with_channel_at_size(bytes, 40, 10)
+    }
+
+    /// Sized variant used by the conformance corpus so recorded pane excerpts
+    /// do not need to be padded or constrained to the default test viewport.
+    pub(crate) fn emacs_app_with_channel_at_size(
+        bytes: &[u8],
+        width: u16,
+        height: u16,
+    ) -> (
+        App,
+        crate::layout::PaneId,
+        tokio::sync::mpsc::Receiver<bytes::Bytes>,
+    ) {
         let mut app = app_for_mouse_test();
         app.state.emacs = crate::emacs::EmacsState::from_config(&crate::config::EmacsConfig {
             enabled: true,
@@ -1507,9 +1521,12 @@ mod tests {
         });
         let mut ws = Workspace::test_new("test");
         let pane_id = ws.tabs[0].root_pane;
-        let pane_infos = ws.tabs[0]
-            .layout
-            .panes(ratatui::layout::Rect::new(0, 0, 40, 10));
+        let pane_infos = ws.tabs[0].layout.panes(ratatui::layout::Rect::new(
+            0,
+            0,
+            width.max(1),
+            height.max(1),
+        ));
         let info = pane_infos[0].clone();
         let (rt, rx) = crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
             info.inner_rect.width,
