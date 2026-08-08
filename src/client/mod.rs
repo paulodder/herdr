@@ -2033,6 +2033,8 @@ async fn run_client_loop(
     #[cfg(unix)]
     let mut pending_federation_activation: Option<PendingFederationActivation> = None;
     #[cfg(unix)]
+    let mut federated_clipboard_text: Option<String> = None;
+    #[cfg(unix)]
     let mut next_activation_request_id = 1_u64;
     #[cfg(unix)]
     let mut directory_authority_connection_id = 1_u64;
@@ -2405,6 +2407,12 @@ async fn run_client_loop(
                                     cell_height_px,
                                 },
                             );
+                            if let Err(err) = sync_clipboard_text_to_server(
+                                &mut write_stream,
+                                federated_clipboard_text.as_deref(),
+                            ) {
+                                warn!(%err, "failed to sync copied text to activated federation member");
+                            }
                             for buffered in pending.buffered_messages.drain(..) {
                                 let _ = event_tx.try_send(ClientLoopEvent::ServerMessage {
                                     connection_id: active_connection_id,
@@ -2717,6 +2725,10 @@ async fn run_client_loop(
                         handle_notify(kind, &message, body.as_deref(), &state.sound_config);
                     }
                     ServerMessage::Clipboard { data } => {
+                        #[cfg(unix)]
+                        if let Some(text) = decoded_clipboard_text(&data) {
+                            federated_clipboard_text = Some(text);
+                        }
                         forward_clipboard(&data);
                         let _ = io::stdout().flush();
                     }
@@ -3580,6 +3592,27 @@ fn recognized_image_extension(extension: &str) -> Option<&'static str> {
 fn decode_clipboard_payload(data: &str) -> Option<Vec<u8>> {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.decode(data).ok()
+}
+
+/// Decode only textual clipboard payloads that are safe to mirror into an
+/// Emacs kill ring on another federation member.
+#[cfg(any(unix, test))]
+fn decoded_clipboard_text(data: &str) -> Option<String> {
+    let text = String::from_utf8(decode_clipboard_payload(data)?).ok()?;
+    (!text.is_empty() && text.len() <= protocol::MAX_CLIPBOARD_TEXT_SYNC_SIZE).then_some(text)
+}
+
+#[cfg(unix)]
+fn sync_clipboard_text_to_server(stream: &mut LocalStream, text: Option<&str>) -> io::Result<()> {
+    let Some(text) = text else {
+        return Ok(());
+    };
+    write_to_server(
+        stream,
+        &ClientMessage::ClipboardTextSync {
+            text: text.to_owned(),
+        },
+    )
 }
 
 fn forwarded_clipboard_osc52(data: &str) -> Option<Vec<u8>> {
@@ -4523,6 +4556,20 @@ mod tests {
     #[test]
     fn decode_clipboard_payload_rejects_invalid_base64() {
         assert_eq!(decode_clipboard_payload("not-base64!!!"), None);
+    }
+
+    #[test]
+    fn decoded_clipboard_text_accepts_utf8_and_rejects_binary_or_empty_payloads() {
+        assert_eq!(decoded_clipboard_text("aMOpbGxv"), Some("héllo".into()));
+        assert_eq!(decoded_clipboard_text("/w=="), None);
+        assert_eq!(decoded_clipboard_text(""), None);
+        use base64::Engine as _;
+        let oversized = base64::engine::general_purpose::STANDARD.encode(vec![
+            b'x';
+            protocol::MAX_CLIPBOARD_TEXT_SYNC_SIZE
+                + 1
+        ]);
+        assert_eq!(decoded_clipboard_text(&oversized), None);
     }
 
     #[test]

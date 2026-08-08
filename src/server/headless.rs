@@ -2934,6 +2934,23 @@ impl HeadlessServer {
                     false
                 }
             }
+            ServerEvent::ClientClipboardTextSync { client_id, text } => {
+                let is_active_app_client = self.foreground_client_id == Some(client_id)
+                    && self.clients.get(&client_id).is_some_and(|client| {
+                        !client.suspended
+                            && matches!(
+                                client.mode,
+                                crate::server::clients::ClientConnectionMode::App
+                            )
+                    });
+                if is_active_app_client
+                    && self.app.state.emacs.enabled
+                    && self.app.state.emacs.clipboard_sync
+                {
+                    self.app.state.emacs.kill_ring.sync_from_system(Some(text));
+                }
+                false
+            }
             ServerEvent::ClientResize {
                 client_id,
                 cols,
@@ -8359,6 +8376,85 @@ next_tab = ""
                 .is_err(),
             "background client should not receive clipboard writes"
         );
+    }
+
+    #[test]
+    fn clipboard_text_sync_seeds_only_the_foreground_app_clients_emacs_ring() {
+        let mut server = test_headless_server();
+        server.app.state.emacs.enabled = true;
+        server.app.state.emacs.clipboard_sync = true;
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+        server.clients.insert(
+            2,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                2,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+        server.foreground_client_id = Some(2);
+
+        assert!(
+            !server.handle_server_event(ServerEvent::ClientClipboardTextSync {
+                client_id: 1,
+                text: "background".into(),
+            })
+        );
+        assert!(server.app.state.emacs.kill_ring.is_empty());
+
+        assert!(
+            !server.handle_server_event(ServerEvent::ClientClipboardTextSync {
+                client_id: 2,
+                text: "copied between members".into(),
+            })
+        );
+        assert_eq!(
+            server.app.state.emacs.kill_ring.head(),
+            Some("copied between members")
+        );
+    }
+
+    #[test]
+    fn clipboard_text_sync_respects_emacs_clipboard_sync_setting() {
+        let mut server = test_headless_server();
+        server.app.state.emacs.enabled = true;
+        server.app.state.emacs.clipboard_sync = false;
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+        server.foreground_client_id = Some(1);
+
+        assert!(
+            !server.handle_server_event(ServerEvent::ClientClipboardTextSync {
+                client_id: 1,
+                text: "must remain local".into(),
+            })
+        );
+        assert!(server.app.state.emacs.kill_ring.is_empty());
     }
 
     #[test]

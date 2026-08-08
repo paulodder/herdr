@@ -355,6 +355,8 @@ pub(crate) enum ServerEvent {
         client_id: u64,
         directory: Vec<crate::federation::EndpointState>,
     },
+    /// A foreground client mirrored copied text across a federation switch.
+    ClientClipboardTextSync { client_id: u64, text: String },
     /// A client detached gracefully.
     ClientDetach { client_id: u64 },
     /// A client connection was lost.
@@ -759,6 +761,20 @@ fn client_read_loop(
                     client_id,
                     directory,
                 }
+            }
+            ClientMessage::ClipboardTextSync { text } => {
+                if text.len() > protocol::MAX_CLIPBOARD_TEXT_SYNC_SIZE {
+                    warn!(
+                        client_id,
+                        bytes = text.len(),
+                        max = protocol::MAX_CLIPBOARD_TEXT_SYNC_SIZE,
+                        "rejecting oversized clipboard text sync"
+                    );
+                    let _ = server_event_tx
+                        .blocking_send(ServerEvent::ClientDisconnected { client_id });
+                    break;
+                }
+                ServerEvent::ClientClipboardTextSync { client_id, text }
             }
             ClientMessage::Detach => ServerEvent::ClientDetach { client_id },
             ClientMessage::AttachTerminal {
@@ -1234,6 +1250,79 @@ new_tab = "ctrl+notakey"
             },
         )
         .expect("write oversized input");
+
+        match server_event_rx
+            .blocking_recv()
+            .expect("client disconnected event")
+        {
+            ServerEvent::ClientDisconnected { client_id } => assert_eq!(client_id, 7),
+            other => panic!("expected ClientDisconnected, got {other:?}"),
+        }
+
+        drop(client_stream);
+        should_quit.store(true, Ordering::Release);
+        handle
+            .join()
+            .expect("read thread join")
+            .expect("read thread result");
+    }
+
+    #[test]
+    fn client_read_loop_forwards_clipboard_text_sync() {
+        let (mut client_stream, server_stream, _path) =
+            local_stream_pair("client-read-clipboard-sync");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let read_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            client_read_loop(server_stream, 7, &server_event_tx, &read_quit)
+        });
+
+        protocol::write_message(
+            &mut client_stream,
+            &ClientMessage::ClipboardTextSync {
+                text: "copied between members".into(),
+            },
+        )
+        .expect("write clipboard text sync");
+
+        match server_event_rx
+            .blocking_recv()
+            .expect("clipboard text sync event")
+        {
+            ServerEvent::ClientClipboardTextSync { client_id, text } => {
+                assert_eq!(client_id, 7);
+                assert_eq!(text, "copied between members");
+            }
+            other => panic!("expected ClientClipboardTextSync, got {other:?}"),
+        }
+
+        drop(client_stream);
+        should_quit.store(true, Ordering::Release);
+        handle
+            .join()
+            .expect("read thread join")
+            .expect("read thread result");
+    }
+
+    #[test]
+    fn client_read_loop_rejects_oversized_clipboard_text_sync() {
+        let (mut client_stream, server_stream, _path) =
+            local_stream_pair("client-read-oversized-clipboard-sync");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let read_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            client_read_loop(server_stream, 7, &server_event_tx, &read_quit)
+        });
+
+        protocol::write_message(
+            &mut client_stream,
+            &ClientMessage::ClipboardTextSync {
+                text: "x".repeat(protocol::MAX_CLIPBOARD_TEXT_SYNC_SIZE + 1),
+            },
+        )
+        .expect("write oversized clipboard text sync");
 
         match server_event_rx
             .blocking_recv()

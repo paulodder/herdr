@@ -43,7 +43,11 @@ pub const LIVE_HANDOFF_RECONNECT_REASON: &str =
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 19;
+pub const PROTOCOL_VERSION: u32 = 20;
+
+/// Maximum UTF-8 clipboard payload the client may carry between federation
+/// members. This keeps the control path bounded independently of frame size.
+pub const MAX_CLIPBOARD_TEXT_SYNC_SIZE: usize = 1024 * 1024;
 
 /// Client-visible layout state that follows one TUI across federation members.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -458,6 +462,10 @@ pub enum ClientMessage {
         #[serde(with = "federation_directory_wire")]
         directory: Vec<crate::federation::EndpointState>,
     },
+
+    /// Mirror the foreground client's most recently copied UTF-8 text into
+    /// this member's Emacs kill ring after an in-process federation switch.
+    ClipboardTextSync { text: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1156,6 +1164,12 @@ mod tests {
                 directory: Vec::new(),
             }),
             12
+        );
+        assert_eq!(
+            tag(&ClientMessage::ClipboardTextSync {
+                text: "copied text".into(),
+            }),
+            13
         );
     }
 
@@ -2107,6 +2121,9 @@ mod tests {
             ClientMessage::FederationSuspend,
             ClientMessage::FederationDirectoryUpdate {
                 directory: Vec::new(),
+            },
+            ClientMessage::ClipboardTextSync {
+                text: "copied text".into(),
             },
         ];
         for message in messages {
