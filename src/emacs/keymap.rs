@@ -33,10 +33,23 @@ impl Chord {
     /// This and `parse_chord` are the ONLY normalization points — see
     /// `canonical_chord`.
     pub fn from_key(key: &TerminalKey) -> Option<Self> {
+        // Kitty REPORT_ALTERNATE_KEYS represents shifted punctuation as the
+        // physical base key plus an alternate codepoint (for example,
+        // Alt+Shift+, is `44:60;4u`). Emacs binds the produced character,
+        // not the physical comma key, so preserve `<` for `M-<` and the
+        // equivalent shifted letters/symbols here.
+        let code = if key.modifiers.contains(KeyModifiers::SHIFT) {
+            key.shifted_codepoint
+                .and_then(char::from_u32)
+                .map(KeyCode::Char)
+                .unwrap_or(key.code)
+        } else {
+            key.code
+        };
         canonical_chord(
             key.modifiers.contains(KeyModifiers::CONTROL),
             key.modifiers.contains(KeyModifiers::ALT),
-            key.code,
+            code,
         )
     }
 
@@ -558,6 +571,12 @@ mod tests {
             KeyModifiers::empty(),
         );
         assert_eq!(Chord::from_key(&key), None);
+    }
+
+    #[test]
+    fn kitty_shifted_punctuation_uses_the_reported_character() {
+        assert_encodes_to("\x1b[44:60;4:1u", "M-<");
+        assert_encodes_to("\x1b[46:62;4:1u", "M->");
     }
 
     #[test]
