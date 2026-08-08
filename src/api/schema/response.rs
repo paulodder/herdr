@@ -59,6 +59,12 @@ pub enum ResponseResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         snapshot: Option<Box<SessionSnapshot>>,
     },
+    DirectoryList {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
+        entries: Vec<super::common::DirectoryEntry>,
+    },
     ProcessSpawned {
         pid: u32,
     },

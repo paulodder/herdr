@@ -573,9 +573,9 @@ pub fn request(
             .spawn()
             .map_err(|err| io::Error::new(err.kind(), format!("failed to start ssh: {err}")))?,
     );
-    if let Some(mut stdin) = child.stdin.take() {
-        write_json_line(&mut stdin, request)?;
-    }
+    let stdin = child.stdin.take().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::BrokenPipe, "ssh bridge stdin is unavailable")
+    })?;
     let stdout = child.stdout.take().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::BrokenPipe,
@@ -583,9 +583,24 @@ pub fn request(
         )
     })?;
     let reader = BufReader::new(stdout);
-    read_success_response_with_timeout(&mut child, reader)
-        .map(|(_, response)| response)
-        .map_err(|err| endpoint_stream_error(&mut child, endpoint, "request failed", err))
+    hold_request_input_until_response(stdin, request, || {
+        read_success_response_with_timeout(&mut child, reader).map(|(_, response)| response)
+    })
+    .map_err(|err| endpoint_stream_error(&mut child, endpoint, "request failed", err))
+}
+
+fn hold_request_input_until_response<T>(
+    mut input: impl io::Write,
+    request: &Request,
+    read_response: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    write_json_line(&mut input, request)?;
+    // A federation bridge treats input EOF as transport loss and shuts down
+    // both halves of its local socket. Keep this handle alive until the reply
+    // arrives so a successful mutating request cannot look like a failure.
+    let response = read_response();
+    drop(input);
+    response
 }
 
 pub fn run_stdio_bridge() -> io::Result<()> {
@@ -1212,6 +1227,53 @@ pub fn apply_event(snapshot: &mut SessionSnapshot, envelope: &SequencedEventEnve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_shot_request_keeps_bridge_input_open_until_response() {
+        struct TrackedWriter {
+            bytes: Vec<u8>,
+            dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        }
+
+        impl io::Write for TrackedWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl Drop for TrackedWriter {
+            fn drop(&mut self) {
+                self.dropped
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let request = Request {
+            id: "request-lifetime".into(),
+            method: crate::api::schema::Method::Ping(crate::api::schema::PingParams {}),
+        };
+        let result = hold_request_input_until_response(
+            TrackedWriter {
+                bytes: Vec::new(),
+                dropped: dropped.clone(),
+            },
+            &request,
+            || {
+                assert!(!dropped.load(std::sync::atomic::Ordering::SeqCst));
+                Ok("response")
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result, "response");
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+    }
 
     #[cfg(unix)]
     #[test]

@@ -67,6 +67,8 @@ pub enum Method {
     SessionSnapshot(EmptyParams),
     #[serde(rename = "session.watch")]
     SessionWatch(SessionWatchParams),
+    #[serde(rename = "directory.list")]
+    DirectoryList(DirectoryListParams),
     #[serde(rename = "workspace.create")]
     WorkspaceCreate(WorkspaceCreateParams),
     #[serde(rename = "workspace.list")]
