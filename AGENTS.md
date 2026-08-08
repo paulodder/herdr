@@ -102,6 +102,44 @@ server:
 env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH cargo run -- <command>
 ```
 
+### STL per-user federation deployment
+
+This section applies only in Paul's STL environment, where this checkout is
+paired with `/home/paul/projects/stl/stl-agents` and `herdr federation
+cohort-status` is available. After a Herdr change is committed, tested, and
+pushed, deploy it through the per-user cohort upgrader. Do not manually copy
+binaries, live-handoff individual servers, stop the server, or update shared
+host defaults: those paths can create protocol skew for this user or affect a
+different user.
+
+From a clean Herdr checkout whose `HEAD` is reachable by Tana:
+
+```bash
+git push
+herdr federation cohort-status
+herdr federation upgrade \
+  --channel canary \
+  --repo "$PWD" \
+  --ref "$(git rev-parse HEAD)"
+```
+
+The upgrader is user-specific and transactional. It builds x86 on the initiating
+x86 host, builds ARM **natively on Tana**, stages immutable artifacts, upgrades
+the remote receivers before home, preserves panes and runtime identity through
+live handoff, and updates only the invoking user's federation locks. Never run a
+local ARM/aarch64 release build or cross-compile it on the laptop.
+
+After a successful version change, reopen this user's running Herdr clients when
+the upgrader requests it; do not run `herdr server stop`. Verify with
+`herdr federation cohort-status` and the acceptance command printed by the
+upgrader. If a transaction partially fails, inspect its journal and use `herdr
+federation rollback` rather than improvising per-host repairs.
+
+The authoritative operational runbook, including explicit-artifact recovery,
+is `../stl/stl-agents/docs/herdr-per-user-federation-rollouts.md`. Agents doing
+Herdr work in this environment must read it before building or deploying a
+federated release.
+
 ## Local Can Machine Workflow
 
 This section applies only on Can's workstation or Windows VM setup. If the
