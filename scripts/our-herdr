@@ -3,6 +3,7 @@ set -euo pipefail
 
 readonly our_herdr_repo="/home/paul/projects/herdr"
 readonly our_herdr_binary="$our_herdr_repo/target/our-herdr/herdr"
+readonly our_herdr_active_binary="/home/paul/.local/bin/herdr"
 readonly our_herdr_config="${HERDR_CONFIG_PATH:-/home/paul/.config/herdr/config.toml}"
 readonly our_herdr_rust_bin="/home/paul/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin"
 
@@ -12,10 +13,26 @@ build_our_herdr() {
         exit 1
     fi
 
+    if ! git diff --quiet || ! git diff --cached --quiet ||
+        [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
+        printf '%s\n' \
+            'our-herdr: refusing a local-only refresh from a dirty checkout; commit it and deploy the federation cohort first' >&2
+        exit 1
+    fi
+
+    local build_id
+    build_id="$(git rev-parse --short HEAD)"
     env \
         PATH="$our_herdr_rust_bin:/usr/local/bin:/usr/bin:/bin" \
         ZIG="${ZIG:-/usr/bin/true}" \
+        HERDR_BUILD_CHANNEL=stl \
+        HERDR_BUILD_ID="$build_id" \
         "$our_herdr_rust_bin/cargo" build --profile our-herdr --locked
+}
+
+client_version() {
+    "$1" status client --json | python3 -c \
+        'import json, sys; print(json.load(sys.stdin)["version"])'
 }
 
 run_our_herdr() {
@@ -36,6 +53,16 @@ if [[ "${1:-}" == "refresh" ]]; then
     cd "$our_herdr_repo"
     build_our_herdr
 
+    built_version="$(client_version "$our_herdr_binary")"
+    active_version="$(client_version "$our_herdr_active_binary")"
+    if [[ "$built_version" != "$active_version" ]]; then
+        printf 'our-herdr: refusing local-only handoff from cohort %s to %s\n' \
+            "$active_version" "$built_version" >&2
+        printf '%s\n' \
+            'our-herdr: deploy the same committed release to the paired federation members first' >&2
+        exit 1
+    fi
+
     server_status="$(run_our_herdr status server 2>/dev/null || true)"
     if [[ "$server_status" == *"status: running"* ]]; then
         run_our_herdr server live-handoff --import-exe "$our_herdr_binary"
@@ -46,9 +73,8 @@ if [[ "${1:-}" == "refresh" ]]; then
     exit 0
 fi
 
-if [[ ! -x "$our_herdr_binary" ]]; then
-    printf 'our-herdr: optimized binary not found: %s\n' "$our_herdr_binary" >&2
-    printf 'build it with: our-herdr refresh\n' >&2
+if [[ ! -x "$our_herdr_active_binary" ]]; then
+    printf 'our-herdr: active binary not found: %s\n' "$our_herdr_active_binary" >&2
     exit 1
 fi
 
@@ -57,4 +83,4 @@ exec env \
     -u HERDR_SOCKET_PATH \
     -u HERDR_CLIENT_SOCKET_PATH \
     HERDR_CONFIG_PATH="$our_herdr_config" \
-    "$our_herdr_binary" "$@"
+    "$our_herdr_active_binary" "$@"
