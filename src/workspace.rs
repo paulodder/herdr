@@ -160,6 +160,8 @@ pub struct Workspace {
     /// Optional argv used instead of the default shell for new tabs and splits.
     /// Integrations receive the launch context through `HERDR_LAUNCH_*` env vars.
     pub terminal_launcher_argv: Option<Vec<String>>,
+    /// Apply Claude Code's accessible rendering mode to future pane launches.
+    pub(crate) claude_ax_screen_reader: bool,
     pub(crate) metadata_tokens: crate::metadata_tokens::MetadataTokens,
     pub(crate) metadata_token_sequences: HashMap<String, u64>,
     /// Public pane numbers within this workspace. Closed pane numbers are not reused.
@@ -222,6 +224,7 @@ impl Workspace {
             cached_git_space: git_space_metadata(&identity_cwd),
             worktree_space: None,
             terminal_launcher_argv: None,
+            claude_ax_screen_reader: false,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             metadata_token_sequences: HashMap::new(),
             public_pane_numbers,
@@ -406,6 +409,7 @@ impl Workspace {
                 cached_git_space: None,
                 worktree_space: None,
                 terminal_launcher_argv: None,
+                claude_ax_screen_reader: false,
                 metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
                 metadata_token_sequences: HashMap::new(),
                 public_pane_numbers,
@@ -1022,11 +1026,17 @@ impl Workspace {
         pane_number: usize,
         extra_env: Vec<(String, String)>,
     ) -> PaneLaunchEnv {
-        PaneLaunchEnv::from_extra(extra_env).with_identity(
-            self.id.clone(),
-            public_tab_id_for_number(&self.id, tab_number),
-            public_pane_id_for_number(&self.id, pane_number),
-        )
+        PaneLaunchEnv::from_extra(extra_env)
+            .with_claude_ax_screen_reader(self.claude_ax_screen_reader)
+            .with_identity(
+                self.id.clone(),
+                public_tab_id_for_number(&self.id, tab_number),
+                public_pane_id_for_number(&self.id, pane_number),
+            )
+    }
+
+    pub(crate) fn set_claude_ax_screen_reader(&mut self, enabled: bool) {
+        self.claude_ax_screen_reader = enabled;
     }
 
     pub fn public_tab_number(&self, tab_idx: usize) -> Option<usize> {
@@ -1250,6 +1260,7 @@ impl Workspace {
             cached_git_space: None,
             worktree_space: None,
             terminal_launcher_argv: None,
+            claude_ax_screen_reader: false,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             metadata_token_sequences: HashMap::new(),
             public_pane_numbers,

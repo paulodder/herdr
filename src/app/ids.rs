@@ -49,11 +49,19 @@ impl App {
         let tab_id = self.public_tab_id(ws_idx, tab_idx)?;
         let pane_id = self.public_pane_id(ws_idx, pane_id)?;
         Some(
-            crate::pane::PaneLaunchEnv::from_extra(extra_env).with_identity(
-                workspace_id,
-                tab_id,
-                pane_id,
-            ),
+            crate::pane::PaneLaunchEnv::from_extra(extra_env)
+                .with_claude_ax_screen_reader(ws.claude_ax_screen_reader)
+                .with_identity(workspace_id, tab_id, pane_id),
+        )
+    }
+
+    pub(super) fn configured_pane_extra_env(
+        &self,
+        extra_env: Vec<(String, String)>,
+    ) -> Vec<(String, String)> {
+        crate::pane::configure_claude_ax_screen_reader_env(
+            extra_env,
+            self.state.emacs.claude_ax_screen_reader,
         )
     }
 

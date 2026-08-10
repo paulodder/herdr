@@ -61,6 +61,9 @@ fn default_update_channel() -> UpdateChannelConfig {
 #[serde(default)]
 pub struct EmacsConfig {
     pub enabled: bool,
+    /// Force Claude Code's accessible screen-reader rendering in new pane shells.
+    /// Default: false.
+    pub claude_ax_screen_reader: bool,
     pub clipboard_sync: bool,
     pub kill_ring_max: usize,
     pub mark_ring_max: usize,
@@ -73,6 +76,7 @@ impl Default for EmacsConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            claude_ax_screen_reader: false,
             clipboard_sync: true,
             kill_ring_max: 60,
             mark_ring_max: 16,
@@ -1808,11 +1812,13 @@ scrollback_lines = 12345
         assert_eq!(config.emacs.kill_ring_max, 60);
         assert_eq!(config.emacs.mark_ring_max, 16);
         assert!(config.emacs.keys.is_empty());
+        assert!(!config.emacs.claude_ax_screen_reader);
 
         let parsed: Config = toml::from_str(
             r#"
 [emacs]
 enabled = true
+claude_ax_screen_reader = true
 clipboard_sync = false
 kill_ring_max = 10
 mark_ring_max = 4
@@ -1823,6 +1829,7 @@ mark_ring_max = 4
         )
         .expect("emacs config parses");
         assert!(parsed.emacs.enabled);
+        assert!(parsed.emacs.claude_ax_screen_reader);
         assert!(!parsed.emacs.clipboard_sync);
         assert_eq!(parsed.emacs.kill_ring_max, 10);
         assert_eq!(parsed.emacs.mark_ring_max, 4);

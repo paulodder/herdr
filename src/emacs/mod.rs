@@ -35,6 +35,7 @@ pub struct LastYank {
 #[derive(Debug)]
 pub struct EmacsState {
     pub enabled: bool,
+    pub claude_ax_screen_reader: bool,
     pub clipboard_sync: bool,
     pub kill_ring_max: usize,
     pub mark_ring_max: usize,
@@ -72,6 +73,7 @@ impl EmacsState {
         let (keymaps, _warnings) = commands::build_keymaps(&config.keys);
         Self {
             enabled: config.enabled,
+            claude_ax_screen_reader: config.enabled && config.claude_ax_screen_reader,
             clipboard_sync: config.clipboard_sync,
             kill_ring_max: config.kill_ring_max.max(1),
             mark_ring_max: config.mark_ring_max.max(1),
@@ -95,6 +97,7 @@ impl EmacsState {
     pub fn apply_config(&mut self, config: &EmacsConfig) -> Vec<String> {
         let (keymaps, warnings) = commands::build_keymaps(&config.keys);
         self.enabled = config.enabled;
+        self.claude_ax_screen_reader = config.enabled && config.claude_ax_screen_reader;
         self.clipboard_sync = config.clipboard_sync;
         self.kill_ring_max = config.kill_ring_max.max(1);
         self.mark_ring_max = config.mark_ring_max.max(1);
@@ -154,6 +157,22 @@ impl EmacsState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_ax_screen_reader_requires_enabled_emacs_layer() {
+        let disabled = EmacsState::from_config(&EmacsConfig {
+            claude_ax_screen_reader: true,
+            ..Default::default()
+        });
+        assert!(!disabled.claude_ax_screen_reader);
+
+        let enabled = EmacsState::from_config(&EmacsConfig {
+            enabled: true,
+            claude_ax_screen_reader: true,
+            ..Default::default()
+        });
+        assert!(enabled.claude_ax_screen_reader);
+    }
 
     #[test]
     fn apply_config_trims_existing_pane_mark_rings() {

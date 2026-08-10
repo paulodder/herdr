@@ -1134,6 +1134,12 @@
           "description": "Enable the Emacs keyboard layer (fork feature): C-x management chords and TEXT mode over pane scrollback."
         },
         {
+          "key": "emacs.claude_ax_screen_reader",
+          "type": "boolean",
+          "default": "false",
+          "description": "When the Emacs layer is enabled, set CLAUDE_AX_SCREEN_READER=1 in newly created pane shells so Claude Code uses accessible rendering and keeps its output available to TEXT-mode scrollback. Existing pane shells are unchanged."
+        },
+        {
           "key": "emacs.clipboard_sync",
           "type": "boolean",
           "default": "true",
