@@ -401,6 +401,10 @@ impl App {
                 self.runtime_server_reload_config("tui.server.reload_config");
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::ResetFederationConnections => {
+                self.state.request_federation_connection_reset = true;
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::OpenNotificationTarget => {
                 self.focus_toast_target_via_api();
                 if self.state.mode == Mode::Navigate {
@@ -1358,6 +1362,7 @@ pub(crate) enum NavigateAction {
     Help,
     Settings,
     ReloadConfig,
+    ResetFederationConnections,
     OpenNotificationTarget,
     Detach,
     OpenNavigator,
@@ -1738,6 +1743,10 @@ pub(super) fn execute_navigate_action_in_context(
         NavigateAction::Settings => super::settings::open_settings(state),
         NavigateAction::ReloadConfig => {
             state.request_reload_config = true;
+            leave_navigate_mode(state);
+        }
+        NavigateAction::ResetFederationConnections => {
+            state.request_federation_connection_reset = true;
             leave_navigate_mode(state);
         }
         NavigateAction::OpenNotificationTarget => {
@@ -2252,6 +2261,18 @@ mod tests {
 
         assert!(state.request_reload_config);
         assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn reset_federation_connections_action_requests_client_reset() {
+        let mut app = app_with_test_workspaces(&["test"]);
+
+        app.execute_tui_navigate_action(
+            NavigateAction::ResetFederationConnections,
+            ActionContext::Direct,
+        );
+
+        assert!(app.state.request_federation_connection_reset);
     }
 
     #[test]

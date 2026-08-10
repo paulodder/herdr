@@ -143,6 +143,15 @@ Use `herdr federation list`, `herdr federation watch`, and
 `herdr federation attach <endpoint>` to inspect or exercise the same transport
 outside the TUI.
 
+Herdr keeps inactive native attachments ready for fast switching. To close
+those client-owned transports without restarting Herdr or any persistent
+server, choose **reset connections** from the sidebar menu or run
+`M-x reset-federation-connections`. The active member and the home directory
+connection stay attached. The action also cancels a pending remote switch when
+the source connection is still healthy. Selecting another member then opens a
+fresh connection. An attachment that times out is discarded automatically, so
+retrying also opens a fresh transport instead of reusing the timed-out one.
+
 ## Keybindings
 
 For a guided introduction to the prefix and a vetted prefix-free setup, see [Keyboard](/docs/keyboard/).

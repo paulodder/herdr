@@ -570,6 +570,7 @@ impl App {
             request_live_handoff: false,
             request_client_config_reload: false,
             request_federation_attach: None,
+            request_federation_connection_reset: false,
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,

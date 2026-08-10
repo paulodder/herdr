@@ -1833,6 +1833,7 @@ impl SshStdioBridge {
                             &session_name,
                             thread_ssh_options.as_ref(),
                             multiplexing,
+                            &thread_stop,
                         ) {
                             eprintln!("herdr: remote bridge failed: {err}");
                         }
@@ -1968,6 +1969,7 @@ fn bridge_connection(
     session_name: &str,
     ssh_options: Option<&ManagedSshOptions>,
     multiplexing: bool,
+    should_stop: &AtomicBool,
 ) -> io::Result<()> {
     let mut command = Command::new("ssh");
     if multiplexing {
@@ -2010,7 +2012,7 @@ fn bridge_connection(
         let _ = child_to_stream.shutdown(std::net::Shutdown::Write);
     });
 
-    let wait_result = child.wait();
+    let wait_result = wait_for_bridge_child(&mut child, should_stop);
     // The remote bridge can exit first during a server live handoff. Wake only
     // the upload copier's read half before joining it; the download copier may
     // still need to flush the final ServerShutdown frame to the local client.
@@ -2026,6 +2028,22 @@ fn bridge_connection(
             io::ErrorKind::ConnectionAborted,
             format!("ssh bridge exited with {status}"),
         ))
+    }
+}
+
+fn wait_for_bridge_child(
+    child: &mut std::process::Child,
+    should_stop: &AtomicBool,
+) -> io::Result<std::process::ExitStatus> {
+    loop {
+        if should_stop.load(Ordering::Acquire) {
+            let _ = child.kill();
+            return child.wait();
+        }
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        thread::sleep(BRIDGE_ACCEPT_POLL);
     }
 }
 
@@ -3291,5 +3309,19 @@ mod tests {
         InstallSource::temporary(path, dir.clone()).cleanup();
 
         assert!(!dir.exists());
+    }
+
+    #[test]
+    fn stopped_bridge_terminates_its_child_without_waiting_for_remote_exit() {
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleeping bridge child");
+        let should_stop = AtomicBool::new(true);
+
+        let status = wait_for_bridge_child(&mut child, &should_stop)
+            .expect("stopped bridge child should be reaped");
+
+        assert!(!status.success());
     }
 }

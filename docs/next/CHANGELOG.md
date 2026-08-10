@@ -4,6 +4,7 @@
 
 ### Added
 - Added personal Herdr federation: stable server/session identities, atomic cursor-based `session.watch`, reconnecting SSH endpoint streams, a combined local/remote navigator, native remote attachment, and `herdr federation list|watch|attach` diagnostics.
+- Added an in-app **reset connections** action and `M-x reset-federation-connections` command that close inactive federation transports without restarting the client or persistent servers.
 - Added Emacs `open-at-point` on `ctrl+alt+o`. URLs open in EWW and existing files, directories, and `path:line:column` references open in a temporary terminal `emacsclient` frame backed by the user's persistent Emacs server.
 - Added a replayable Emacs onboarding tour, available from the sidebar menu or with `M-x herdr-onboarding`, covering Herdr's hierarchy, primary navigation chords, and parallel mouse controls.
 - Emacs TEXT mode now supports `ctrl+l` recentering with the standard middle, top, and bottom cycle around point.
@@ -12,6 +13,7 @@
 - Added maki detection with idle, working, and blocked screen states. (#1301, thanks @tontinton)
 
 ### Fixed
+- Timed-out federation attachments are now discarded so the next selection opens a fresh SSH transport instead of reusing the stale connection.
 - Native Windows servers now detach from the terminal console that launched them, so closing WezTerm, Windows Terminal, or another host terminal no longer stops persistent pane processes. (#1329)
 - Windows API clients now remain connected while waiting for initial named-pipe request bytes, so `status server`, `api snapshot`, and other socket commands no longer intermittently fail with BrokenPipe. (#1279)
 - `herdr --remote` now installs remote helper binaries without routing the binary stream through a multiline `/bin/sh -c` command, fixing installs for non-POSIX login shells such as xonsh. (#1203, thanks @nhumrich)

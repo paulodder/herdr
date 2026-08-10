@@ -19,7 +19,7 @@ use super::keymap::{parse_key_seq, stack_lookup, Chord, Keymap, Lookup};
 /// Number of `NavigateAction` variants. Pinned so a silent upstream addition
 /// is caught by `every_navigate_action_has_a_name` even if someone patches
 /// the match with a catch-all arm (don't).
-pub const NAVIGATE_ACTION_COUNT: usize = 45;
+pub const NAVIGATE_ACTION_COUNT: usize = 46;
 
 /// Generates BOTH the exhaustive name match and the name -> action table
 /// from a single list, so the two can never drift.
@@ -98,6 +98,7 @@ herdr_command_table! {
         Help                     => "herdr-help",
         Settings                 => "settings",
         ReloadConfig             => "reload-config",
+        ResetFederationConnections => "reset-federation-connections",
         OpenNotificationTarget   => "open-navigator-notification-target",
         Detach                   => "detach",
     ],

@@ -202,6 +202,9 @@ impl AppState {
             labels.push("emacs tour");
         }
         labels.push("reload config");
+        if self.federation_states().next().is_some() {
+            labels.push("reset connections");
+        }
         if self.update_available.is_some() {
             labels.push("update ready");
         } else if self.latest_release_notes_available {
@@ -652,6 +655,46 @@ mod tests {
 
         assert!(app.state.request_reload_config);
         assert_eq!(app.state.mode, Mode::Navigate);
+    }
+
+    #[test]
+    fn federation_menu_can_reset_inactive_connections() {
+        let mut app = app_for_mouse_test();
+        let endpoint = crate::config::FederationEndpointConfig {
+            id: "tana.stl.dev".into(),
+            target: "paul@tana.stl.dev".into(),
+            ..crate::config::FederationEndpointConfig::default()
+        };
+        app.state.federation.insert(
+            endpoint.id.clone(),
+            crate::federation::EndpointState::configured(endpoint),
+        );
+
+        assert_eq!(
+            app.state.global_menu_labels(),
+            vec![
+                "settings",
+                "keybinds",
+                "reload config",
+                "reset connections",
+                "detach"
+            ]
+        );
+
+        let launcher = app.state.global_launcher_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            launcher.x,
+            launcher.y,
+        ));
+        let menu = app.state.global_menu_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu.x + 2,
+            menu.y + 4,
+        ));
+
+        assert!(app.state.request_federation_connection_reset);
     }
 
     #[test]

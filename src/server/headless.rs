@@ -2572,6 +2572,15 @@ impl HeadlessServer {
             return true;
         }
 
+        if std::mem::take(&mut self.app.state.request_federation_connection_reset) {
+            info!(
+                client_id,
+                "federation connection reset requested from in-app command"
+            );
+            self.send_to_client(client_id, ServerMessage::ResetFederationConnections);
+            return true;
+        }
+
         if let Some(request) = self.app.state.request_federation_attach.take() {
             let endpoint_id = request.endpoint_id;
             let directory = self.federation_directory();
@@ -8313,6 +8322,38 @@ next_tab = ""
             other => panic!("expected ReloadSoundConfig, got {other:?}"),
         }
         assert!(!server.app.state.request_client_config_reload);
+    }
+
+    #[test]
+    fn federation_connection_reset_request_targets_foreground_client() {
+        let mut server = test_headless_server();
+        let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.app.state.request_federation_connection_reset = true;
+
+        assert!(server.handle_client_input_events(1, Vec::new()));
+
+        match read_server_message(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("federation reset message"),
+        ) {
+            ServerMessage::ResetFederationConnections => {}
+            other => panic!("expected ResetFederationConnections, got {other:?}"),
+        }
+        assert!(!server.app.state.request_federation_connection_reset);
     }
 
     #[test]

@@ -1436,6 +1436,8 @@ pub struct AppState {
     pub request_client_config_reload: bool,
     /// Ask the foreground thin client to attach natively to a remote Herdr session.
     pub(crate) request_federation_attach: Option<FederationAttachRequest>,
+    /// Ask the foreground thin client to close its inactive federation transports.
+    pub(crate) request_federation_connection_reset: bool,
     /// Set when UI interaction requested a clipboard write that must be
     /// handled by the outer App/event loop instead of directly from AppState.
     pub request_clipboard_write: Option<Vec<u8>>,
@@ -1830,6 +1832,7 @@ impl AppState {
             request_live_handoff: false,
             request_client_config_reload: false,
             request_federation_attach: None,
+            request_federation_connection_reset: false,
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,

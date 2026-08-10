@@ -769,6 +769,10 @@ pub enum ServerMessage {
         #[serde(with = "federation_directory_wire")]
         directory: Vec<crate::federation::EndpointState>,
     },
+
+    /// Ask the TUI connection manager to close inactive federation transports.
+    /// The active member remains attached; selecting another member reconnects it.
+    ResetFederationConnections,
 }
 
 // ---------------------------------------------------------------------------
@@ -2196,6 +2200,12 @@ mod tests {
         write_message(&mut bytes, &directory).unwrap();
         let decoded: ServerMessage = read_message(&mut bytes.as_slice(), MAX_FRAME_SIZE).unwrap();
         assert_eq!(decoded, directory);
+
+        let reset = ServerMessage::ResetFederationConnections;
+        let mut bytes = Vec::new();
+        write_message(&mut bytes, &reset).unwrap();
+        let decoded: ServerMessage = read_message(&mut bytes.as_slice(), MAX_FRAME_SIZE).unwrap();
+        assert_eq!(decoded, reset);
 
         let snapshot = crate::api::schema::SessionSnapshot {
             identity: crate::api::schema::RuntimeIdentity {

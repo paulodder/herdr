@@ -1618,6 +1618,23 @@ fn federation_connection_plan<'a>(
 }
 
 #[cfg(unix)]
+fn preserve_suspended_connection_on_reset(
+    member_id: &str,
+    directory_authority_member_id: &str,
+) -> bool {
+    member_id == directory_authority_member_id
+}
+
+#[cfg(unix)]
+fn can_cancel_pending_connection_on_reset(
+    retain_current: bool,
+    pending_member_id: &str,
+    directory_authority_member_id: &str,
+) -> bool {
+    retain_current && pending_member_id != directory_authority_member_id
+}
+
+#[cfg(unix)]
 fn federation_connecting_frame(
     base: &crate::protocol::FrameData,
     connecting: &FederationConnectingUi,
@@ -2747,6 +2764,64 @@ async fn run_client_loop(
                             &mut state.remote_image_paste_key,
                         );
                     }
+                    ServerMessage::ResetFederationConnections => {
+                        #[cfg(unix)]
+                        {
+                            let mut reset_connection_ids = Vec::new();
+                            if let Some(mut pending) = pending_federation_activation.take() {
+                                let can_cancel = can_cancel_pending_connection_on_reset(
+                                    pending.retain_current,
+                                    &pending.connection.member_id,
+                                    &directory_authority_member_id,
+                                );
+                                if !can_cancel {
+                                    pending_federation_activation = Some(pending);
+                                    handle_notify(
+                                        NotifyKind::Toast,
+                                        "Federation switch in progress",
+                                        Some(
+                                            "The active connection is recovering; reset is unavailable until it settles.",
+                                        ),
+                                        &state.sound_config,
+                                    );
+                                    continue;
+                                }
+                                clear_connecting_ui(&mut state, true);
+                                let _ = write_to_server(
+                                    &mut pending.connection.stream,
+                                    &ClientMessage::FederationSuspend,
+                                );
+                                reset_connection_ids.push(pending.connection.connection_id);
+                            }
+                            suspended_connections.retain(|connection| {
+                                let preserve = preserve_suspended_connection_on_reset(
+                                    &connection.member_id,
+                                    &directory_authority_member_id,
+                                );
+                                if !preserve {
+                                    reset_connection_ids.push(connection.connection_id);
+                                }
+                                preserve
+                            });
+                            for connection_id in &reset_connection_ids {
+                                disconnected_connections.remove(connection_id);
+                            }
+                            let reset_count = reset_connection_ids.len();
+                            info!(reset_count, "inactive federation connections reset");
+                            let body = if reset_count == 0 {
+                                "No inactive remote connections were open."
+                            } else {
+                                "Selecting a remote member will open a fresh connection."
+                            };
+                            handle_notify(
+                                NotifyKind::Toast,
+                                "Federation connections reset",
+                                Some(body),
+                                &state.sound_config,
+                            );
+                            state.request_full_redraw();
+                        }
+                    }
                     ServerMessage::MouseCapture { enabled } => {
                         let desired = enabled;
                         if desired != state.mouse_capture_active {
@@ -3097,7 +3172,12 @@ async fn run_client_loop(
                 if connection_id != active_connection_id {
                     #[cfg(unix)]
                     {
-                        disconnected_connections.insert(connection_id);
+                        if suspended_connections
+                            .iter()
+                            .any(|connection| connection.connection_id == connection_id)
+                        {
+                            disconnected_connections.insert(connection_id);
+                        }
                         if connection_id == directory_authority_connection_id
                             || pending_directory_authority_connection_id == Some(connection_id)
                         {
@@ -3214,24 +3294,11 @@ async fn run_client_loop(
                     handle_notify(
                         NotifyKind::Toast,
                         "Federated member timed out",
-                        Some("The current Herdr connection remains active."),
+                        Some(
+                            "The stale connection was discarded. Retry to open a fresh connection.",
+                        ),
                         &state.sound_config,
                     );
-                    if pending.restore_if_rejected {
-                        let connection = pending.connection;
-                        suspended_connections.push(SuspendedClientConnection {
-                            member_id: connection.member_id,
-                            server_id: connection.server_id,
-                            session_id: connection.session_id,
-                            stream: connection.stream,
-                            connection_id: connection.connection_id,
-                            remote: connection.remote,
-                            mouse_capture_active: connection.mouse_capture_active,
-                            window_title: connection.window_title,
-                            prefix_input_source_active: connection.prefix_input_source_active,
-                            is_remote_client: connection.is_remote_client,
-                        });
-                    }
                     if !pending.retain_current {
                         pending_federation_activation = begin_suspended_fallback(
                             &mut suspended_connections,
@@ -4851,6 +4918,31 @@ mod tests {
             "hostile",
             "server-x1",
             "session-x1",
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn connection_reset_preserves_only_the_home_directory_authority() {
+        assert!(preserve_suspended_connection_on_reset("x1", "x1"));
+        assert!(!preserve_suspended_connection_on_reset(
+            "tana.stl.dev",
+            "x1"
+        ));
+        assert!(!preserve_suspended_connection_on_reset(
+            "stl-agents-1",
+            "x1"
+        ));
+        assert!(can_cancel_pending_connection_on_reset(
+            true,
+            "tana.stl.dev",
+            "x1"
+        ));
+        assert!(!can_cancel_pending_connection_on_reset(true, "x1", "x1"));
+        assert!(!can_cancel_pending_connection_on_reset(
+            false,
+            "tana.stl.dev",
+            "x1"
         ));
     }
 }

@@ -80,6 +80,7 @@ pub(crate) enum GlobalMenuAction {
     Keybinds,
     EmacsOnboarding,
     ReloadConfig,
+    ResetFederationConnections,
     Settings,
 }
 
@@ -89,6 +90,9 @@ pub(super) fn global_menu_actions(state: &AppState) -> Vec<GlobalMenuAction> {
         actions.push(GlobalMenuAction::EmacsOnboarding);
     }
     actions.push(GlobalMenuAction::ReloadConfig);
+    if state.federation_states().next().is_some() {
+        actions.push(GlobalMenuAction::ResetFederationConnections);
+    }
     if state.update_available.is_some() || state.latest_release_notes_available {
         actions.push(GlobalMenuAction::WhatsNew);
     }
@@ -161,6 +165,10 @@ pub(super) fn apply_global_menu_action(state: &mut AppState, action: GlobalMenuA
         GlobalMenuAction::EmacsOnboarding => open_emacs_onboarding(state),
         GlobalMenuAction::ReloadConfig => {
             state.request_reload_config = true;
+            leave_modal(state);
+        }
+        GlobalMenuAction::ResetFederationConnections => {
+            state.request_federation_connection_reset = true;
             leave_modal(state);
         }
         GlobalMenuAction::Settings => super::settings::open_settings(state),
@@ -1435,6 +1443,17 @@ mod tests {
 
         assert!(state.should_quit);
         assert!(!state.detach_requested);
+    }
+
+    #[test]
+    fn reset_federation_connections_menu_action_requests_client_reset() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::GlobalMenu;
+
+        apply_global_menu_action(&mut state, GlobalMenuAction::ResetFederationConnections);
+
+        assert!(state.request_federation_connection_reset);
+        assert_ne!(state.mode, Mode::GlobalMenu);
     }
 
     #[test]
