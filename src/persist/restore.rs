@@ -38,7 +38,6 @@ struct RestoreRuntimeContext<'a> {
     scrollback_limit_bytes: usize,
     shell_config: crate::pane::PaneShellConfig<'a>,
     resume_agents_on_restore: bool,
-    claude_ax_screen_reader: bool,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<AtomicBool>,
@@ -62,23 +61,8 @@ type RestoredTab = (
 );
 type RestoreFailures<T> = (T, usize);
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct RestoreOptions {
-    resume_agents_on_restore: bool,
-    claude_ax_screen_reader: bool,
-}
-
-impl RestoreOptions {
-    pub(crate) fn new(resume_agents_on_restore: bool, claude_ax_screen_reader: bool) -> Self {
-        Self {
-            resume_agents_on_restore,
-            claude_ax_screen_reader,
-        }
-    }
-}
-
 /// Restore workspaces from a snapshot. Each pane gets a fresh shell in its saved cwd.
-pub(crate) fn restore(
+pub fn restore(
     snapshot: &SessionSnapshot,
     history: Option<&SessionHistorySnapshot>,
     rows: u16,
@@ -86,7 +70,7 @@ pub(crate) fn restore(
     scrollback_limit_bytes: usize,
     default_shell: &str,
     shell_mode: crate::config::ShellModeConfig,
-    options: RestoreOptions,
+    resume_agents_on_restore: bool,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<AtomicBool>,
@@ -99,7 +83,7 @@ pub(crate) fn restore(
         cols,
         scrollback_limit_bytes,
         crate::pane::PaneShellConfig::new(default_shell, shell_mode),
-        options,
+        resume_agents_on_restore,
         &mut imported_panes,
         events,
         render_notify,
@@ -113,7 +97,6 @@ pub fn restore_handoff(
     scrollback_limit_bytes: usize,
     default_shell: &str,
     shell_mode: crate::config::ShellModeConfig,
-    claude_ax_screen_reader: bool,
     imports: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
@@ -126,7 +109,7 @@ pub fn restore_handoff(
         80,
         scrollback_limit_bytes,
         crate::pane::PaneShellConfig::new(default_shell, shell_mode),
-        RestoreOptions::new(true, claude_ax_screen_reader),
+        true,
         imports,
         events,
         render_notify,
@@ -209,7 +192,7 @@ fn restore_with_imports_strict(
     cols: u16,
     scrollback_limit_bytes: usize,
     shell_config: crate::pane::PaneShellConfig<'_>,
-    options: RestoreOptions,
+    resume_agents_on_restore: bool,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
@@ -222,7 +205,7 @@ fn restore_with_imports_strict(
         cols,
         scrollback_limit_bytes,
         shell_config,
-        options,
+        resume_agents_on_restore,
         imported_panes,
         events,
         render_notify,
@@ -249,7 +232,7 @@ fn restore_with_imports(
     cols: u16,
     scrollback_limit_bytes: usize,
     shell_config: crate::pane::PaneShellConfig<'_>,
-    options: RestoreOptions,
+    resume_agents_on_restore: bool,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
@@ -262,7 +245,7 @@ fn restore_with_imports(
         cols,
         scrollback_limit_bytes,
         shell_config,
-        options,
+        resume_agents_on_restore,
         imported_panes,
         events,
         render_notify,
@@ -278,7 +261,7 @@ fn restore_with_imports_and_failures(
     cols: u16,
     scrollback_limit_bytes: usize,
     shell_config: crate::pane::PaneShellConfig<'_>,
-    options: RestoreOptions,
+    resume_agents_on_restore: bool,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
@@ -293,8 +276,7 @@ fn restore_with_imports_and_failures(
         let runtime_context = RestoreRuntimeContext {
             scrollback_limit_bytes,
             shell_config,
-            resume_agents_on_restore: options.resume_agents_on_restore,
-            claude_ax_screen_reader: options.claude_ax_screen_reader,
+            resume_agents_on_restore,
             events: events.clone(),
             render_notify: render_notify.clone(),
             render_dirty: render_dirty.clone(),
@@ -432,7 +414,6 @@ fn restore_workspace(
             cached_git_space: crate::workspace::git_space_metadata(&snap.identity_cwd),
             worktree_space,
             terminal_launcher_argv: snap.terminal_launcher_argv.clone(),
-            claude_ax_screen_reader: runtime_context.claude_ax_screen_reader,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             metadata_token_sequences: HashMap::new(),
             public_pane_numbers,
@@ -530,13 +511,11 @@ fn restore_tab(
             .map(String::as_str);
         let launch_env = public_pane_id
             .map(|pane_id| {
-                PaneLaunchEnv::from_extra(Vec::new())
-                    .with_claude_ax_screen_reader(runtime_context.claude_ax_screen_reader)
-                    .with_identity(
-                        workspace_id.to_string(),
-                        crate::workspace::public_tab_id_for_number(workspace_id, number),
-                        pane_id.to_string(),
-                    )
+                PaneLaunchEnv::from_extra(Vec::new()).with_identity(
+                    workspace_id.to_string(),
+                    crate::workspace::public_tab_id_for_number(workspace_id, number),
+                    pane_id.to_string(),
+                )
             })
             .unwrap_or_default();
         let imported_runtime = old_pane_id.and_then(|old_id| imported_panes.remove(&old_id));
@@ -1260,7 +1239,7 @@ mod tests {
             0,
             test_restore_shell(),
             crate::config::ShellModeConfig::NonLogin,
-            RestoreOptions::new(false, false),
+            false,
             events,
             Arc::new(Notify::new()),
             Arc::new(AtomicBool::new(false)),
@@ -1352,7 +1331,7 @@ mod tests {
             0,
             test_restore_shell(),
             crate::config::ShellModeConfig::NonLogin,
-            RestoreOptions::new(false, false),
+            false,
             events,
             Arc::new(Notify::new()),
             Arc::new(AtomicBool::new(false)),
@@ -1460,7 +1439,7 @@ mod tests {
             0,
             test_restore_shell(),
             crate::config::ShellModeConfig::NonLogin,
-            RestoreOptions::new(false, false),
+            false,
             events,
             Arc::new(Notify::new()),
             Arc::new(AtomicBool::new(false)),
@@ -1574,7 +1553,7 @@ mod tests {
             0,
             test_restore_shell(),
             crate::config::ShellModeConfig::NonLogin,
-            RestoreOptions::new(true, false),
+            true,
             events,
             Arc::new(Notify::new()),
             Arc::new(AtomicBool::new(false)),
@@ -1602,7 +1581,6 @@ mod tests {
             0,
             test_restore_shell(),
             crate::config::ShellModeConfig::NonLogin,
-            false,
             &mut imports,
             mpsc::channel(4).0,
             Arc::new(Notify::new()),
@@ -1638,7 +1616,7 @@ mod tests {
             4096,
             test_restore_shell(),
             crate::config::ShellModeConfig::NonLogin,
-            RestoreOptions::new(false, false),
+            false,
             events,
             render_notify,
             render_dirty,
@@ -1677,7 +1655,7 @@ mod tests {
             4096,
             test_restore_shell(),
             crate::config::ShellModeConfig::NonLogin,
-            RestoreOptions::new(false, false),
+            false,
             events,
             render_notify,
             render_dirty,

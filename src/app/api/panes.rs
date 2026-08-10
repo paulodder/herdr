@@ -978,7 +978,7 @@ impl App {
                     .map(|terminal| terminal.cwd.clone())
                     .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
                 let moved_pane_id = moved.pane_id;
-                let mut workspace = crate::workspace::Workspace::from_existing_pane(
+                let workspace = crate::workspace::Workspace::from_existing_pane(
                     label,
                     tab_label,
                     identity_cwd,
@@ -987,7 +987,6 @@ impl App {
                     self.render_notify.clone(),
                     self.render_dirty.clone(),
                 );
-                workspace.set_claude_ax_screen_reader(self.state.emacs.claude_ax_screen_reader);
                 self.state.workspaces.push(workspace);
                 let target_ws_idx = self.state.workspaces.len() - 1;
                 created_workspace = true;
@@ -1119,7 +1118,6 @@ impl App {
             );
             workspace.id = context.previous_workspace_id;
             workspace.worktree_space = context.previous_worktree_space;
-            workspace.set_claude_ax_screen_reader(self.state.emacs.claude_ax_screen_reader);
             let insert_idx = context.source_ws_idx.min(self.state.workspaces.len());
             if let Some(active) = self.state.active {
                 if active >= insert_idx {

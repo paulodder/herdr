@@ -430,9 +430,6 @@ pane_history = false
 # management and a read-only TEXT mode over pane scrollback.
 # When disabled, this build behaves exactly like stock herdr.
 # enabled = false
-# Force Claude Code's screen-reader rendering in newly created pane shells.
-# This keeps Claude output available to Herdr's TEXT-mode scrollback.
-# claude_ax_screen_reader = false
 # Sync the kill-ring head with the system clipboard.
 # clipboard_sync = true
 # kill_ring_max = 60

@@ -196,8 +196,7 @@ impl App {
         extra_env: Vec<(String, String)>,
     ) -> std::io::Result<usize> {
         let (rows, cols) = self.state.estimate_pane_size();
-        let extra_env = self.configured_pane_extra_env(extra_env);
-        let (mut ws, terminal, runtime) = Workspace::new_with_extra_env(
+        let (ws, terminal, runtime) = Workspace::new_with_extra_env(
             initial_cwd,
             rows,
             cols,
@@ -209,7 +208,6 @@ impl App {
             self.render_dirty.clone(),
             extra_env,
         )?;
-        ws.set_claude_ax_screen_reader(self.state.emacs.claude_ax_screen_reader);
         self.terminal_runtimes.insert(terminal.id.clone(), runtime);
         self.state.terminals.insert(terminal.id.clone(), terminal);
         self.state.workspaces.push(ws);

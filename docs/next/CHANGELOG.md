@@ -3,7 +3,6 @@
 ## Unreleased
 
 ### Added
-- Added `emacs.claude_ax_screen_reader`, which exports `CLAUDE_AX_SCREEN_READER=1` to new pane shells so Claude Code transcripts remain available to Emacs TEXT-mode scrollback.
 - Added personal Herdr federation: stable server/session identities, atomic cursor-based `session.watch`, reconnecting SSH endpoint streams, a combined local/remote navigator, native remote attachment, and `herdr federation list|watch|attach` diagnostics.
 - Added an in-app **reset connections** action and `M-x reset-federation-connections` command that close inactive federation transports without restarting the client or persistent servers.
 - Added Emacs `open-at-point` on `ctrl+alt+o`. URLs open in EWW and existing files, directories, and `path:line:column` references open in a temporary terminal `emacsclient` frame backed by the user's persistent Emacs server.

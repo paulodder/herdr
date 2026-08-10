@@ -52,18 +52,6 @@ pub use self::{
 const RELEASE_REACQUIRE_SUPPRESSION: std::time::Duration = std::time::Duration::from_secs(1);
 const PANE_TERM: &str = "xterm-256color";
 const PANE_COLORTERM: &str = "truecolor";
-pub(crate) const CLAUDE_AX_SCREEN_READER_ENV_VAR: &str = "CLAUDE_AX_SCREEN_READER";
-
-pub(crate) fn configure_claude_ax_screen_reader_env(
-    mut extra: Vec<(String, String)>,
-    enabled: bool,
-) -> Vec<(String, String)> {
-    if enabled {
-        extra.retain(|(key, _)| key != CLAUDE_AX_SCREEN_READER_ENV_VAR);
-        extra.push((CLAUDE_AX_SCREEN_READER_ENV_VAR.to_string(), "1".to_string()));
-    }
-    extra
-}
 
 fn apply_pane_terminal_env(cmd: &mut CommandBuilder) {
     // Each pane is rendered by herdr's own terminal layer, not the outer terminal
@@ -106,11 +94,6 @@ impl PaneLaunchEnv {
             tab_id,
             pane_id,
         });
-        self
-    }
-
-    pub(crate) fn with_claude_ax_screen_reader(mut self, enabled: bool) -> Self {
-        self.extra = configure_claude_ax_screen_reader_env(self.extra, enabled);
         self
     }
 }
@@ -2795,40 +2778,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn claude_ax_screen_reader_launch_env_forces_enabled_value() {
-        let launch_env = PaneLaunchEnv::from_extra(vec![
-            (CLAUDE_AX_SCREEN_READER_ENV_VAR.to_string(), "0".to_string()),
-            ("PRESERVED".to_string(), "yes".to_string()),
-        ])
-        .with_claude_ax_screen_reader(true);
-
-        assert_eq!(
-            launch_env.extra,
-            vec![
-                ("PRESERVED".to_string(), "yes".to_string()),
-                (CLAUDE_AX_SCREEN_READER_ENV_VAR.to_string(), "1".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn claude_ax_screen_reader_launch_env_is_unchanged_when_disabled() {
-        let launch_env = PaneLaunchEnv::from_extra(vec![(
-            CLAUDE_AX_SCREEN_READER_ENV_VAR.to_string(),
-            "custom".to_string(),
-        )])
-        .with_claude_ax_screen_reader(false);
-
-        assert_eq!(
-            launch_env.extra,
-            vec![(
-                CLAUDE_AX_SCREEN_READER_ENV_VAR.to_string(),
-                "custom".to_string()
-            )]
-        );
-    }
-
-    #[test]
     fn shutdown_liveness_treats_reaped_direct_child_as_gone() {
         assert!(!process_alive_for_shutdown(42, 42, true, |_| true));
     }
@@ -2850,17 +2799,6 @@ mod tests {
 
     #[cfg(unix)]
     fn capture_shell_output(command: &str, extra_env: &[(&str, &str)]) -> String {
-        let launch_env = PaneLaunchEnv::from_extra(
-            extra_env
-                .iter()
-                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
-                .collect(),
-        );
-        capture_shell_output_with_launch_env(command, &launch_env)
-    }
-
-    #[cfg(unix)]
-    fn capture_shell_output_with_launch_env(command: &str, launch_env: &PaneLaunchEnv) -> String {
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: 24,
@@ -2884,7 +2822,9 @@ mod tests {
         cmd.env("TERM", "xterm-ghostty");
         cmd.env("COLORTERM", "falsecolor");
         apply_pane_terminal_env(&mut cmd);
-        apply_pane_launch_env(&mut cmd, launch_env);
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
 
         let mut child = pair.slave.spawn_command(cmd).unwrap();
         let status = child.wait().unwrap();
@@ -2893,18 +2833,6 @@ mod tests {
         let output = std::fs::read_to_string(&output_path).unwrap();
         let _ = std::fs::remove_file(output_path);
         output
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn claude_ax_screen_reader_reaches_spawned_shell() {
-        let launch_env = PaneLaunchEnv::default().with_claude_ax_screen_reader(true);
-        let output = capture_shell_output_with_launch_env(
-            "printf '%s' \"$CLAUDE_AX_SCREEN_READER\"",
-            &launch_env,
-        );
-
-        assert_eq!(output, "1");
     }
 
     #[test]

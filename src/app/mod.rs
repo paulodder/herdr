@@ -428,10 +428,7 @@ impl App {
                 config.advanced.scrollback_limit_bytes,
                 &config.terminal.default_shell,
                 config.terminal.shell_mode,
-                crate::persist::RestoreOptions::new(
-                    config.session.resume_agents_on_restore,
-                    config.emacs.enabled && config.emacs.claude_ax_screen_reader,
-                ),
+                config.session.resume_agents_on_restore,
                 event_tx.clone(),
                 render_notify.clone(),
                 render_dirty.clone(),
@@ -834,7 +831,6 @@ impl App {
             config.advanced.scrollback_limit_bytes,
             &config.terminal.default_shell,
             config.terminal.shell_mode,
-            config.emacs.enabled && config.emacs.claude_ax_screen_reader,
             imports,
             app.event_tx.clone(),
             app.render_notify.clone(),
@@ -1416,10 +1412,6 @@ impl App {
         // Emacs layer seam (fork).
         if !invalid_section("emacs") {
             diagnostics.extend(self.state.emacs.apply_config(&config.emacs));
-            let claude_ax_screen_reader = self.state.emacs.claude_ax_screen_reader;
-            for workspace in &mut self.state.workspaces {
-                workspace.set_claude_ax_screen_reader(claude_ax_screen_reader);
-            }
         }
 
         if !invalid_section("ui") {
@@ -3039,26 +3031,6 @@ mod tests {
             app.state.config_diagnostic.is_some(),
             "a bad binding surfaces in the UI, not just the log"
         );
-    }
-
-    #[test]
-    fn emacs_claude_ax_screen_reader_reload_updates_future_workspace_launches() {
-        let mut app = test_app();
-        app.state.workspaces.push(Workspace::test_new("test"));
-        let config = crate::config::Config {
-            emacs: crate::config::EmacsConfig {
-                enabled: true,
-                claude_ax_screen_reader: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let report = app.apply_live_config(&config, &[], &[], false);
-
-        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
-        assert!(app.state.emacs.claude_ax_screen_reader);
-        assert!(app.state.workspaces[0].claude_ax_screen_reader);
     }
 
     #[test]

@@ -322,22 +322,19 @@ impl App {
         extra_env: Vec<(String, String)>,
         focus: bool,
     ) -> Result<(usize, usize, crate::layout::PaneId), AgentStartError> {
-        let extra_env = self.configured_pane_extra_env(extra_env);
-        let (mut ws, terminal, runtime) =
-            crate::workspace::Workspace::new_argv_command_with_extra_env(
-                cwd,
-                rows,
-                cols,
-                argv,
-                self.state.pane_scrollback_limit_bytes,
-                self.state.host_terminal_theme,
-                self.event_tx.clone(),
-                self.render_notify.clone(),
-                self.render_dirty.clone(),
-                extra_env,
-            )
-            .map_err(|err| AgentStartError::SpawnFailed(err.to_string()))?;
-        ws.set_claude_ax_screen_reader(self.state.emacs.claude_ax_screen_reader);
+        let (ws, terminal, runtime) = crate::workspace::Workspace::new_argv_command_with_extra_env(
+            cwd,
+            rows,
+            cols,
+            argv,
+            self.state.pane_scrollback_limit_bytes,
+            self.state.host_terminal_theme,
+            self.event_tx.clone(),
+            self.render_notify.clone(),
+            self.render_dirty.clone(),
+            extra_env,
+        )
+        .map_err(|err| AgentStartError::SpawnFailed(err.to_string()))?;
         self.terminal_runtimes.insert(terminal.id.clone(), runtime);
         self.state.terminals.insert(terminal.id.clone(), terminal);
         self.state.workspaces.push(ws);
