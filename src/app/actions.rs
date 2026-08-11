@@ -470,10 +470,19 @@ impl AppState {
                 rows.extend(child_rows);
             }
         }
+
+        let mut rows_by_member = std::collections::BTreeMap::new();
+        rows_by_member.insert(self.federation_member_id.clone(), rows);
         for endpoint in self.federation_states() {
-            rows.extend(self.federation_navigator_rows(endpoint, query_kind, &query));
+            if endpoint.endpoint.id == self.federation_member_id {
+                continue;
+            }
+            rows_by_member.insert(
+                endpoint.endpoint.id.clone(),
+                self.federation_navigator_rows(endpoint, query_kind, &query),
+            );
         }
-        rows
+        rows_by_member.into_values().flatten().collect()
     }
 
     fn federation_navigator_rows(
@@ -3665,6 +3674,101 @@ mod tests {
                 error: None,
             },
         );
+    }
+
+    fn federated_workspace_endpoint(
+        member_id: &str,
+        workspace_id: &str,
+        label: &str,
+    ) -> crate::federation::EndpointState {
+        crate::federation::EndpointState {
+            endpoint: crate::config::FederationEndpointConfig {
+                id: member_id.into(),
+                target: member_id.into(),
+                label: None,
+                session: "default".into(),
+                enabled: true,
+            },
+            status: crate::federation::EndpointConnectionStatus::Connected,
+            snapshot: Some(crate::api::schema::SessionSnapshot {
+                identity: crate::api::schema::RuntimeIdentity {
+                    server_id: format!("server-{member_id}"),
+                    session_id: format!("session-{member_id}"),
+                    session_name: "default".into(),
+                    member_id: member_id.into(),
+                    member_target: member_id.into(),
+                    member_label: None,
+                },
+                version: "0.7.3".into(),
+                protocol: crate::protocol::PROTOCOL_VERSION,
+                event_cursor: 1,
+                focused_workspace_id: Some(workspace_id.into()),
+                focused_tab_id: None,
+                focused_pane_id: None,
+                workspaces: vec![crate::api::schema::WorkspaceInfo {
+                    workspace_id: workspace_id.into(),
+                    number: 1,
+                    label: label.into(),
+                    focused: true,
+                    pane_count: 0,
+                    tab_count: 0,
+                    active_tab_id: String::new(),
+                    agent_status: crate::api::schema::AgentStatus::Unknown,
+                    terminal_launcher_argv: None,
+                    tokens: Default::default(),
+                    worktree: None,
+                    branch: None,
+                    git_ahead_behind: None,
+                }],
+                tabs: Vec::new(),
+                panes: Vec::new(),
+                layouts: Vec::new(),
+                agents: Vec::new(),
+            }),
+            cursor: Some(1),
+            error: None,
+        }
+    }
+
+    fn navigator_workspace_order(state: &AppState) -> Vec<(String, String)> {
+        state
+            .navigator_rows()
+            .into_iter()
+            .filter_map(|row| match &row.target {
+                NavigatorTarget::Workspace { ws_idx } => Some((
+                    state.federation_member_id.clone(),
+                    state.workspaces[*ws_idx].base_display_name(),
+                )),
+                NavigatorTarget::RemoteWorkspace { endpoint_id, .. } => {
+                    Some((endpoint_id.clone(), row.label))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn navigator_workspace_order_is_stable_across_federation_boundaries() {
+        let mut on_a = app_with_workspaces(&["a-workspace"]);
+        on_a.federation_member_id = "a".into();
+        on_a.federation_client_overlay.insert(
+            "b".into(),
+            federated_workspace_endpoint("b", "b-workspace-id", "b-workspace"),
+        );
+
+        let mut on_b = app_with_workspaces(&["b-workspace"]);
+        on_b.federation_member_id = "b".into();
+        on_b.federation_client_overlay.insert(
+            "a".into(),
+            federated_workspace_endpoint("a", "a-workspace-id", "a-workspace"),
+        );
+
+        let expected = vec![
+            ("a".into(), "a-workspace".into()),
+            ("b".into(), "b-workspace".into()),
+        ];
+        assert_eq!(navigator_workspace_order(&on_a), expected);
+        assert_eq!(navigator_workspace_order(&on_b), expected);
     }
 
     #[test]
