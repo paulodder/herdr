@@ -408,10 +408,25 @@ fn clear_output(output_rx: &mpsc::Receiver<String>, output: &mut String) {
     while output_rx.recv_timeout(Duration::from_millis(20)).is_ok() {}
 }
 
-fn navigate_to(client: &mut SpawnedClient, query: &str) {
+fn navigate_to(
+    client: &mut SpawnedClient,
+    output_rx: &mpsc::Receiver<String>,
+    output: &mut String,
+    query: &str,
+) {
     client.writer.write_all(&[0x18]).expect("send C-x");
     client.writer.flush().expect("flush C-x");
-    thread::sleep(Duration::from_millis(40));
+    // Synchronize on the visible prefix state instead of sleeping: retained
+    // members can still be flushing their first TerminalAnsi diff, especially
+    // when the federation integration tests run in parallel.
+    wait_for_output(
+        client,
+        output_rx,
+        output,
+        "C-x-",
+        Duration::from_secs(3),
+        &[],
+    );
     client
         .writer
         .write_all(b"b/")
@@ -746,7 +761,7 @@ enabled = true
     );
     fs::write(&fail_bridge, b"fail the first activation").expect("arm bridge failure");
     clear_output(&output_rx, &mut output);
-    navigate_to(&mut client, REMOTE_WORKSPACE);
+    navigate_to(&mut client, &output_rx, &mut output, REMOTE_WORKSPACE);
     wait_for_bridge_launches(&ssh_log, 1, Duration::from_secs(15));
     write_pane_marker(&home_api, &home_pane, HOME_AFTER_FAILED_SWITCH);
     wait_for_output(
@@ -766,7 +781,7 @@ enabled = true
     fs::remove_file(&fail_bridge).expect("disarm bridge failure");
 
     clear_output(&output_rx, &mut output);
-    navigate_to(&mut client, REMOTE_WORKSPACE);
+    navigate_to(&mut client, &output_rx, &mut output, REMOTE_WORKSPACE);
     wait_for_output(
         &mut client,
         &output_rx,
@@ -807,7 +822,7 @@ enabled = true
     );
 
     clear_output(&output_rx, &mut output);
-    navigate_to(&mut client, "home-test");
+    navigate_to(&mut client, &output_rx, &mut output, "home-test");
     wait_for_output(
         &mut client,
         &output_rx,
@@ -819,7 +834,7 @@ enabled = true
     assert_eq!(client.child.process_id(), Some(client_pid));
 
     clear_output(&output_rx, &mut output);
-    navigate_to(&mut client, REMOTE_WORKSPACE);
+    navigate_to(&mut client, &output_rx, &mut output, REMOTE_WORKSPACE);
     wait_for_output(
         &mut client,
         &output_rx,
@@ -1057,7 +1072,7 @@ enabled = true
     // A -> B -> C -> B -> A all happens inside this one TUI process. Returning
     // to B must resume the suspended connection rather than launching SSH twice.
     clear_output(&output_rx, &mut output);
-    navigate_to(&mut client, "workspace-b");
+    navigate_to(&mut client, &output_rx, &mut output, "workspace-b");
     wait_for_output(
         &mut client,
         &output_rx,
@@ -1070,7 +1085,7 @@ enabled = true
     assert_eq!(bridge_launch_count_for_target(&ssh_log, "fake-host-b"), 1);
 
     clear_output(&output_rx, &mut output);
-    navigate_to(&mut client, "workspace-c");
+    navigate_to(&mut client, &output_rx, &mut output, "workspace-c");
     wait_for_output(
         &mut client,
         &output_rx,
@@ -1083,7 +1098,7 @@ enabled = true
     assert_eq!(bridge_launch_count_for_target(&ssh_log, "fake-host-c"), 1);
 
     clear_output(&output_rx, &mut output);
-    navigate_to(&mut client, "workspace-b");
+    navigate_to(&mut client, &output_rx, &mut output, "workspace-b");
     wait_for_output(
         &mut client,
         &output_rx,
@@ -1095,7 +1110,7 @@ enabled = true
     assert_eq!(bridge_launch_count_for_target(&ssh_log, "fake-host-b"), 1);
 
     clear_output(&output_rx, &mut output);
-    navigate_to(&mut client, "workspace-a");
+    navigate_to(&mut client, &output_rx, &mut output, "workspace-a");
     wait_for_output(
         &mut client,
         &output_rx,
@@ -1109,7 +1124,7 @@ enabled = true
     // Resume B, then revoke C at the pinned home authority while B remains the
     // active server. The replacement directory must flow A -> client -> B.
     clear_output(&output_rx, &mut output);
-    navigate_to(&mut client, "workspace-b");
+    navigate_to(&mut client, &output_rx, &mut output, "workspace-b");
     wait_for_output(
         &mut client,
         &output_rx,
@@ -1171,7 +1186,7 @@ enabled = true
     let member_c_launches_before_revoked_selection =
         bridge_launch_count_for_target(&ssh_log, "fake-host-c");
     clear_output(&output_rx, &mut output);
-    navigate_to(&mut client, "workspace-c");
+    navigate_to(&mut client, &output_rx, &mut output, "workspace-c");
     thread::sleep(Duration::from_millis(700));
     client
         .writer
