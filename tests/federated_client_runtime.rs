@@ -401,7 +401,11 @@ fn diagnostic_log_tails(logs: &[(&str, &Path)]) -> String {
 
 fn clear_output(output_rx: &mpsc::Receiver<String>, output: &mut String) {
     output.clear();
-    while output_rx.try_recv().is_ok() {}
+    // The PTY reader can still be transferring the tail of a rendered frame
+    // when the assertion that found its marker returns. Drain until the
+    // stream is briefly quiet so a marker from the previous member cannot
+    // satisfy the next federation-switch assertion.
+    while output_rx.recv_timeout(Duration::from_millis(20)).is_ok() {}
 }
 
 fn navigate_to(client: &mut SpawnedClient, query: &str) {
@@ -770,6 +774,18 @@ enabled = true
         REMOTE_MARKER,
         Duration::from_secs(20),
         &diagnostic_logs,
+    );
+    assert!(
+        fs::read_to_string(&remote_server_log)
+            .unwrap_or_default()
+            .contains("render_encoding=TerminalAnsi"),
+        "the SSH-backed member should stream server-side terminal diffs"
+    );
+    assert!(
+        fs::read_to_string(&home_server_log)
+            .unwrap_or_default()
+            .contains("render_encoding=SemanticFrame"),
+        "the local member should keep semantic rendering"
     );
     assert!(
         terminal_text_payload(&output).contains(REMOTE_CONNECTING),

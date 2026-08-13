@@ -700,6 +700,22 @@ fn requested_render_encoding() -> RenderEncoding {
 }
 
 #[cfg(unix)]
+fn render_encoding_for_connection(
+    is_remote: bool,
+    local_encoding: RenderEncoding,
+) -> RenderEncoding {
+    // Semantic frames preserve the full cell grid for client-owned local UI,
+    // but sending that grid over SSH makes even a one-cell terminal update
+    // unnecessarily large. Federation UI is owned by the remote server, so
+    // have it diff frames before they cross the network.
+    if is_remote {
+        RenderEncoding::TerminalAnsi
+    } else {
+        local_encoding
+    }
+}
+
+#[cfg(unix)]
 fn is_remote_client_process() -> bool {
     std::env::var(crate::remote::REMOTE_KEYBINDINGS_ENV_VAR).is_ok()
 }
@@ -1089,9 +1105,11 @@ fn resume_suspended_connection(
         is_remote_client,
     } = suspended;
     if reconnect {
+        let reconnect_encoding =
+            render_encoding_for_connection(is_remote_client, requested_encoding);
         let (stream, encoding) = reconnect_suspended_connection(
             remote.as_ref(),
-            requested_encoding,
+            reconnect_encoding,
             direct_attach_requested,
             kitty_graphics_enabled,
         )?;
@@ -2587,7 +2605,7 @@ async fn run_client_loop(
                                 if let Some(remote) = active_remote_connection.as_ref() {
                                     reconnect_remote_after_live_handoff(
                                         remote,
-                                        requested_encoding,
+                                        render_encoding_for_connection(true, requested_encoding),
                                         attach_request.is_some(),
                                         state.kitty_graphics_enabled,
                                     )
@@ -2976,7 +2994,7 @@ async fn run_client_loop(
                                     let stream = remote.connect()?;
                                     let (stream, encoding) = handshake_current_terminal(
                                         stream,
-                                        requested_encoding,
+                                        render_encoding_for_connection(true, requested_encoding),
                                         false,
                                         state.kitty_graphics_enabled,
                                         true,
@@ -4772,6 +4790,23 @@ mod tests {
             "STL workbench"
         )
         .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_connections_use_diffs_without_changing_local_encoding() {
+        assert_eq!(
+            render_encoding_for_connection(true, RenderEncoding::SemanticFrame),
+            RenderEncoding::TerminalAnsi
+        );
+        assert_eq!(
+            render_encoding_for_connection(false, RenderEncoding::SemanticFrame),
+            RenderEncoding::SemanticFrame
+        );
+        assert_eq!(
+            render_encoding_for_connection(false, RenderEncoding::TerminalAnsi),
+            RenderEncoding::TerminalAnsi
+        );
     }
 
     #[cfg(unix)]
