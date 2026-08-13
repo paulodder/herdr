@@ -70,6 +70,10 @@ pub const MAX_GRAPHICS_FRAME_SIZE: usize = 32 * 1024 * 1024;
 /// Maximum clipboard image payload size for remote paste bridging.
 pub const MAX_CLIPBOARD_IMAGE_PAYLOAD: usize = 16 * 1024 * 1024;
 
+/// Maximum image payload the owning server may send to the foreground client
+/// after an explicit preview gesture.
+pub const MAX_IMAGE_PREVIEW_PAYLOAD: usize = 16 * 1024 * 1024;
+
 /// Length of the u32 little-endian length prefix in bytes.
 const LENGTH_PREFIX_BYTES: usize = 4;
 
@@ -773,6 +777,15 @@ pub enum ServerMessage {
     /// Ask the TUI connection manager to close inactive federation transports.
     /// The active member remains attached; selecting another member reconnects it.
     ResetFederationConnections,
+
+    /// Open an image from the active member on the foreground client's host.
+    /// PNG payloads can be shown inline when Kitty graphics are enabled; other
+    /// supported formats use the host's image viewer.
+    ImagePreview {
+        name: String,
+        extension: String,
+        data: Vec<u8>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1504,6 +1517,19 @@ mod tests {
     fn server_graphics_roundtrip() {
         let msg = ServerMessage::Graphics {
             bytes: b"\x1b_Ga=d,d=A,q=2;\x1b\\".to_vec(),
+        };
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ServerMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn server_image_preview_roundtrip() {
+        let msg = ServerMessage::ImagePreview {
+            name: "generated map.png".to_owned(),
+            extension: "png".to_owned(),
+            data: b"\x89PNG\r\n\x1a\npreview".to_vec(),
         };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ServerMessage, _) =

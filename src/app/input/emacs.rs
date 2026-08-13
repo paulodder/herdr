@@ -662,6 +662,15 @@ impl App {
     }
 
     fn emacs_open_target(&mut self, target: OpenTarget, cwd: std::path::PathBuf) {
+        if let OpenTarget::Path { path, .. } = &target {
+            if open_target::is_previewable_image_path(path) {
+                if self.request_image_preview(path.clone()) {
+                    self.emacs_leave_outer_interaction();
+                }
+                return;
+            }
+        }
+
         let argv = open_target::emacsclient_argv(&target);
         let new_pane =
             match self.spawn_overlay_argv_command(&argv, Some(cwd), Vec::new(), Vec::new()) {

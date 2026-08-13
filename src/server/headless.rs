@@ -1879,6 +1879,29 @@ impl HeadlessServer {
     /// Returns true if the event changed visual state (requiring a re-render).
     fn handle_internal_event_with_forwarding(&mut self, ev: AppEvent) -> bool {
         match &ev {
+            AppEvent::ImagePreviewRequested { path } => {
+                match crate::server::image_preview::load(path) {
+                    Ok(preview) => {
+                        let name = preview.name.clone();
+                        if self.send_to_foreground_client(ServerMessage::ImagePreview {
+                            name: preview.name,
+                            extension: preview.extension,
+                            data: preview.data,
+                        }) {
+                            info!(path = %path.display(), %name, "sent image preview to foreground client");
+                        }
+                    }
+                    Err(err) => {
+                        warn!(path = %path.display(), %err, "image preview request failed");
+                        self.send_notify_to_foreground_client(
+                            protocol::NotifyKind::Toast,
+                            "Could not preview image".to_owned(),
+                            Some(err.to_string()),
+                        );
+                    }
+                }
+                false
+            }
             AppEvent::ClipboardWrite { content } => {
                 // Clipboard writes are client-local side effects. Forward them only to
                 // the foreground client instead of broadcasting to every attached client.
@@ -2237,7 +2260,12 @@ impl HeadlessServer {
 
     /// Encodes a server message into a length-prefixed frame.
     fn frame_server_message(msg: &ServerMessage) -> Result<Vec<u8>, protocol::FramingError> {
-        Self::frame_server_message_with_max(msg, MAX_FRAME_SIZE)
+        let max_frame_size = if matches!(msg, ServerMessage::ImagePreview { .. }) {
+            MAX_GRAPHICS_FRAME_SIZE
+        } else {
+            MAX_FRAME_SIZE
+        };
+        Self::frame_server_message_with_max(msg, max_frame_size)
     }
 
     /// Encodes a server message using an explicit payload cap.
@@ -8417,6 +8445,58 @@ next_tab = ""
                 .is_err(),
             "background client should not receive clipboard writes"
         );
+    }
+
+    #[test]
+    fn image_preview_reads_on_server_and_targets_foreground_client() {
+        let mut server = test_headless_server();
+        let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+        server.clients.insert(
+            7,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                7,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(7);
+        let path = std::env::temp_dir().join(format!(
+            "herdr-headless-preview-{}-{}.png",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\npreview").expect("write image");
+
+        assert!(
+            !server.handle_internal_event_with_forwarding(AppEvent::ImagePreviewRequested {
+                path: path.clone()
+            })
+        );
+        match read_server_message(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("image preview message"),
+        ) {
+            ServerMessage::ImagePreview {
+                name,
+                extension,
+                data,
+            } => {
+                assert_eq!(name, path.file_name().unwrap().to_string_lossy());
+                assert_eq!(extension, "png");
+                assert_eq!(data, b"\x89PNG\r\n\x1a\npreview");
+            }
+            other => panic!("expected ImagePreview, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
