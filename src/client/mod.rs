@@ -12,6 +12,7 @@
 //! - Forwards OSC 52 clipboard writes from server to its own stdout
 //! - Displays sound/toast notifications forwarded from server
 
+mod image_preview;
 mod input;
 
 use std::collections::HashSet;
@@ -99,6 +100,9 @@ struct ClientState {
     /// First-connect progress owned by this client, not either server runtime.
     #[cfg(unix)]
     federation_connecting: Option<FederationConnectingUi>,
+    /// Client-local image quick look shown over the active member's frame.
+    #[cfg(unix)]
+    inline_image_preview: Option<InlineImagePreviewUi>,
     #[cfg(unix)]
     palette: crate::app::state::Palette,
 }
@@ -108,6 +112,13 @@ struct ClientState {
 struct FederationConnectingUi {
     member_label: String,
     tick: u64,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InlineImagePreviewUi {
+    label: String,
+    layout: image_preview::InlinePreviewLayout,
 }
 
 #[cfg(unix)]
@@ -983,17 +994,16 @@ fn spawn_server_reader(
     stream: &LocalStream,
     event_tx: &tokio::sync::mpsc::Sender<ClientLoopEvent>,
     should_quit: &Arc<AtomicBool>,
-    kitty_graphics_enabled: bool,
+    _kitty_graphics_enabled: bool,
     connection_id: u64,
 ) -> Result<(), ClientError> {
     let read_stream = stream.try_clone().map_err(ClientError::ConnectionFailed)?;
     let server_read_tx = event_tx.clone();
     let server_read_quit = should_quit.clone();
-    let max_frame_size = if kitty_graphics_enabled {
-        MAX_GRAPHICS_FRAME_SIZE
-    } else {
-        MAX_FRAME_SIZE
-    };
+    // Explicit image previews are bounded independently but may be larger than
+    // ordinary render frames even when inline Kitty rendering is disabled and
+    // the client will hand the image to its native viewer.
+    let max_frame_size = MAX_GRAPHICS_FRAME_SIZE;
     std::thread::spawn(move || {
         server_reader_thread(
             read_stream,
@@ -1738,6 +1748,91 @@ fn federation_connecting_frame(
 }
 
 #[cfg(unix)]
+fn inline_image_preview_frame(
+    base: &crate::protocol::FrameData,
+    preview: &InlineImagePreviewUi,
+    palette: &crate::app::state::Palette,
+) -> crate::protocol::FrameData {
+    use ratatui::style::Modifier;
+
+    let mut frame = base.clone();
+    let layout = preview.layout;
+    if layout.x.saturating_add(layout.width) > frame.width
+        || layout.y.saturating_add(layout.height) > frame.height
+        || layout.width < 3
+        || layout.height < 3
+    {
+        return frame;
+    }
+    frame.cursor = frame.cursor.map(|mut cursor| {
+        cursor.visible = false;
+        cursor
+    });
+    let bg = crate::protocol::color_to_u32(palette.panel_bg);
+    let border_fg = crate::protocol::color_to_u32(palette.accent);
+    let text_fg = crate::protocol::color_to_u32(palette.text);
+    let bold = crate::protocol::modifier_to_u16(Modifier::BOLD);
+    let mut put = |column: u16, row: u16, symbol: &str, fg: u32, modifier: u16| {
+        let index = usize::from(row)
+            .saturating_mul(usize::from(frame.width))
+            .saturating_add(usize::from(column));
+        if let Some(cell) = frame.cells.get_mut(index) {
+            cell.symbol = symbol.to_owned();
+            cell.fg = fg;
+            cell.bg = bg;
+            cell.modifier = modifier;
+            cell.skip = false;
+            cell.hyperlink = None;
+        }
+    };
+
+    for row in layout.y..layout.y + layout.height {
+        for column in layout.x..layout.x + layout.width {
+            put(column, row, " ", text_fg, 0);
+        }
+    }
+    let right = layout.x + layout.width - 1;
+    let bottom = layout.y + layout.height - 1;
+    put(layout.x, layout.y, "╭", border_fg, 0);
+    put(right, layout.y, "╮", border_fg, 0);
+    put(layout.x, bottom, "╰", border_fg, 0);
+    put(right, bottom, "╯", border_fg, 0);
+    for column in layout.x + 1..right {
+        put(column, layout.y, "─", border_fg, 0);
+        put(column, bottom, "─", border_fg, 0);
+    }
+    for row in layout.y + 1..bottom {
+        put(layout.x, row, "│", border_fg, 0);
+        put(right, row, "│", border_fg, 0);
+    }
+
+    let title = format!(" {} ", preview.label);
+    let hint = " Esc/q close ";
+    for (row, text) in [(layout.y, title.as_str()), (bottom, hint)] {
+        let max_width = layout.width.saturating_sub(4);
+        let mut column = layout.x + 2;
+        let mut used = 0_u16;
+        for ch in text.chars() {
+            let width = UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+            if width == 0 || used.saturating_add(width) > max_width {
+                break;
+            }
+            let mut encoded = [0_u8; 4];
+            put(
+                column,
+                row,
+                ch.encode_utf8(&mut encoded),
+                if row == layout.y { text_fg } else { border_fg },
+                if row == layout.y { bold } else { 0 },
+            );
+            column = column.saturating_add(width);
+            used = used.saturating_add(width);
+        }
+    }
+    frame
+}
+
+#[cfg(unix)]
 fn display_semantic_frame(
     state: &mut ClientState,
     frame: crate::protocol::FrameData,
@@ -1751,6 +1846,12 @@ fn display_semantic_frame(
         .as_ref()
         .map_or(frame.clone(), |connecting| {
             federation_connecting_frame(&frame, connecting, &state.palette)
+        });
+    let frame = state
+        .inline_image_preview
+        .as_ref()
+        .map_or(frame.clone(), |preview| {
+            inline_image_preview_frame(&frame, preview, &state.palette)
         });
     let encoded = if state.draw_host_cursor {
         state
@@ -1768,6 +1869,36 @@ fn display_semantic_frame(
     let _ = write_encoded_frame_with_graphics(&mut stdout, &encoded.bytes, graphics);
     let _ = stdout.flush();
     state.blit_encoder.commit(frame, encoded);
+}
+
+#[cfg(unix)]
+fn dismiss_inline_image_preview(state: &mut ClientState, restore_frame: bool) -> bool {
+    if state.inline_image_preview.take().is_none() {
+        return false;
+    }
+    let bytes = image_preview::clear_inline_preview_bytes();
+    let mut stdout = io::stdout();
+    let _ = stdout.write_all(&bytes);
+    let _ = stdout.flush();
+    if restore_frame {
+        if let Some(frame) = state.last_semantic_frame.clone() {
+            display_semantic_frame(state, frame, false);
+        }
+    }
+    true
+}
+
+#[cfg(unix)]
+fn preview_dismisses_without_forwarding(data: &[u8]) -> bool {
+    let events = crate::raw_input::parse_raw_input_bytes_sync(data);
+    matches!(
+        events.as_slice(),
+        [crate::raw_input::RawInputEvent::Key(key)]
+            if key.kind == crossterm::event::KeyEventKind::Press
+                && (key.code == crossterm::event::KeyCode::Esc
+                    || (key.code == crossterm::event::KeyCode::Char('q')
+                        && key.modifiers.is_empty()))
+    )
 }
 
 #[cfg(unix)]
@@ -1992,6 +2123,8 @@ async fn run_client_loop(
         #[cfg(unix)]
         federation_connecting: None,
         #[cfg(unix)]
+        inline_image_preview: None,
+        #[cfg(unix)]
         palette: config.palette,
     };
     debug!(?negotiated_encoding, "client render encoding active");
@@ -2125,6 +2258,11 @@ async fn run_client_loop(
         match event {
             #[cfg(unix)]
             ClientLoopEvent::StdinInput(data) => {
+                let dismiss_only = state.inline_image_preview.is_some()
+                    && preview_dismisses_without_forwarding(&data);
+                if dismiss_inline_image_preview(&mut state, true) && dismiss_only {
+                    continue;
+                }
                 let data = if let Some(attach_escape) = &mut state.attach_escape {
                     match attach_escape.filter_input(
                         data,
@@ -2245,6 +2383,8 @@ async fn run_client_loop(
                 }
             }
             ClientLoopEvent::Resize(new_cols, new_rows, cell_width_px, cell_height_px) => {
+                #[cfg(unix)]
+                dismiss_inline_image_preview(&mut state, true);
                 state.reported_size = (new_cols, new_rows);
                 let msg = ClientMessage::Resize {
                     cols: new_cols,
@@ -2364,6 +2504,7 @@ async fn run_client_loop(
                             session_id,
                         );
                         if *accepted && identity_matches {
+                            dismiss_inline_image_preview(&mut state, true);
                             if pending.retain_current {
                                 if let Err(err) = write_to_server(
                                     &mut write_stream,
@@ -2597,7 +2738,76 @@ async fn run_client_loop(
                             let _ = stdout.flush();
                         }
                     }
+                    ServerMessage::ImagePreview {
+                        name,
+                        extension,
+                        data,
+                    } => {
+                        #[cfg(unix)]
+                        dismiss_inline_image_preview(&mut state, true);
+                        #[cfg(unix)]
+                        let inline = if state.kitty_graphics_enabled
+                            && extension.eq_ignore_ascii_case("png")
+                        {
+                            let (cols, rows, cell_width_px, cell_height_px) =
+                                current_terminal_geometry(true);
+                            image_preview::inline_layout(
+                                &data,
+                                cols,
+                                rows,
+                                cell_width_px,
+                                cell_height_px,
+                            )
+                        } else {
+                            None
+                        };
+                        #[cfg(unix)]
+                        if let Some(layout) = inline {
+                            state.inline_image_preview = Some(InlineImagePreviewUi {
+                                label: format!("{name} @ {active_member_id}"),
+                                layout,
+                            });
+                            if let Some(frame) = state.last_semantic_frame.clone() {
+                                display_semantic_frame(&mut state, frame, false);
+                            }
+                            let bytes = image_preview::encode_inline_png(&data, layout);
+                            record_received_kitty_graphics(&bytes);
+                            let mut stdout = io::stdout();
+                            let _ = stdout.write_all(&bytes);
+                            let _ = stdout.flush();
+                            info!(%name, bytes = data.len(), "showing inline image preview");
+                            continue;
+                        }
+
+                        match image_preview::stage_for_local_viewer(&name, &extension, &data) {
+                            Ok(path) => {
+                                if let Err(err) = crate::platform::open_url(&path.to_string_lossy())
+                                {
+                                    warn!(%err, path = %path.display(), "failed to open image preview in local viewer");
+                                    handle_notify(
+                                        NotifyKind::Toast,
+                                        "Could not open image preview",
+                                        Some(&err.to_string()),
+                                        &state.sound_config,
+                                    );
+                                } else {
+                                    info!(%name, path = %path.display(), "opened image preview in local viewer");
+                                }
+                            }
+                            Err(err) => {
+                                warn!(%err, %name, "failed to stage image preview locally");
+                                handle_notify(
+                                    NotifyKind::Toast,
+                                    "Could not stage image preview",
+                                    Some(&err.to_string()),
+                                    &state.sound_config,
+                                );
+                            }
+                        }
+                    }
                     ServerMessage::ServerShutdown { reason } => {
+                        #[cfg(unix)]
+                        dismiss_inline_image_preview(&mut state, true);
                         if reason.as_deref() == Some(crate::protocol::LIVE_HANDOFF_RECONNECT_REASON)
                         {
                             #[cfg(unix)]
@@ -4857,6 +5067,74 @@ mod tests {
             .map(|cell| cell.symbol.as_str())
             .collect::<String>();
         assert!(rendered.contains("Connecting to STL workbench\u{2026}"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inline_image_overlay_is_client_owned_and_preserves_the_source_frame() {
+        let base_cell = crate::protocol::CellData {
+            symbol: "s".into(),
+            fg: crate::protocol::color_to_u32(ratatui::style::Color::Green),
+            bg: crate::protocol::color_to_u32(ratatui::style::Color::Black),
+            modifier: 0,
+            skip: false,
+            hyperlink: None,
+        };
+        let base = crate::protocol::FrameData {
+            cells: vec![base_cell; 40 * 20],
+            width: 40,
+            height: 20,
+            cursor: Some(crate::protocol::CursorState {
+                x: 2,
+                y: 3,
+                visible: true,
+                shape: 2,
+            }),
+            hyperlinks: Vec::new(),
+            graphics: b"server-owned-graphics".to_vec(),
+        };
+        let preview = InlineImagePreviewUi {
+            label: "result.png @ remote".to_owned(),
+            layout: image_preview::InlinePreviewLayout {
+                x: 5,
+                y: 4,
+                width: 30,
+                height: 12,
+                image_x: 6,
+                image_y: 5,
+                image_cols: 28,
+                image_rows: 10,
+            },
+        };
+
+        let overlay =
+            inline_image_preview_frame(&base, &preview, &crate::app::state::Palette::catppuccin());
+
+        assert_eq!(base.cells[0].symbol, "s");
+        assert_eq!(overlay.cells[0], base.cells[0]);
+        assert_eq!(overlay.graphics, base.graphics);
+        assert_eq!(
+            overlay.cursor.as_ref().map(|cursor| cursor.visible),
+            Some(false)
+        );
+        let rendered = overlay
+            .cells
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect::<String>();
+        assert!(rendered.contains("result.png @ remote"));
+        assert!(rendered.contains("Esc/q close"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn image_preview_close_keys_are_consumed_but_other_input_is_forwarded() {
+        assert!(preview_dismisses_without_forwarding(b"\x1b"));
+        assert!(preview_dismisses_without_forwarding(b"q"));
+        assert!(preview_dismisses_without_forwarding(b"\x1b[113;1u"));
+        assert!(!preview_dismisses_without_forwarding(b"Q"));
+        assert!(!preview_dismisses_without_forwarding(b"x"));
+        assert!(!preview_dismisses_without_forwarding(b"hello"));
     }
 
     #[cfg(unix)]

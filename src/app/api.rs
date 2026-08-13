@@ -58,6 +58,16 @@ impl App {
     }
 
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) {
+        if let AppEvent::ImagePreviewRequested { path } = ev {
+            #[cfg(not(test))]
+            if let Err(err) = crate::platform::open_url(&path.to_string_lossy()) {
+                tracing::warn!(%err, path = %path.display(), "failed to open local image preview");
+            }
+            #[cfg(test)]
+            let _ = path;
+            return;
+        }
+
         if let AppEvent::ClipboardWrite { content } = ev {
             #[cfg(not(test))]
             crate::selection::write_osc52_bytes(&content);

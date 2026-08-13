@@ -24,14 +24,14 @@ enum WheelRouting {
 const WORKSPACE_DRAG_THRESHOLD: u16 = 1;
 const TAB_DRAG_THRESHOLD: u16 = 1;
 
-fn modified_url_click_modifier() -> KeyModifiers {
+fn modified_open_click_modifier() -> KeyModifiers {
     KeyModifiers::CONTROL
 }
 
 #[cfg(test)]
 #[test]
-fn modified_url_click_modifier_matches_terminal_mouse_reporting() {
-    assert_eq!(modified_url_click_modifier(), KeyModifiers::CONTROL);
+fn modified_open_click_modifier_matches_terminal_mouse_reporting() {
+    assert_eq!(modified_open_click_modifier(), KeyModifiers::CONTROL);
 }
 
 mod copy_mode;
@@ -312,7 +312,7 @@ impl App {
             }
         }
 
-        if self.handle_modified_url_click(mouse) {
+        if self.handle_modified_open_click(mouse) {
             return;
         }
 
@@ -422,10 +422,10 @@ impl App {
         }
     }
 
-    fn handle_modified_url_click(&mut self, mouse: MouseEvent) -> bool {
+    fn handle_modified_open_click(&mut self, mouse: MouseEvent) -> bool {
         if self.state.mode != Mode::Terminal
             || !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            || !mouse.modifiers.contains(modified_url_click_modifier())
+            || !mouse.modifiers.contains(modified_open_click_modifier())
         {
             return false;
         }
@@ -435,25 +435,78 @@ impl App {
         };
         let viewport_row = mouse.row.saturating_sub(info.inner_rect.y);
         let col = mouse.column.saturating_sub(info.inner_rect.x);
-        let Some(url) =
+        if let Some(url) =
             self.state
                 .url_at_pane_cell(&self.terminal_runtimes, info.id, viewport_row, col)
-        else {
+        {
+            self.last_pane_click = None;
+            match self.invoke_plugin_link_handler_for_url(&url, info.id) {
+                Ok(true) => return true,
+                Ok(false) => {}
+                Err(err) => {
+                    tracing::warn!(err = %err, url = %url, "failed to invoke plugin link handler");
+                }
+            }
+            if let Err(err) = crate::platform::open_url(&url) {
+                tracing::warn!(err = %err, url = %url, "failed to open pane URL");
+            }
+            return true;
+        }
+
+        let Some(path) = self.image_path_at_pane_cell(info.id, viewport_row, col) else {
             return false;
         };
-
         self.last_pane_click = None;
-        match self.invoke_plugin_link_handler_for_url(&url, info.id) {
-            Ok(true) => return true,
-            Ok(false) => {}
+        self.request_image_preview(path)
+    }
+
+    fn image_path_at_pane_cell(
+        &self,
+        pane_id: crate::layout::PaneId,
+        viewport_row: u16,
+        col: u16,
+    ) -> Option<std::path::PathBuf> {
+        let ws_idx = self.state.active?;
+        let cwd = self
+            .follow_cwd_for_pane_in_workspace(ws_idx, pane_id)
+            .or_else(|| std::env::current_dir().ok())?;
+        let metrics = self
+            .state
+            .pane_scroll_metrics(&self.terminal_runtimes, pane_id);
+        let runtime =
+            self.state
+                .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)?;
+        let logical = runtime.logical_text_at_point(crate::pane::TerminalTextPoint {
+            row: crate::selection::Selection::absolute_row_for_viewport(viewport_row, metrics),
+            col,
+        })?;
+        let home = crate::integration::home_dir().ok();
+        match crate::emacs::open_target::resolve_at_point(
+            &logical.text,
+            logical.point_byte,
+            &cwd,
+            home.as_deref(),
+        )? {
+            crate::emacs::open_target::OpenTarget::Path { path, .. }
+                if crate::emacs::open_target::is_previewable_image_path(&path) =>
+            {
+                Some(path)
+            }
+            _ => None,
+        }
+    }
+
+    fn request_image_preview(&self, path: std::path::PathBuf) -> bool {
+        match self
+            .event_tx
+            .try_send(crate::events::AppEvent::ImagePreviewRequested { path })
+        {
+            Ok(()) => true,
             Err(err) => {
-                tracing::warn!(err = %err, url = %url, "failed to invoke plugin link handler");
+                tracing::warn!(%err, "failed to queue image preview request");
+                false
             }
         }
-        if let Err(err) = crate::platform::open_url(&url) {
-            tracing::warn!(err = %err, url = %url, "failed to open pane URL");
-        }
-        true
     }
 
     fn handle_pane_double_click(&mut self, mouse: MouseEvent) -> bool {

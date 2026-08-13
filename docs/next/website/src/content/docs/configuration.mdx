@@ -406,7 +406,9 @@ Kitty graphics rendering for attached local clients is experimental and disabled
 kitty_graphics = true
 ```
 
-Enable it only when testing terminal image behavior.
+With this enabled, Ctrl-clicking an existing PNG path shows the image inline over the active pane. Press `Esc` or `q` to close the preview; other input closes it and continues to the pane. The same gesture works across a federation: the member that owns the file validates it and sends it only to the foreground client, so the client never needs that member's filesystem mounted.
+
+JPEG, GIF, WebP, and BMP previews open in the client's native image viewer. PNG uses the same viewer when Kitty graphics are disabled or the terminal is too small for an inline preview. Preview transfers are limited to 16 MiB, and native-viewer copies are stored in a private, short-lived local cache.
 
 ## Agent session restore
 

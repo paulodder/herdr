@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Added Ctrl-click image previews for local and federated pane paths. PNG files can open in a dismissible Kitty-graphics overlay on the foreground client, while JPEG, GIF, WebP, BMP, and non-Kitty PNG previews use the client's native image viewer.
 - Added personal Herdr federation: stable server/session identities, atomic cursor-based `session.watch`, reconnecting SSH endpoint streams, a combined local/remote navigator, native remote attachment, and `herdr federation list|watch|attach` diagnostics.
 - Added an in-app **reset connections** action and `M-x reset-federation-connections` command that close inactive federation transports without restarting the client or persistent servers.
 - Added Emacs `open-at-point` on `ctrl+alt+o`. URLs open in EWW and existing files, directories, and `path:line:column` references open in a temporary terminal `emacsclient` frame backed by the user's persistent Emacs server.

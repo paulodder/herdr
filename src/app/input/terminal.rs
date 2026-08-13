@@ -590,6 +590,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ctrl_click_existing_image_path_requests_client_preview() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-click-preview-{}-{}.png",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\npreview").expect("write image");
+        let line = format!("generated {}", path.display());
+        let path_col = line.find(path.to_string_lossy().as_ref()).expect("path") as u16;
+        let (mut app, info) = app_with_screen_bytes(line.as_bytes());
+
+        app.handle_mouse(modified_mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            info.inner_rect.x + path_col + 2,
+            info.inner_rect.y,
+            KeyModifiers::CONTROL,
+        ));
+
+        match app.event_rx.try_recv().expect("preview request") {
+            AppEvent::ImagePreviewRequested { path: requested } => assert_eq!(requested, path),
+            event => panic!("unexpected event: {event:?}"),
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
     async fn pane_cell_url_resolver_finds_visible_url() {
         let line = "see https://example.com/pr/307.";
         let (app, info) = app_with_screen_bytes(line.as_bytes());

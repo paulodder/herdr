@@ -15,6 +15,16 @@ pub enum OpenTarget {
     },
 }
 
+pub(crate) fn is_previewable_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ["png", "jpg", "jpeg", "gif", "webp", "bmp"]
+                .iter()
+                .any(|known| extension.eq_ignore_ascii_case(known))
+        })
+}
+
 pub fn resolve_selection(selection: &str, cwd: &Path, home: Option<&Path>) -> Option<OpenTarget> {
     let selection = selection.trim();
     if selection.is_empty() || selection.chars().any(char::is_control) {
@@ -293,6 +303,14 @@ fn elisp_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn previewable_image_paths_are_extension_allowlisted_case_insensitively() {
+        assert!(is_previewable_image_path(Path::new("result.PNG")));
+        assert!(is_previewable_image_path(Path::new("photo.jpeg")));
+        assert!(!is_previewable_image_path(Path::new("result.svg")));
+        assert!(!is_previewable_image_path(Path::new("image.png.sh")));
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
