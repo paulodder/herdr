@@ -1623,6 +1623,7 @@ mod tests {
         std::fs::write(&path, b"\x89PNG\r\n\x1a\npreview").expect("write image");
         let (mut app, _pane_id, _rx) =
             emacs_app_with_channel_at_size(path.to_string_lossy().as_bytes(), 160, 10);
+        app.state.workspaces.push(Workspace::test_new("other"));
         app.state.ensure_test_terminals();
 
         app.route_client_input(b"\x1b[111;7u".to_vec()); // C-M-o
@@ -1633,6 +1634,9 @@ mod tests {
             }
             event => panic!("unexpected event: {event:?}"),
         }
+        app.route_client_input(b"\x1b[111;7:3u".to_vec()); // C-M-o release
+        assert_eq!(app.state.active, Some(0));
+        assert!(app.event_rx.try_recv().is_err());
         let _ = std::fs::remove_file(path);
     }
 

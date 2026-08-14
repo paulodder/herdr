@@ -1902,6 +1902,24 @@ fn preview_dismisses_without_forwarding(data: &[u8]) -> bool {
 }
 
 #[cfg(unix)]
+fn preview_input_dismisses(data: &[u8]) -> bool {
+    crate::raw_input::parse_raw_input_bytes_sync(data)
+        .into_iter()
+        .any(|event| match event {
+            crate::raw_input::RawInputEvent::Key(key) => {
+                key.kind == crossterm::event::KeyEventKind::Press
+            }
+            crate::raw_input::RawInputEvent::Paste(_)
+            | crate::raw_input::RawInputEvent::Mouse(_) => true,
+            crate::raw_input::RawInputEvent::OuterFocusGained
+            | crate::raw_input::RawInputEvent::OuterFocusLost
+            | crate::raw_input::RawInputEvent::HostDefaultColor { .. }
+            | crate::raw_input::RawInputEvent::HostColorSchemeChanged(_)
+            | crate::raw_input::RawInputEvent::Unsupported => false,
+        })
+}
+
+#[cfg(unix)]
 fn redraw_connecting_ui(state: &mut ClientState) {
     let Some(frame) = state.last_semantic_frame.clone() else {
         return;
@@ -2260,7 +2278,11 @@ async fn run_client_loop(
             ClientLoopEvent::StdinInput(data) => {
                 let dismiss_only = state.inline_image_preview.is_some()
                     && preview_dismisses_without_forwarding(&data);
-                if dismiss_inline_image_preview(&mut state, true) && dismiss_only {
+                if state.inline_image_preview.is_some()
+                    && preview_input_dismisses(&data)
+                    && dismiss_inline_image_preview(&mut state, true)
+                    && dismiss_only
+                {
                     continue;
                 }
                 let data = if let Some(attach_escape) = &mut state.attach_escape {
@@ -5135,6 +5157,16 @@ mod tests {
         assert!(!preview_dismisses_without_forwarding(b"Q"));
         assert!(!preview_dismisses_without_forwarding(b"x"));
         assert!(!preview_dismisses_without_forwarding(b"hello"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn image_preview_ignores_trailing_open_chord_events() {
+        assert!(!preview_input_dismisses(b"\x1b[111;7:2u")); // C-M-o repeat
+        assert!(!preview_input_dismisses(b"\x1b[111;7:3u")); // C-M-o release
+        assert!(preview_input_dismisses(b"x"));
+        assert!(preview_input_dismisses(b"\x1b"));
+        assert!(preview_input_dismisses(b"\x1b[200~pasted\x1b[201~"));
     }
 
     #[cfg(unix)]
