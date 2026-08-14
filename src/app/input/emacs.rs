@@ -1610,6 +1610,32 @@ mod tests {
         out
     }
 
+    #[tokio::test]
+    async fn control_meta_o_opens_image_at_point_with_client_preview() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-meta-o-preview-{}-{}.png",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\npreview").expect("write image");
+        let (mut app, _pane_id, _rx) =
+            emacs_app_with_channel_at_size(path.to_string_lossy().as_bytes(), 160, 10);
+        app.state.ensure_test_terminals();
+
+        app.route_client_input(b"\x1b[111;7u".to_vec()); // C-M-o
+
+        match app.event_rx.try_recv().expect("preview request") {
+            crate::events::AppEvent::ImagePreviewRequested { path: requested } => {
+                assert_eq!(requested, path)
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
     /// Three tabs (no PTYs), the middle one focused.
     fn emacs_app_with_three_tabs() -> (App, tokio::sync::mpsc::Receiver<bytes::Bytes>) {
         let (mut app, _pane, rx) = emacs_app_with_channel(b"");

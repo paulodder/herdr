@@ -6,7 +6,7 @@
 - Added Ctrl-click image previews for local and federated pane paths. PNG files can open in a dismissible Kitty-graphics overlay on the foreground client, while JPEG, GIF, WebP, BMP, and non-Kitty PNG previews use the client's native image viewer.
 - Added personal Herdr federation: stable server/session identities, atomic cursor-based `session.watch`, reconnecting SSH endpoint streams, a combined local/remote navigator, native remote attachment, and `herdr federation list|watch|attach` diagnostics.
 - Added an in-app **reset connections** action and `M-x reset-federation-connections` command that close inactive federation transports without restarting the client or persistent servers.
-- Added Emacs `open-at-point` on `ctrl+alt+o`. URLs open in EWW and existing files, directories, and `path:line:column` references open in a temporary terminal `emacsclient` frame backed by the user's persistent Emacs server.
+- Added Emacs `open-at-point` on `ctrl+alt+o`. Image paths use the local or federated client preview, URLs open in EWW, and other existing files, directories, and `path:line:column` references open in a temporary terminal `emacsclient` frame backed by the user's persistent Emacs server.
 - Added a replayable Emacs onboarding tour, available from the sidebar menu or with `M-x herdr-onboarding`, covering Herdr's hierarchy, primary navigation chords, and parallel mouse controls.
 - Emacs TEXT mode now supports `ctrl+l` recentering with the standard middle, top, and bottom cycle around point.
 - Emacs TEXT mode now supports incremental smart-case scrollback search with `ctrl+s` and `ctrl+r`, live match highlighting, repeat/wrap navigation, query history, and accept/abort behavior.
