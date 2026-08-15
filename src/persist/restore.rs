@@ -299,6 +299,7 @@ fn restore_with_imports_and_failures(
             workspaces.push(workspace);
         }
     }
+    recover_legacy_managed_worktree_projects(&mut workspaces, snapshot);
     crate::workspace::reserve_workspace_ids(&workspaces);
     ((workspaces, terminals, terminal_runtimes), failed_imports)
 }
@@ -402,6 +403,18 @@ fn restore_workspace(
         return (None, failed_imports);
     }
 
+    let cached_git_space = crate::workspace::git_space_metadata(&snap.identity_cwd);
+    let project_identity = cached_git_space
+        .as_ref()
+        .map(crate::workspace::WorkspaceProjectIdentity::from)
+        .or_else(|| snap.project_identity.clone())
+        .or_else(|| {
+            snap.worktree_space
+                .as_ref()
+                .and_then(|space| crate::workspace::git_space_metadata(&space.repo_root))
+                .as_ref()
+                .map(crate::workspace::WorkspaceProjectIdentity::from)
+        });
     let worktree_space = restored_worktree_space_membership(snap.worktree_space.clone());
 
     (
@@ -411,7 +424,8 @@ fn restore_workspace(
             identity_cwd: snap.identity_cwd.clone(),
             cached_git_branch: crate::workspace::git_branch(&snap.identity_cwd),
             cached_git_ahead_behind: None,
-            cached_git_space: crate::workspace::git_space_metadata(&snap.identity_cwd),
+            cached_git_space,
+            project_identity,
             worktree_space,
             terminal_launcher_argv: snap.terminal_launcher_argv.clone(),
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
@@ -427,6 +441,60 @@ fn restore_workspace(
         .map(|workspace| (workspace, terminals, terminal_runtimes)),
         failed_imports,
     )
+}
+
+fn recover_legacy_managed_worktree_projects(
+    workspaces: &mut [Workspace],
+    snapshot: &SessionSnapshot,
+) {
+    let mut known =
+        HashMap::<String, HashMap<String, crate::workspace::WorkspaceProjectIdentity>>::new();
+    for workspace in workspaces.iter() {
+        if let Some(project) = workspace.project_identity() {
+            known
+                .entry(project.label.clone())
+                .or_default()
+                .entry(project.key.clone())
+                .or_insert_with(|| project.clone());
+        }
+    }
+
+    for workspace in workspaces
+        .iter_mut()
+        .filter(|ws| ws.project_identity.is_none())
+    {
+        let Some(saved) = snapshot
+            .workspaces
+            .iter()
+            .find(|saved| saved.id.as_deref() == Some(workspace.id.as_str()))
+        else {
+            continue;
+        };
+        let labels = saved
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.panes.values())
+            .filter_map(|pane| managed_worktree_project_label(&pane.cwd))
+            .collect::<HashSet<_>>();
+        let candidates = labels
+            .iter()
+            .filter_map(|label| known.get(label))
+            .flat_map(|projects| projects.values())
+            .collect::<Vec<_>>();
+        if candidates.len() == 1 {
+            let mut project = candidates[0].clone();
+            project.is_linked_worktree = true;
+            workspace.project_identity = Some(project);
+        }
+    }
+}
+
+fn managed_worktree_project_label(path: &std::path::Path) -> Option<String> {
+    let components = path.components().collect::<Vec<_>>();
+    components.windows(3).find_map(|parts| {
+        (parts[0].as_os_str() == ".herdr" && parts[1].as_os_str() == "worktrees")
+            .then(|| parts[2].as_os_str().to_string_lossy().into_owned())
+    })
 }
 
 fn restored_worktree_space_membership(
@@ -1026,6 +1094,71 @@ mod tests {
     }
 
     #[test]
+    fn legacy_deleted_managed_worktree_inherits_unambiguous_live_project() {
+        let project = crate::workspace::WorkspaceProjectIdentity {
+            key: "github.com/socialtechnologylab/geodeck2".into(),
+            label: "geodeck2".into(),
+            is_linked_worktree: false,
+        };
+        let mut parent = Workspace::test_new("geodeck2");
+        parent.project_identity = Some(project.clone());
+        let child = Workspace::test_new("sportplek-producer-tana");
+        let child_id = child.id.clone();
+        let mut workspaces = vec![parent, child];
+        let snapshot = SessionSnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some(child_id),
+                custom_name: Some("sportplek-producer-tana".into()),
+                identity_cwd: PathBuf::from("/home/paul"),
+                project_identity: None,
+                worktree_space: None,
+                terminal_launcher_argv: None,
+                public_pane_numbers: HashMap::new(),
+                next_public_pane_number: 0,
+                public_tab_numbers: vec![1],
+                next_public_tab_number: 2,
+                tabs: vec![TabSnapshot {
+                    custom_name: Some("legacy".into()),
+                    layout: LayoutSnapshot::Pane(0),
+                    panes: HashMap::from([(
+                        0,
+                        super::super::snapshot::PaneSnapshot {
+                            cwd: PathBuf::from(
+                                "/home/paul/.herdr/worktrees/geodeck2/worktree-old (deleted)",
+                            ),
+                            label: None,
+                            agent_name: None,
+                            agent_session: None,
+                            launch_argv: None,
+                            restore_argv: None,
+                        },
+                    )]),
+                    zoomed: false,
+                    focused: Some(0),
+                    root_pane: Some(0),
+                }],
+                active_tab: 0,
+            }],
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: HashSet::new(),
+        };
+
+        recover_legacy_managed_worktree_projects(&mut workspaces, &snapshot);
+
+        assert_eq!(
+            workspaces[1].project_identity(),
+            Some(&crate::workspace::WorkspaceProjectIdentity {
+                is_linked_worktree: true,
+                ..project
+            })
+        );
+    }
+
+    #[test]
     fn restore_plan_respects_opt_in_and_allowlist() {
         let pi_session_path = test_session_path("pi-session.jsonl");
         let session = super::super::snapshot::PaneAgentSessionSnapshot {
@@ -1192,6 +1325,7 @@ mod tests {
                 id: Some("workspace".into()),
                 custom_name: None,
                 identity_cwd: cwd.clone(),
+                project_identity: None,
                 worktree_space: None,
                 terminal_launcher_argv: None,
                 public_pane_numbers: HashMap::new(),
@@ -1271,6 +1405,7 @@ mod tests {
                 id: Some("w1".into()),
                 custom_name: None,
                 identity_cwd: cwd.clone(),
+                project_identity: None,
                 worktree_space: None,
                 terminal_launcher_argv: None,
                 public_pane_numbers: HashMap::from([(10, 1), (20, 3)]),
@@ -1381,6 +1516,7 @@ mod tests {
                 id: Some("w1".into()),
                 custom_name: None,
                 identity_cwd: cwd.clone(),
+                project_identity: None,
                 worktree_space: None,
                 terminal_launcher_argv: None,
                 public_pane_numbers: HashMap::from([(10, 1), (11, 2), (12, 3), (13, 4)]),
@@ -1466,6 +1602,7 @@ mod tests {
             id: Some("w1".into()),
             custom_name: None,
             identity_cwd: cwd,
+            project_identity: None,
             worktree_space: None,
             terminal_launcher_argv: None,
             public_pane_numbers: HashMap::new(),
@@ -1506,6 +1643,7 @@ mod tests {
                 id: Some("workspace".into()),
                 custom_name: None,
                 identity_cwd: cwd.clone(),
+                project_identity: None,
                 worktree_space: None,
                 terminal_launcher_argv: None,
                 public_pane_numbers: HashMap::new(),
@@ -1713,6 +1851,7 @@ mod tests {
                 id: Some("workspace".into()),
                 custom_name: None,
                 identity_cwd: cwd,
+                project_identity: None,
                 worktree_space: None,
                 terminal_launcher_argv: None,
                 public_pane_numbers: HashMap::new(),

@@ -54,6 +54,8 @@ pub struct WorkspaceSnapshot {
     pub custom_name: Option<String>,
     pub identity_cwd: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_identity: Option<crate::workspace::WorkspaceProjectIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_space: Option<crate::workspace::WorktreeSpaceMembership>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_launcher_argv: Option<Vec<String>>,
@@ -159,6 +161,7 @@ impl From<LegacyWorkspaceSnapshot> for WorkspaceSnapshot {
             id: None,
             custom_name: snap.custom_name,
             identity_cwd,
+            project_identity: None,
             worktree_space: None,
             terminal_launcher_argv: None,
             public_pane_numbers: HashMap::new(),
@@ -293,6 +296,7 @@ fn capture_workspace(
         identity_cwd: ws
             .resolved_identity_cwd_from(terminals, terminal_runtimes)
             .unwrap_or_else(|| ws.identity_cwd.clone()),
+        project_identity: ws.project_identity().cloned(),
         worktree_space: ws.worktree_space.clone(),
         terminal_launcher_argv: ws.terminal_launcher_argv.clone(),
         public_pane_numbers: ws
@@ -640,6 +644,7 @@ mod tests {
                 id: Some("wproj".to_string()),
                 custom_name: Some("pi-mono".to_string()),
                 identity_cwd: PathBuf::from("/home/can/Projects/herdr"),
+                project_identity: None,
                 worktree_space: None,
                 terminal_launcher_argv: None,
                 public_pane_numbers: HashMap::from([(0, 1), (1, 2)]),
@@ -869,6 +874,23 @@ mod tests {
         assert_eq!(
             snapshot.workspaces[0].worktree_space,
             state.workspaces[0].worktree_space
+        );
+    }
+
+    #[test]
+    fn capture_contract_tracks_durable_project_identity() {
+        let mut state = state_with_workspaces(&["sportplek-producer-tana"]);
+        state.workspaces[0].project_identity = Some(crate::workspace::WorkspaceProjectIdentity {
+            key: "github.com/socialtechnologylab/geodeck2".into(),
+            label: "geodeck2".into(),
+            is_linked_worktree: true,
+        });
+
+        let snapshot = capture_from_state(&state);
+
+        assert_eq!(
+            snapshot.workspaces[0].project_identity,
+            state.workspaces[0].project_identity
         );
     }
 
@@ -1227,6 +1249,7 @@ mod tests {
                 id: Some("test-ws".to_string()),
                 custom_name: Some("fallback test".to_string()),
                 identity_cwd: PathBuf::from("/tmp"),
+                project_identity: None,
                 worktree_space: None,
                 terminal_launcher_argv: None,
                 public_pane_numbers: HashMap::new(),

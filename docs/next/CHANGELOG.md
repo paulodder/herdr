@@ -17,6 +17,7 @@
 - The workspace sidebar now recognizes equivalent Git remotes as one project across federation members and clone paths. Main checkouts stay at the project root, while handoffs and linked worktrees are nested beneath it with their owning member shown as the location.
 
 ### Fixed
+- Project grouping now survives server handoffs, pane cwd changes, and removed managed worktrees. Legacy sessions conservatively recover deleted `.herdr/worktrees/<project>` associations when a single matching live project exists.
 - Timed-out federation attachments are now discarded so the next selection opens a fresh SSH transport instead of reusing the stale connection.
 - Native Windows servers now detach from the terminal console that launched them, so closing WezTerm, Windows Terminal, or another host terminal no longer stops persistent pane processes. (#1329)
 - Windows API clients now remain connected while waiting for initial named-pipe request bytes, so `status server`, `api snapshot`, and other socket commands no longer intermittently fail with BrokenPipe. (#1279)

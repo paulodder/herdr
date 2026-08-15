@@ -422,8 +422,9 @@ pub(crate) fn workspace_parent_group_state(
 
 fn local_workspace_group_key(workspace: &crate::workspace::Workspace) -> Option<String> {
     workspace
-        .git_space()
-        .map(|space| space.project_key.clone())
+        .project_identity()
+        .map(|project| project.key.clone())
+        .or_else(|| workspace.git_space().map(|space| space.project_key.clone()))
         .or_else(|| workspace.worktree_space().map(|space| space.key.clone()))
 }
 
@@ -530,8 +531,9 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
                 },
                 project_key: local_workspace_group_key(workspace),
                 linked_worktree: workspace
-                    .git_space()
-                    .map(|space| space.is_linked_worktree)
+                    .project_identity()
+                    .map(|project| project.is_linked_worktree)
+                    .or_else(|| workspace.git_space().map(|space| space.is_linked_worktree))
                     .or_else(|| {
                         workspace
                             .worktree_space()
@@ -1722,8 +1724,9 @@ fn render_workspace_list(
         let display_label = if card.indented {
             grouped_child_display_label(&label, ws.branch().as_deref(), ws.custom_name.is_some())
         } else if card.group_parent {
-            ws.git_space()
-                .map(|space| space.label.clone())
+            ws.project_identity()
+                .map(|project| project.label.clone())
+                .or_else(|| ws.git_space().map(|space| space.label.clone()))
                 .or_else(|| ws.worktree_space().map(|space| space.label.clone()))
                 .unwrap_or(label)
         } else {

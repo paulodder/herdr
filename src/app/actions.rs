@@ -2974,6 +2974,10 @@ impl AppState {
                 changed = true;
             }
             if ws.cached_git_space != result.space {
+                if let Some(space) = result.space.as_ref() {
+                    ws.project_identity =
+                        Some(crate::workspace::WorkspaceProjectIdentity::from(space));
+                }
                 ws.cached_git_space = result.space;
                 changed = true;
             }

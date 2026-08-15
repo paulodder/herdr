@@ -459,17 +459,24 @@ impl App {
             branch: ws.branch(),
             git_ahead_behind: ws.git_ahead_behind(),
             project: ws
-                .git_space()
+                .project_identity()
                 .cloned()
                 .or_else(|| {
-                    ws.worktree_space().and_then(|membership| {
-                        crate::workspace::git_space_metadata(&membership.repo_root)
-                    })
+                    ws.git_space()
+                        .map(crate::workspace::WorkspaceProjectIdentity::from)
                 })
-                .map(|space| crate::api::schema::WorkspaceProjectInfo {
-                    key: space.project_key.clone(),
-                    name: space.label.clone(),
-                    is_linked_worktree: space.is_linked_worktree,
+                .or_else(|| {
+                    ws.worktree_space()
+                        .and_then(|membership| {
+                            crate::workspace::git_space_metadata(&membership.repo_root)
+                        })
+                        .as_ref()
+                        .map(crate::workspace::WorkspaceProjectIdentity::from)
+                })
+                .map(|project| crate::api::schema::WorkspaceProjectInfo {
+                    key: project.key,
+                    name: project.label,
+                    is_linked_worktree: project.is_linked_worktree,
                 }),
             worktree: ws
                 .worktree_space()

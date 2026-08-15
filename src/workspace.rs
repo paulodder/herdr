@@ -38,6 +38,29 @@ pub struct WorktreeSpaceMembership {
     pub is_linked_worktree: bool,
 }
 
+/// Durable project identity for workspace organization.
+///
+/// Unlike the Git status cache, this remains attached when a pane later moves
+/// outside the checkout or a managed worktree is removed. Paths used for
+/// destructive worktree actions remain separately validated through
+/// `WorktreeSpaceMembership`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkspaceProjectIdentity {
+    pub key: String,
+    pub label: String,
+    pub is_linked_worktree: bool,
+}
+
+impl From<&GitSpaceMetadata> for WorkspaceProjectIdentity {
+    fn from(space: &GitSpaceMetadata) -> Self {
+        Self {
+            key: space.project_key.clone(),
+            label: space.label.clone(),
+            is_linked_worktree: space.is_linked_worktree,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceGitStatus {
     pub workspace_id: String,
@@ -155,6 +178,8 @@ pub struct Workspace {
     pub(crate) cached_git_ahead_behind: Option<(usize, usize)>,
     /// Cached derived Git repo metadata for worktree actions and status display.
     pub(crate) cached_git_space: Option<GitSpaceMetadata>,
+    /// Project organization identity retained across cwd changes and handoffs.
+    pub(crate) project_identity: Option<WorkspaceProjectIdentity>,
     /// Explicit Herdr-managed worktree grouping provenance.
     pub worktree_space: Option<WorktreeSpaceMembership>,
     /// Optional argv used instead of the default shell for new tabs and splits.
@@ -213,13 +238,18 @@ impl Workspace {
         let tab = Tab::from_existing_pane(1, tab_label, moved, events, render_notify, render_dirty);
         let mut public_pane_numbers = HashMap::new();
         public_pane_numbers.insert(root_pane, 1);
+        let cached_git_space = git_space_metadata(&identity_cwd);
+        let project_identity = cached_git_space
+            .as_ref()
+            .map(WorkspaceProjectIdentity::from);
         Self {
             id,
             custom_name: label,
             identity_cwd: identity_cwd.clone(),
             cached_git_branch: git_branch(&identity_cwd),
             cached_git_ahead_behind: None,
-            cached_git_space: git_space_metadata(&identity_cwd),
+            cached_git_space,
+            project_identity,
             worktree_space: None,
             terminal_launcher_argv: None,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
@@ -404,6 +434,7 @@ impl Workspace {
                 cached_git_branch: git_branch(&initial_cwd),
                 cached_git_ahead_behind: None,
                 cached_git_space: None,
+                project_identity: None,
                 worktree_space: None,
                 terminal_launcher_argv: None,
                 metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
@@ -1122,6 +1153,10 @@ impl Workspace {
         self.cached_git_space.as_ref()
     }
 
+    pub fn project_identity(&self) -> Option<&WorkspaceProjectIdentity> {
+        self.project_identity.as_ref()
+    }
+
     pub fn worktree_space(&self) -> Option<&WorktreeSpaceMembership> {
         self.worktree_space.as_ref()
     }
@@ -1132,6 +1167,9 @@ impl Workspace {
         self.cached_git_branch = cwd.as_deref().and_then(git_branch);
         self.cached_git_ahead_behind = cwd.as_deref().and_then(git_ahead_behind);
         self.cached_git_space = cwd.as_deref().and_then(git_space_metadata);
+        if let Some(space) = self.cached_git_space.as_ref() {
+            self.project_identity = Some(WorkspaceProjectIdentity::from(space));
+        }
     }
 
     pub fn git_status_snapshot_for_cwd_with_cache(
@@ -1248,6 +1286,7 @@ impl Workspace {
             cached_git_branch: git_branch(&identity_cwd),
             cached_git_ahead_behind: None,
             cached_git_space: None,
+            project_identity: None,
             worktree_space: None,
             terminal_launcher_argv: None,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
