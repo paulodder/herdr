@@ -1618,6 +1618,22 @@ impl AppState {
             .or_else(|| self.federation.get(endpoint_id))
     }
 
+    /// Whether global workspace navigation has moved ahead of the pane that is
+    /// still attached. The sidebar can advance immediately while federation
+    /// connection work catches up in the background.
+    pub(crate) fn global_workspace_cursor_is_ahead(&self) -> bool {
+        let Some(cursor) = self.global_workspace_cursor.as_ref() else {
+            return false;
+        };
+        let Some(active_workspace) = self.active.and_then(|index| self.workspaces.get(index))
+        else {
+            return false;
+        };
+
+        cursor.endpoint_id != self.federation_member_id
+            || cursor.workspace_id != active_workspace.id
+    }
+
     pub(crate) fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
     }

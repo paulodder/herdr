@@ -2181,7 +2181,13 @@ impl HeadlessServer {
                     .state
                     .workspaces
                     .iter()
-                    .map(|workspace| (workspace.branch(), workspace.git_ahead_behind()))
+                    .map(|workspace| {
+                        (
+                            workspace.branch(),
+                            workspace.git_ahead_behind(),
+                            workspace.project_identity().cloned(),
+                        )
+                    })
                     .collect::<Vec<_>>();
                 self.app.handle_internal_event(ev);
                 let changed = self
@@ -2189,7 +2195,13 @@ impl HeadlessServer {
                     .state
                     .workspaces
                     .iter()
-                    .map(|workspace| (workspace.branch(), workspace.git_ahead_behind()))
+                    .map(|workspace| {
+                        (
+                            workspace.branch(),
+                            workspace.git_ahead_behind(),
+                            workspace.project_identity().cloned(),
+                        )
+                    })
                     .ne(before);
                 if changed {
                     self.broadcast_federation_directory();
@@ -4883,7 +4895,7 @@ mod tests {
         server.handle_internal_event_with_forwarding(AppEvent::GitStatusRefreshed {
             results: vec![crate::workspace::WorkspaceGitStatus {
                 workspace_id,
-                resolved_identity_cwd,
+                resolved_identity_cwd: resolved_identity_cwd.clone(),
                 branch: Some("feature/consistent-sidebar".into()),
                 ahead_behind: Some((2, 1)),
                 space: None,
@@ -4905,6 +4917,37 @@ mod tests {
             Some("feature/consistent-sidebar")
         );
         assert_eq!(home_workspace.git_ahead_behind, Some((2, 1)));
+
+        server.handle_internal_event_with_forwarding(AppEvent::GitStatusRefreshed {
+            results: vec![crate::workspace::WorkspaceGitStatus {
+                workspace_id: server.app.state.workspaces[0].id.to_string(),
+                resolved_identity_cwd,
+                branch: Some("feature/consistent-sidebar".into()),
+                ahead_behind: Some((2, 1)),
+                space: Some(crate::workspace::GitSpaceMetadata {
+                    key: "checkout-key".into(),
+                    project_key: "github.com/socialtechnologylab/buurtklimaat".into(),
+                    checkout_key: "checkout-key".into(),
+                    label: "buurtklimaat".into(),
+                    repo_root: "/worktrees/buurtklimaat".into(),
+                    is_linked_worktree: true,
+                }),
+            }],
+            cache_updates: Vec::new(),
+        });
+        let project_update =
+            read_server_message(control_rx.recv().expect("project identity snapshot update"));
+        let ServerMessage::FederationDirectoryUpdate { directory } = project_update else {
+            panic!("expected project directory update, got {project_update:?}");
+        };
+        let project = directory
+            .iter()
+            .find(|state| state.endpoint.id == "x1")
+            .and_then(|state| state.snapshot.as_ref())
+            .and_then(|snapshot| snapshot.workspaces.first())
+            .and_then(|workspace| workspace.project.as_ref())
+            .expect("refreshed project identity");
+        assert_eq!(project.name, "buurtklimaat");
 
         server.app.state.federation.clear();
         server.broadcast_federation_directory();

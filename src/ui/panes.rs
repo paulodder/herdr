@@ -309,11 +309,13 @@ pub(super) fn render_panes(
 
     let multi_pane = ws.layout.pane_count() > 1;
     let terminal_active = app.mode == Mode::Terminal;
+    let workspace_cursor_ahead = app.global_workspace_cursor_is_ahead();
 
     for info in &app.view.pane_infos {
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
             let show_cursor = info.is_focused
                 && terminal_active
+                && !workspace_cursor_ahead
                 && !pane_is_scrolled_back(rt)
                 && !app.emacs.owns_pane_cursor(info.id) // Emacs layer seam (fork)
                 && app.pane_exposes_host_cursor(ws_idx, info.id);
@@ -368,6 +370,16 @@ pub(super) fn render_panes(
     }
 
     render_pane_borders(app, ws, frame);
+
+    if workspace_cursor_ahead {
+        let buffer = frame.buffer_mut();
+        for y in area.y..area.y.saturating_add(area.height) {
+            for x in area.x..area.x.saturating_add(area.width) {
+                let cell = &mut buffer[(x, y)];
+                cell.set_style(cell.style().add_modifier(Modifier::DIM));
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -922,6 +934,54 @@ mod tests {
             Some(" abc… ")
         );
         assert_eq!(pane_border_title("abcdef", 4, false), None);
+    }
+
+    #[tokio::test]
+    async fn pending_global_workspace_softens_the_old_center_pane_until_attached() {
+        let mut app = AppState::test_new();
+        app.mode = Mode::Terminal;
+        app.federation_member_id = "x1".into();
+        let mut workspace = Workspace::test_new("home");
+        let root_pane = workspace.tabs[0].root_pane;
+        workspace.tabs[0].runtimes.insert(
+            root_pane,
+            TerminalRuntime::test_with_scrollback_bytes(12, 3, 1024, b"current pane\n"),
+        );
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+        app.global_workspace_cursor = Some(crate::app::state::FederatedWorkspaceTarget {
+            endpoint_id: "tana.stl.dev".into(),
+            workspace_id: "remote-workspace".into(),
+        });
+        let area = Rect::new(0, 0, 12, 3);
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        app.view.pane_infos = compute_pane_infos(
+            &app,
+            &terminal_runtimes,
+            area,
+            false,
+            crate::kitty_graphics::HostCellSize::default(),
+        );
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(12, 3)).unwrap();
+        terminal
+            .draw(|frame| render_panes(&app, &terminal_runtimes, frame, area))
+            .unwrap();
+        assert!(terminal.backend().buffer()[(0, 0)]
+            .modifier
+            .contains(Modifier::DIM));
+
+        app.global_workspace_cursor = Some(crate::app::state::FederatedWorkspaceTarget {
+            endpoint_id: "x1".into(),
+            workspace_id: app.workspaces[0].id.clone(),
+        });
+        terminal
+            .draw(|frame| render_panes(&app, &terminal_runtimes, frame, area))
+            .unwrap();
+        assert!(!terminal.backend().buffer()[(0, 0)]
+            .modifier
+            .contains(Modifier::DIM));
     }
 
     #[test]

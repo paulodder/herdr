@@ -1303,7 +1303,7 @@ fn render_remote_workspace_card(
                 .min(list_bottom)
         {
             for x in card.rect.x..card.rect.x.saturating_add(card.rect.width) {
-                buffer[(x, y)].set_style(Style::default().bg(p.surface0));
+                buffer[(x, y)].set_style(Style::default().bg(p.surface_dim));
             }
         }
     }
@@ -1712,21 +1712,22 @@ fn render_workspace_list(
         let row_height = card.rect.height;
         let selected = i == app.selected && is_navigating;
         let is_active = Some(i) == app.active;
-        let cursor_selected = !is_active
-            && app.global_workspace_cursor.as_ref().is_some_and(|cursor| {
-                cursor.endpoint_id == app.federation_member_id && cursor.workspace_id == ws.id
-            });
+        let cursor_selected = app.global_workspace_cursor.as_ref().is_some_and(|cursor| {
+            cursor.endpoint_id == app.federation_member_id && cursor.workspace_id == ws.id
+        });
+        let row_selected =
+            selected || cursor_selected || (is_active && app.global_workspace_cursor.is_none());
         let is_dragged = dragged_ws_idx == Some(i);
-        let highlighted = selected || cursor_selected || is_active || is_dragged;
+        let highlighted = row_selected || is_dragged;
         let (agg_state, agg_seen) = ws.aggregate_state(&app.terminals);
 
         if highlighted {
-            let bg = if selected || cursor_selected {
-                p.surface0
+            let bg = if row_selected {
+                p.surface_dim
             } else if is_dragged {
                 p.surface1
             } else {
-                p.surface_dim
+                unreachable!("a workspace card is highlighted only when selected or dragged")
             };
             let buf = frame.buffer_mut();
             for y in row_y..row_y + row_height {
@@ -1739,7 +1740,7 @@ fn render_workspace_list(
             }
         }
 
-        let name_style = if selected || cursor_selected || is_active || is_dragged {
+        let name_style = if row_selected || is_dragged {
             Style::default().fg(p.text).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(p.subtext0)
@@ -1771,11 +1772,7 @@ fn render_workspace_list(
         let state_text_style = Style::default()
             .fg(state_label_color(display_state, display_seen, p))
             .add_modifier(Modifier::DIM);
-        let branch_style = Style::default().fg(if selected || cursor_selected || is_active {
-            p.mauve
-        } else {
-            p.overlay0
-        });
+        let branch_style = Style::default().fg(if row_selected { p.mauve } else { p.overlay0 });
         let token_values = ws.metadata_tokens.values();
         let rows = tokens::space_rows(
             &app.sidebar_spaces,
@@ -2371,6 +2368,54 @@ mod tests {
         assert_eq!(
             terminal.backend().buffer()[(location_x, remote.rect.y)].fg,
             app.palette.overlay0
+        );
+    }
+
+    #[test]
+    fn global_workspace_cursor_is_the_only_selected_workspace_row() {
+        let mut app = AppState::test_new();
+        app.mode = Mode::Terminal;
+        app.federation_member_id = "x1".into();
+        app.workspaces = vec![Workspace::test_new("home")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.federation_client_overlay.insert(
+            "tana.stl.dev".into(),
+            remote_endpoint("tana.stl.dev", "w9", "buurtklimaat"),
+        );
+        app.global_workspace_cursor = Some(crate::app::state::FederatedWorkspaceTarget {
+            endpoint_id: "tana.stl.dev".into(),
+            workspace_id: "w9".into(),
+        });
+
+        let area = Rect::new(0, 0, 32, 18);
+        app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+
+        let local = app
+            .view
+            .workspace_card_areas
+            .iter()
+            .find(|card| card.remote.is_none())
+            .expect("local workspace card");
+        let remote = app
+            .view
+            .workspace_card_areas
+            .iter()
+            .find(|card| card.remote.is_some())
+            .expect("remote workspace card");
+        let buffer = terminal.backend().buffer();
+
+        assert_ne!(
+            buffer[(local.rect.x, local.rect.y)].bg,
+            app.palette.surface_dim
+        );
+        assert_eq!(
+            buffer[(remote.rect.x, remote.rect.y)].bg,
+            app.palette.surface_dim
         );
     }
 
