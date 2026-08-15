@@ -1290,6 +1290,23 @@ fn render_remote_workspace_card(
         return true;
     };
     let p = &app.palette;
+    let selected = app.global_workspace_cursor.as_ref().is_some_and(|cursor| {
+        cursor.endpoint_id == target.endpoint_id && cursor.workspace_id == target.workspace_id
+    });
+    if selected {
+        let buffer = frame.buffer_mut();
+        for y in card.rect.y
+            ..card
+                .rect
+                .y
+                .saturating_add(card.rect.height)
+                .min(list_bottom)
+        {
+            for x in card.rect.x..card.rect.x.saturating_add(card.rect.width) {
+                buffer[(x, y)].set_style(Style::default().bg(p.surface0));
+            }
+        }
+    }
     let parent_group = card
         .group_key
         .as_ref()
@@ -1385,7 +1402,11 @@ fn render_remote_workspace_card(
             resolved,
             state_icon,
             state_text_style,
-            Style::default().fg(p.subtext0),
+            if selected {
+                Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(p.subtext0)
+            },
             secondary_style,
             secondary_style,
             secondary_style,
@@ -1691,12 +1712,16 @@ fn render_workspace_list(
         let row_height = card.rect.height;
         let selected = i == app.selected && is_navigating;
         let is_active = Some(i) == app.active;
+        let cursor_selected = !is_active
+            && app.global_workspace_cursor.as_ref().is_some_and(|cursor| {
+                cursor.endpoint_id == app.federation_member_id && cursor.workspace_id == ws.id
+            });
         let is_dragged = dragged_ws_idx == Some(i);
-        let highlighted = selected || is_active || is_dragged;
+        let highlighted = selected || cursor_selected || is_active || is_dragged;
         let (agg_state, agg_seen) = ws.aggregate_state(&app.terminals);
 
         if highlighted {
-            let bg = if selected {
+            let bg = if selected || cursor_selected {
                 p.surface0
             } else if is_dragged {
                 p.surface1
@@ -1714,7 +1739,7 @@ fn render_workspace_list(
             }
         }
 
-        let name_style = if selected || is_active || is_dragged {
+        let name_style = if selected || cursor_selected || is_active || is_dragged {
             Style::default().fg(p.text).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(p.subtext0)
@@ -1746,7 +1771,7 @@ fn render_workspace_list(
         let state_text_style = Style::default()
             .fg(state_label_color(display_state, display_seen, p))
             .add_modifier(Modifier::DIM);
-        let branch_style = Style::default().fg(if selected || is_active {
+        let branch_style = Style::default().fg(if selected || cursor_selected || is_active {
             p.mauve
         } else {
             p.overlay0

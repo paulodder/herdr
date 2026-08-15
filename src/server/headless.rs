@@ -2609,8 +2609,17 @@ impl HeadlessServer {
             return true;
         }
 
+        if std::mem::take(&mut self.app.state.request_federation_attach_cancel) {
+            if let Some(client) = self.clients.get_mut(&client_id) {
+                client.request_full_redraw();
+            }
+            self.send_to_client(client_id, ServerMessage::FederationAttachCancel);
+            return true;
+        }
+
         if let Some(request) = self.app.state.request_federation_attach.take() {
             let endpoint_id = request.endpoint_id;
+            info!(client_id, endpoint_id, "federation workspace activation requested");
             let directory = self.federation_directory();
             self.send_client_graphics_cleanup(client_id);
             self.send_to_client(
@@ -2625,6 +2634,7 @@ impl HeadlessServer {
                         sidebar_width: self.app.state.sidebar_width,
                         sidebar_section_split: self.app.state.sidebar_section_split,
                         sidebar_collapsed: self.app.state.sidebar_collapsed,
+                        workspace_scroll: self.app.state.workspace_scroll,
                         collapsed_space_keys: {
                             let mut keys = self
                                 .app
@@ -2901,6 +2911,7 @@ impl HeadlessServer {
                         self.app.state.sidebar_section_split =
                             presentation.sidebar_section_split.clamp(0.1, 0.9);
                         self.app.state.sidebar_collapsed = presentation.sidebar_collapsed;
+                        self.app.state.workspace_scroll = presentation.workspace_scroll;
                         self.app.state.collapsed_space_keys =
                             presentation.collapsed_space_keys.into_iter().collect();
                         self.app.state.mark_session_dirty();
@@ -4940,6 +4951,7 @@ mod tests {
                     sidebar_width: 36,
                     sidebar_section_split: 0.62,
                     sidebar_collapsed: true,
+                    workspace_scroll: 0,
                     collapsed_space_keys: vec!["/repo/herdr/.git".into()],
                 }),
             })
@@ -4948,6 +4960,7 @@ mod tests {
         assert_eq!(server.app.state.sidebar_width, 36);
         assert_eq!(server.app.state.sidebar_section_split, 0.62);
         assert!(server.app.state.sidebar_collapsed);
+        assert_eq!(server.app.state.workspace_scroll, 0);
         assert!(server
             .app
             .state
@@ -8382,6 +8395,38 @@ next_tab = ""
             other => panic!("expected ResetFederationConnections, got {other:?}"),
         }
         assert!(!server.app.state.request_federation_connection_reset);
+    }
+
+    #[test]
+    fn federation_attach_cancel_targets_the_input_client() {
+        let mut server = test_headless_server();
+        let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.app.state.request_federation_attach_cancel = true;
+
+        assert!(server.handle_client_input_events(1, Vec::new()));
+
+        match read_server_message(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("federation attach cancellation"),
+        ) {
+            ServerMessage::FederationAttachCancel => {}
+            other => panic!("expected FederationAttachCancel, got {other:?}"),
+        }
+        assert!(!server.app.state.request_federation_attach_cancel);
     }
 
     #[test]

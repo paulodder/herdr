@@ -1436,6 +1436,12 @@ pub struct AppState {
     pub request_client_config_reload: bool,
     /// Ask the foreground thin client to attach natively to a remote Herdr session.
     pub(crate) request_federation_attach: Option<FederationAttachRequest>,
+    /// Cancel a not-yet-activated federation selection when rapid navigation
+    /// returns to a workspace owned by this member.
+    pub(crate) request_federation_attach_cancel: bool,
+    /// Latest workspace highlighted by direct global previous/next navigation.
+    /// This advances locally even while a remote connection is still loading.
+    pub(crate) global_workspace_cursor: Option<FederatedWorkspaceTarget>,
     /// Ask the foreground thin client to close its inactive federation transports.
     pub(crate) request_federation_connection_reset: bool,
     /// Set when UI interaction requested a clipboard write that must be
@@ -1832,6 +1838,8 @@ impl AppState {
             request_live_handoff: false,
             request_client_config_reload: false,
             request_federation_attach: None,
+            request_federation_attach_cancel: false,
+            global_workspace_cursor: None,
             request_federation_connection_reset: false,
             request_clipboard_write: None,
             creating_new_tab: false,

@@ -1024,6 +1024,8 @@ impl AppState {
                 if ws_idx >= self.workspaces.len() {
                     return false;
                 }
+                self.request_federation_attach = None;
+                self.request_federation_attach_cancel = true;
                 self.switch_workspace(ws_idx);
                 self.mode = Mode::Terminal;
                 true
@@ -1039,6 +1041,8 @@ impl AppState {
                 if !tab_exists {
                     return false;
                 }
+                self.request_federation_attach = None;
+                self.request_federation_attach_cancel = true;
                 self.switch_workspace_tab(ws_idx, tab_idx);
                 self.mode = Mode::Terminal;
                 true
@@ -1075,6 +1079,8 @@ impl AppState {
                         );
                         return false;
                     }
+                    self.request_federation_attach = None;
+                    self.request_federation_attach_cancel = true;
                     self.focus_pane_in_workspace(ws_idx, pane_id);
                     self.mode = Mode::Terminal;
                     return true;
@@ -1138,6 +1144,7 @@ impl AppState {
             return false;
         }
         let resource = resource_id.and_then(|resource_id| endpoint.resource_ref(kind, resource_id));
+        self.request_federation_attach_cancel = false;
         self.request_federation_attach = Some(super::state::FederationAttachRequest {
             endpoint_id: endpoint.endpoint.id.clone(),
             target: endpoint.endpoint.target.clone(),
@@ -1469,6 +1476,10 @@ impl AppState {
             self.active = Some(idx);
             self.selected = idx;
             let workspace_id = self.workspaces[idx].id.clone();
+            self.global_workspace_cursor = Some(crate::app::state::FederatedWorkspaceTarget {
+                endpoint_id: self.federation_member_id.clone(),
+                workspace_id: workspace_id.clone(),
+            });
             crate::logging::workspace_focused(&workspace_id);
             self.mark_session_dirty();
             self.ensure_workspace_visible(idx);
@@ -1503,6 +1514,10 @@ impl AppState {
         self.active = Some(ws_idx);
         self.selected = ws_idx;
         let workspace_id = self.workspaces[ws_idx].id.clone();
+        self.global_workspace_cursor = Some(crate::app::state::FederatedWorkspaceTarget {
+            endpoint_id: self.federation_member_id.clone(),
+            workspace_id: workspace_id.clone(),
+        });
         if workspace_changed {
             crate::logging::workspace_focused(&workspace_id);
         }
@@ -1576,6 +1591,57 @@ impl AppState {
             }
             cards = crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect);
             if cards.is_empty() {
+                break;
+            }
+        }
+    }
+
+    pub(crate) fn ensure_global_workspace_visible(
+        &mut self,
+        target: &crate::app::state::FederatedWorkspaceTarget,
+    ) {
+        if self.sidebar_collapsed {
+            return;
+        }
+        let entries = crate::ui::workspace_list_entries(self);
+        let Some(target_entry_idx) = entries.iter().position(|entry| match entry {
+            crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. } => {
+                target.endpoint_id == self.federation_member_id
+                    && self
+                        .workspaces
+                        .get(*ws_idx)
+                        .is_some_and(|workspace| workspace.id == target.workspace_id)
+            }
+            crate::ui::WorkspaceListEntry::RemoteWorkspace {
+                endpoint_id,
+                workspace_id,
+                ..
+            } => endpoint_id == &target.endpoint_id && workspace_id == &target.workspace_id,
+        }) else {
+            return;
+        };
+
+        self.workspace_scroll = crate::ui::normalized_workspace_scroll(
+            self,
+            self.view.sidebar_rect,
+            self.workspace_scroll,
+        );
+        if target_entry_idx < self.workspace_scroll {
+            self.workspace_scroll = target_entry_idx;
+            return;
+        }
+        loop {
+            let visible = crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect);
+            if target_entry_idx < self.workspace_scroll.saturating_add(visible.len()) {
+                break;
+            }
+            let previous_scroll = self.workspace_scroll;
+            self.workspace_scroll = crate::ui::normalized_workspace_scroll(
+                self,
+                self.view.sidebar_rect,
+                self.workspace_scroll.saturating_add(1),
+            );
+            if self.workspace_scroll == previous_scroll {
                 break;
             }
         }

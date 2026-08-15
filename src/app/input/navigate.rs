@@ -703,15 +703,24 @@ impl App {
         if entries.is_empty() {
             return None;
         }
-        let current = self.state.active.unwrap_or(self.state.selected);
-        let current_pos = entries
-            .iter()
-            .position(|entry| {
-                matches!(
-                    entry,
-                    crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. }
-                        if *ws_idx == current
-                )
+        let current_pos = self
+            .state
+            .global_workspace_cursor
+            .as_ref()
+            .and_then(|cursor| {
+                entries.iter().position(|entry| {
+                    self.global_workspace_location(entry).as_ref() == Some(cursor)
+                })
+            })
+            .or_else(|| {
+                let current = self.state.active.unwrap_or(self.state.selected);
+                entries.iter().position(|entry| {
+                    matches!(
+                        entry,
+                        crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. }
+                            if *ws_idx == current
+                    )
+                })
             })
             .unwrap_or(0);
         let next = (current_pos as isize + delta).rem_euclid(entries.len() as isize) as usize;
@@ -719,8 +728,15 @@ impl App {
     }
 
     fn focus_global_workspace(&mut self, target: crate::ui::WorkspaceListEntry) {
+        let Some(location) = self.global_workspace_location(&target) else {
+            return;
+        };
+        self.state.global_workspace_cursor = Some(location.clone());
+        self.state.ensure_global_workspace_visible(&location);
         match target {
             crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. } => {
+                self.state.request_federation_attach = None;
+                self.state.request_federation_attach_cancel = true;
                 self.focus_workspace_idx_via_api(ws_idx);
             }
             crate::ui::WorkspaceListEntry::RemoteWorkspace {
@@ -736,6 +752,28 @@ impl App {
             }
         }
         leave_navigate_mode(&mut self.state);
+    }
+
+    fn global_workspace_location(
+        &self,
+        entry: &crate::ui::WorkspaceListEntry,
+    ) -> Option<crate::app::state::FederatedWorkspaceTarget> {
+        match entry {
+            crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. } => {
+                Some(crate::app::state::FederatedWorkspaceTarget {
+                    endpoint_id: self.state.federation_member_id.clone(),
+                    workspace_id: self.state.workspaces.get(*ws_idx)?.id.clone(),
+                })
+            }
+            crate::ui::WorkspaceListEntry::RemoteWorkspace {
+                endpoint_id,
+                workspace_id,
+                ..
+            } => Some(crate::app::state::FederatedWorkspaceTarget {
+                endpoint_id: endpoint_id.clone(),
+                workspace_id: workspace_id.clone(),
+            }),
+        }
     }
 
     fn relative_tab(&self, delta: isize) -> Option<usize> {
@@ -1986,6 +2024,54 @@ mod tests {
             .expect("next workspace should request the remote member");
         assert_eq!(request.endpoint_id, "b-remote");
         assert_eq!(request.resource.unwrap().resource_id, "rw1");
+    }
+
+    #[test]
+    fn repeated_global_navigation_advances_without_waiting_for_activation() {
+        let mut app = app_with_test_workspaces(&["home"]);
+        app.state.federation_member_id = "a-home".into();
+        add_remote_workspace(&mut app, "b-remote", "rw1");
+        add_remote_workspace(&mut app, "c-remote", "rw2");
+
+        app.execute_tui_navigate_action(NavigateAction::NextWorkspace, ActionContext::Direct);
+        app.execute_tui_navigate_action(NavigateAction::NextWorkspace, ActionContext::Direct);
+
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(
+            app.state.global_workspace_cursor,
+            Some(crate::app::state::FederatedWorkspaceTarget {
+                endpoint_id: "c-remote".into(),
+                workspace_id: "rw2".into(),
+            })
+        );
+        let request = app
+            .state
+            .request_federation_attach
+            .as_ref()
+            .expect("the latest remote row should replace the earlier request");
+        assert_eq!(request.endpoint_id, "c-remote");
+        assert_eq!(request.resource.as_ref().unwrap().resource_id, "rw2");
+    }
+
+    #[test]
+    fn global_navigation_back_to_local_cancels_the_pending_remote_attach() {
+        let mut app = app_with_test_workspaces(&["home"]);
+        app.state.federation_member_id = "a-home".into();
+        add_remote_workspace(&mut app, "b-remote", "rw1");
+
+        app.execute_tui_navigate_action(NavigateAction::NextWorkspace, ActionContext::Direct);
+        app.execute_tui_navigate_action(NavigateAction::NextWorkspace, ActionContext::Direct);
+
+        assert!(app.state.request_federation_attach.is_none());
+        assert!(app.state.request_federation_attach_cancel);
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(
+            app.state.global_workspace_cursor,
+            Some(crate::app::state::FederatedWorkspaceTarget {
+                endpoint_id: "a-home".into(),
+                workspace_id: app.state.workspaces[0].id.clone(),
+            })
+        );
     }
 
     #[test]

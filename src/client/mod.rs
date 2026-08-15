@@ -939,6 +939,13 @@ enum ClientLoopEvent {
     },
     /// Server reader thread exited (connection lost).
     ServerDisconnected { connection_id: u64 },
+    /// A blocking SSH/socket/handshake attempt completed off the input loop.
+    #[cfg(unix)]
+    FederationConnectionReady {
+        generation: u64,
+        intent: Box<FederationConnectIntent>,
+        result: Result<ResumedClientConnection, String>,
+    },
     /// Timer tick.
     Timer,
 }
@@ -986,7 +993,20 @@ struct PendingFederationActivation {
 }
 
 #[cfg(unix)]
+struct FederationConnectIntent {
+    endpoint_id: String,
+    target: String,
+    session: String,
+    resource: Option<crate::federation::FederatedResourceRef>,
+    directory: Vec<crate::federation::EndpointState>,
+    presentation: crate::protocol::FederationPresentation,
+    expected_runtime_identity: (String, String),
+}
+
+#[cfg(unix)]
 const FEDERATION_ACTIVATION_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(unix)]
+const FEDERATION_NAVIGATION_SETTLE: Duration = Duration::from_millis(75);
 #[cfg(unix)]
 const DIRECTORY_AUTHORITY_RECONNECT_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -1014,6 +1034,55 @@ fn spawn_server_reader(
         );
     });
     Ok(())
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn spawn_federation_connection(
+    generation: u64,
+    intent: FederationConnectIntent,
+    connection_id: u64,
+    requested_encoding: RenderEncoding,
+    kitty_graphics_enabled: bool,
+    mouse_capture_active: bool,
+    event_tx: tokio::sync::mpsc::Sender<ClientLoopEvent>,
+) {
+    std::thread::spawn(move || {
+        let result = (|| {
+            let remote = crate::remote::start_in_place_remote_connection(
+                intent.target.clone(),
+                intent.session.clone(),
+            )?;
+            let stream = remote.connect()?;
+            let (stream, encoding) = handshake_current_terminal(
+                stream,
+                render_encoding_for_connection(true, requested_encoding),
+                false,
+                kitty_graphics_enabled,
+                true,
+            )
+            .map_err(|err| io::Error::other(err.to_string()))?;
+            Ok(ResumedClientConnection {
+                member_id: intent.endpoint_id.clone(),
+                server_id: Some(intent.expected_runtime_identity.0.clone()),
+                session_id: Some(intent.expected_runtime_identity.1.clone()),
+                stream,
+                connection_id,
+                remote: Some(remote),
+                mouse_capture_active,
+                window_title: None,
+                prefix_input_source_active: false,
+                is_remote_client: true,
+                reconnected_encoding: Some(encoding),
+            })
+        })()
+        .map_err(|err: io::Error| err.to_string());
+        let _ = event_tx.blocking_send(ClientLoopEvent::FederationConnectionReady {
+            generation,
+            intent: Box::new(intent),
+            result,
+        });
+    });
 }
 
 #[cfg(unix)]
@@ -2219,6 +2288,12 @@ async fn run_client_loop(
     #[cfg(unix)]
     let mut pending_federation_activation: Option<PendingFederationActivation> = None;
     #[cfg(unix)]
+    let mut desired_federation_attach: Option<(Instant, FederationConnectIntent)> = None;
+    #[cfg(unix)]
+    let mut pending_federation_connect_generation: Option<u64> = None;
+    #[cfg(unix)]
+    let mut next_federation_connect_generation = 1_u64;
+    #[cfg(unix)]
     let mut federated_clipboard_text: Option<String> = None;
     #[cfg(unix)]
     let mut next_activation_request_id = 1_u64;
@@ -3163,15 +3238,6 @@ async fn run_client_loop(
                                 .label
                                 .clone()
                                 .unwrap_or_else(|| endpoint_id.clone());
-                            if pending_federation_activation.is_some() {
-                                handle_notify(
-                                    NotifyKind::Toast,
-                                    "Federation switch already in progress",
-                                    Some("Wait for the selected member to accept or reject activation."),
-                                    &state.sound_config,
-                                );
-                                continue;
-                            }
                             let plan = federation_connection_plan(
                                 &active_member_id,
                                 suspended_connections
@@ -3179,159 +3245,27 @@ async fn run_client_loop(
                                     .map(|connection| connection.member_id.as_str()),
                                 &endpoint_id,
                             );
-
-                            if plan == FederationConnectionPlan::Current {
-                                let request_id = next_activation_request_id;
-                                next_activation_request_id =
-                                    next_activation_request_id.wrapping_add(1);
-                                if let Err(err) = activate_federation_connection(
-                                    &mut write_stream,
-                                    request_id,
-                                    &endpoint_id,
-                                    resource,
-                                    &federation_directory,
-                                    Some(presentation),
-                                ) {
-                                    return Err(ClientError::ConnectionLost(err));
-                                }
-                                state.request_full_redraw();
-                                continue;
-                            }
-
+                            info!(endpoint_id, ?plan, "queued federation workspace activation");
                             state.federation_connecting =
                                 FederationConnectingUi::for_plan(plan, &member_label);
                             redraw_connecting_ui(&mut state);
-
-                            let switch_result = match plan {
-                                FederationConnectionPlan::Suspended(index) => {
-                                    let suspended = suspended_connections.remove(index);
-                                    let reconnect =
-                                        disconnected_connections.remove(&suspended.connection_id);
-                                    resume_suspended_connection(
-                                        suspended,
-                                        reconnect,
-                                        next_connection_id,
-                                        requested_encoding,
-                                        attach_request.is_some(),
-                                        state.kitty_graphics_enabled,
-                                    )
-                                    .map(|resumed| (resumed, reconnect))
-                                    .map_err(|err| io::Error::other(err.to_string()))
-                                }
-                                FederationConnectionPlan::New => (|| {
-                                    let remote = crate::remote::start_in_place_remote_connection(
-                                        target.clone(),
-                                        session,
-                                    )?;
-                                    let stream = remote.connect()?;
-                                    let (stream, encoding) = handshake_current_terminal(
-                                        stream,
-                                        render_encoding_for_connection(true, requested_encoding),
-                                        false,
-                                        state.kitty_graphics_enabled,
-                                        true,
-                                    )
-                                    .map_err(|err| io::Error::other(err.to_string()))?;
-                                    Ok((
-                                        ResumedClientConnection {
-                                            member_id: endpoint_id.clone(),
-                                            server_id: Some(expected_runtime_identity.0.clone()),
-                                            session_id: Some(expected_runtime_identity.1.clone()),
-                                            stream,
-                                            connection_id: next_connection_id,
-                                            remote: Some(remote),
-                                            mouse_capture_active: state.mouse_capture_active,
-                                            window_title: None,
-                                            prefix_input_source_active: false,
-                                            is_remote_client: true,
-                                            reconnected_encoding: Some(encoding),
-                                        },
-                                        true,
-                                    ))
-                                })(
-                                ),
-                                FederationConnectionPlan::Current => unreachable!(),
-                            };
-
-                            match switch_result {
-                                Ok((mut resumed, needs_reader)) => {
-                                    if needs_reader {
-                                        next_connection_id = next_connection_id.wrapping_add(1);
-                                        spawn_server_reader(
-                                            &resumed.stream,
-                                            &event_tx,
-                                            &should_quit,
-                                            state.kitty_graphics_enabled,
-                                            resumed.connection_id,
-                                        )?;
-                                    }
-                                    let request_id = next_activation_request_id;
-                                    next_activation_request_id =
-                                        next_activation_request_id.wrapping_add(1);
-                                    if let Err(err) = activate_federation_connection(
-                                        &mut resumed.stream,
-                                        request_id,
-                                        &endpoint_id,
-                                        resource.clone(),
-                                        &federation_directory,
-                                        Some(presentation),
-                                    ) {
-                                        clear_connecting_ui(&mut state, true);
-                                        warn!(endpoint_id, target, %err, "federation activation request failed; keeping current connection");
-                                        handle_notify(
-                                            NotifyKind::Toast,
-                                            "Could not open remote Herdr",
-                                            Some(&format!(
-                                                "{endpoint_id}: {err}. The current Herdr connection is still active."
-                                            )),
-                                            &state.sound_config,
-                                        );
-                                        continue;
-                                    }
-                                    let resumed_id = resumed.connection_id;
-                                    let reconnected_encoding = resumed.reconnected_encoding;
-                                    pending_federation_activation =
-                                        Some(PendingFederationActivation {
-                                            connection: resumed,
-                                            endpoint_id: endpoint_id.clone(),
-                                            expected_runtime_identity: Some(
-                                                expected_runtime_identity,
-                                            ),
-                                            expected_resource: resource,
-                                            request_id,
-                                            retain_current: true,
-                                            restore_if_rejected: matches!(
-                                                plan,
-                                                FederationConnectionPlan::Suspended(_)
-                                            ),
-                                            deadline: Instant::now()
-                                                + FEDERATION_ACTIVATION_TIMEOUT,
-                                            buffered_messages: Vec::new(),
-                                        });
-                                    info!(
-                                        endpoint_id,
-                                        target,
-                                        reused =
-                                            matches!(plan, FederationConnectionPlan::Suspended(_)),
-                                        ?reconnected_encoding,
-                                        connection_id = resumed_id,
-                                        "waiting for Herdr member activation acknowledgement"
-                                    );
-                                }
-                                Err(err) => {
-                                    clear_connecting_ui(&mut state, true);
-                                    warn!(endpoint_id, target, %err, "federation connection switch failed; keeping current connection");
-                                    handle_notify(
-                                        NotifyKind::Toast,
-                                        "Could not open remote Herdr",
-                                        Some(&format!(
-                                            "{endpoint_id}: {err}. The current Herdr connection is still active."
-                                        )),
-                                        &state.sound_config,
-                                    );
-                                    state.request_full_redraw();
-                                }
+                            if pending_federation_connect_generation.take().is_some() {
+                                next_federation_connect_generation =
+                                    next_federation_connect_generation.wrapping_add(1);
                             }
+                            desired_federation_attach = Some((
+                                Instant::now() + FEDERATION_NAVIGATION_SETTLE,
+                                FederationConnectIntent {
+                                    endpoint_id,
+                                    target,
+                                    session,
+                                    resource,
+                                    directory: federation_directory.clone(),
+                                    presentation,
+                                    expected_runtime_identity,
+                                },
+                            ));
+                            state.request_full_redraw();
                         }
                         #[cfg(windows)]
                         {
@@ -3348,6 +3282,43 @@ async fn run_client_loop(
                                 Some("In-place federation attachment is not supported on Windows."),
                                 &state.sound_config,
                             );
+                        }
+                    }
+                    ServerMessage::FederationAttachCancel => {
+                        #[cfg(unix)]
+                        {
+                            desired_federation_attach = None;
+                            pending_federation_connect_generation = None;
+                            next_federation_connect_generation =
+                                next_federation_connect_generation.wrapping_add(1);
+                            if let Some(mut pending) = pending_federation_activation.take() {
+                                if pending.retain_current {
+                                    let _ = write_to_server(
+                                        &mut pending.connection.stream,
+                                        &ClientMessage::FederationSuspend,
+                                    );
+                                    if pending.restore_if_rejected {
+                                        let connection = pending.connection;
+                                        suspended_connections.push(SuspendedClientConnection {
+                                            member_id: connection.member_id,
+                                            server_id: connection.server_id,
+                                            session_id: connection.session_id,
+                                            stream: connection.stream,
+                                            connection_id: connection.connection_id,
+                                            remote: connection.remote,
+                                            mouse_capture_active: connection.mouse_capture_active,
+                                            window_title: connection.window_title,
+                                            prefix_input_source_active: connection
+                                                .prefix_input_source_active,
+                                            is_remote_client: connection.is_remote_client,
+                                        });
+                                    }
+                                } else {
+                                    pending_federation_activation = Some(pending);
+                                }
+                            }
+                            clear_connecting_ui(&mut state, true);
+                            state.request_full_redraw();
                         }
                     }
                     ServerMessage::FederationActivationResult {
@@ -3375,6 +3346,95 @@ async fn run_client_loop(
                     }
                     ServerMessage::Welcome { .. } => {
                         debug!("received unexpected Welcome in main loop");
+                    }
+                }
+            }
+            #[cfg(unix)]
+            ClientLoopEvent::FederationConnectionReady {
+                generation,
+                intent,
+                result,
+            } => {
+                if pending_federation_connect_generation != Some(generation) {
+                    debug!(
+                        generation,
+                        endpoint_id = intent.endpoint_id,
+                        "discarding superseded federation connection"
+                    );
+                    continue;
+                }
+                let intent = *intent;
+                pending_federation_connect_generation = None;
+                if pending_federation_activation.is_some() {
+                    desired_federation_attach = Some((Instant::now(), intent));
+                    continue;
+                }
+                match result {
+                    Ok(mut resumed) => {
+                        spawn_server_reader(
+                            &resumed.stream,
+                            &event_tx,
+                            &should_quit,
+                            state.kitty_graphics_enabled,
+                            resumed.connection_id,
+                        )?;
+                        let request_id = next_activation_request_id;
+                        next_activation_request_id = next_activation_request_id.wrapping_add(1);
+                        if let Err(err) = activate_federation_connection(
+                            &mut resumed.stream,
+                            request_id,
+                            &intent.endpoint_id,
+                            intent.resource.clone(),
+                            &intent.directory,
+                            Some(intent.presentation),
+                        ) {
+                            clear_connecting_ui(&mut state, true);
+                            warn!(endpoint_id = intent.endpoint_id, target = intent.target, %err, "federation activation request failed; keeping current connection");
+                            handle_notify(
+                                NotifyKind::Toast,
+                                "Could not open remote Herdr",
+                                Some(&format!(
+                                    "{}: {err}. The current Herdr connection is still active.",
+                                    intent.endpoint_id
+                                )),
+                                &state.sound_config,
+                            );
+                            continue;
+                        }
+                        let resumed_id = resumed.connection_id;
+                        let reconnected_encoding = resumed.reconnected_encoding;
+                        pending_federation_activation = Some(PendingFederationActivation {
+                            connection: resumed,
+                            endpoint_id: intent.endpoint_id.clone(),
+                            expected_runtime_identity: Some(intent.expected_runtime_identity),
+                            expected_resource: intent.resource,
+                            request_id,
+                            retain_current: true,
+                            restore_if_rejected: false,
+                            deadline: Instant::now() + FEDERATION_ACTIVATION_TIMEOUT,
+                            buffered_messages: Vec::new(),
+                        });
+                        info!(
+                            endpoint_id = intent.endpoint_id,
+                            target = intent.target,
+                            ?reconnected_encoding,
+                            connection_id = resumed_id,
+                            "waiting for background-connected Herdr member activation acknowledgement"
+                        );
+                    }
+                    Err(err) => {
+                        clear_connecting_ui(&mut state, true);
+                        warn!(endpoint_id = intent.endpoint_id, target = intent.target, %err, "background federation connection failed; keeping current connection");
+                        handle_notify(
+                            NotifyKind::Toast,
+                            "Could not open remote Herdr",
+                            Some(&format!(
+                                "{}: {err}. The current Herdr connection is still active.",
+                                intent.endpoint_id
+                            )),
+                            &state.sound_config,
+                        );
+                        state.request_full_redraw();
                     }
                 }
             }
@@ -3474,7 +3534,138 @@ async fn run_client_loop(
             }
             ClientLoopEvent::Timer => {
                 #[cfg(unix)]
-                if pending_federation_activation.is_some() && state.federation_connecting.is_some()
+                if pending_federation_activation.is_none()
+                    && desired_federation_attach
+                        .as_ref()
+                        .is_some_and(|(deadline, _)| Instant::now() >= *deadline)
+                {
+                    let (_, intent) = desired_federation_attach
+                        .take()
+                        .expect("settled federation intent checked above");
+                    let plan = federation_connection_plan(
+                        &active_member_id,
+                        suspended_connections
+                            .iter()
+                            .map(|connection| connection.member_id.as_str()),
+                        &intent.endpoint_id,
+                    );
+                    match plan {
+                        FederationConnectionPlan::Current => {
+                            pending_federation_connect_generation = None;
+                            next_federation_connect_generation =
+                                next_federation_connect_generation.wrapping_add(1);
+                            let request_id = next_activation_request_id;
+                            next_activation_request_id = next_activation_request_id.wrapping_add(1);
+                            if let Err(err) = activate_federation_connection(
+                                &mut write_stream,
+                                request_id,
+                                &intent.endpoint_id,
+                                intent.resource,
+                                &intent.directory,
+                                Some(intent.presentation),
+                            ) {
+                                return Err(ClientError::ConnectionLost(err));
+                            }
+                            clear_connecting_ui(&mut state, false);
+                            state.request_full_redraw();
+                        }
+                        FederationConnectionPlan::Suspended(index)
+                            if !disconnected_connections
+                                .contains(&suspended_connections[index].connection_id) =>
+                        {
+                            let suspended = suspended_connections.remove(index);
+                            let mut resumed = resume_suspended_connection(
+                                suspended,
+                                false,
+                                next_connection_id,
+                                requested_encoding,
+                                attach_request.is_some(),
+                                state.kitty_graphics_enabled,
+                            )?;
+                            let request_id = next_activation_request_id;
+                            next_activation_request_id = next_activation_request_id.wrapping_add(1);
+                            if let Err(err) = activate_federation_connection(
+                                &mut resumed.stream,
+                                request_id,
+                                &intent.endpoint_id,
+                                intent.resource.clone(),
+                                &intent.directory,
+                                Some(intent.presentation.clone()),
+                            ) {
+                                warn!(endpoint_id = intent.endpoint_id, %err, "retained federation connection was stale; reconnecting in background");
+                                drop(resumed);
+                                let generation = next_federation_connect_generation;
+                                next_federation_connect_generation =
+                                    next_federation_connect_generation.wrapping_add(1);
+                                pending_federation_connect_generation = Some(generation);
+                                let connection_id = next_connection_id;
+                                next_connection_id = next_connection_id.wrapping_add(1);
+                                spawn_federation_connection(
+                                    generation,
+                                    intent,
+                                    connection_id,
+                                    requested_encoding,
+                                    state.kitty_graphics_enabled,
+                                    state.mouse_capture_active,
+                                    event_tx.clone(),
+                                );
+                                continue;
+                            }
+                            pending_federation_activation = Some(PendingFederationActivation {
+                                connection: resumed,
+                                endpoint_id: intent.endpoint_id,
+                                expected_runtime_identity: Some(intent.expected_runtime_identity),
+                                expected_resource: intent.resource,
+                                request_id,
+                                retain_current: true,
+                                restore_if_rejected: true,
+                                deadline: Instant::now() + FEDERATION_ACTIVATION_TIMEOUT,
+                                buffered_messages: Vec::new(),
+                            });
+                        }
+                        FederationConnectionPlan::Suspended(index) => {
+                            let stale = suspended_connections.remove(index);
+                            disconnected_connections.remove(&stale.connection_id);
+                            drop(stale);
+                            let generation = next_federation_connect_generation;
+                            next_federation_connect_generation =
+                                next_federation_connect_generation.wrapping_add(1);
+                            pending_federation_connect_generation = Some(generation);
+                            let connection_id = next_connection_id;
+                            next_connection_id = next_connection_id.wrapping_add(1);
+                            spawn_federation_connection(
+                                generation,
+                                intent,
+                                connection_id,
+                                requested_encoding,
+                                state.kitty_graphics_enabled,
+                                state.mouse_capture_active,
+                                event_tx.clone(),
+                            );
+                        }
+                        FederationConnectionPlan::New => {
+                            let generation = next_federation_connect_generation;
+                            next_federation_connect_generation =
+                                next_federation_connect_generation.wrapping_add(1);
+                            pending_federation_connect_generation = Some(generation);
+                            let connection_id = next_connection_id;
+                            next_connection_id = next_connection_id.wrapping_add(1);
+                            spawn_federation_connection(
+                                generation,
+                                intent,
+                                connection_id,
+                                requested_encoding,
+                                state.kitty_graphics_enabled,
+                                state.mouse_capture_active,
+                                event_tx.clone(),
+                            );
+                        }
+                    }
+                }
+                #[cfg(unix)]
+                if (pending_federation_activation.is_some()
+                    || pending_federation_connect_generation.is_some())
+                    && state.federation_connecting.is_some()
                 {
                     if let Some(connecting) = state.federation_connecting.as_mut() {
                         connecting.tick = connecting.tick.wrapping_add(1);

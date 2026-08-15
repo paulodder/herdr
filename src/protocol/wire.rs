@@ -43,7 +43,7 @@ pub const LIVE_HANDOFF_RECONNECT_REASON: &str =
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 20;
+pub const PROTOCOL_VERSION: u32 = 21;
 
 /// Maximum UTF-8 clipboard payload the client may carry between federation
 /// members. This keeps the control path bounded independently of frame size.
@@ -55,6 +55,9 @@ pub struct FederationPresentation {
     pub sidebar_width: u16,
     pub sidebar_section_split: f32,
     pub sidebar_collapsed: bool,
+    /// Canonical workspace-list offset, transferred before activation so the
+    /// sidebar does not jump when the active federation member changes.
+    pub workspace_scroll: usize,
     pub collapsed_space_keys: Vec<String>,
 }
 
@@ -750,6 +753,10 @@ pub enum ServerMessage {
         directory: Vec<crate::federation::EndpointState>,
         presentation: FederationPresentation,
     },
+
+    /// Cancel a queued or background federation activation because rapid
+    /// workspace navigation returned to the current member.
+    FederationAttachCancel,
 
     /// A destination member's authoritative response to FederationActivate.
     FederationActivationResult {
@@ -2129,9 +2136,19 @@ mod tests {
                 sidebar_width: 36,
                 sidebar_section_split: 0.5,
                 sidebar_collapsed: false,
+                workspace_scroll: 2,
                 collapsed_space_keys: vec!["/repo/herdr/.git".into()],
             },
         };
+        let mut bytes = Vec::new();
+        write_message(&mut bytes, &message).unwrap();
+        let decoded: ServerMessage = read_message(&mut bytes.as_slice(), MAX_FRAME_SIZE).unwrap();
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn federation_attach_cancel_message_round_trips() {
+        let message = ServerMessage::FederationAttachCancel;
         let mut bytes = Vec::new();
         write_message(&mut bytes, &message).unwrap();
         let decoded: ServerMessage = read_message(&mut bytes.as_slice(), MAX_FRAME_SIZE).unwrap();
