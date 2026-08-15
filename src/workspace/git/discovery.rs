@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitSpaceMetadata {
     pub key: String,
+    /// Repository identity that remains stable when the same project is cloned
+    /// at a different path or opened through another federation member.
+    pub project_key: String,
     pub checkout_key: String,
     pub label: String,
     pub repo_root: PathBuf,
@@ -80,13 +83,103 @@ pub fn git_space_metadata(cwd: &Path) -> Option<GitSpaceMetadata> {
         .and_then(|name| name.to_str())
         .unwrap_or("repo")
         .to_string();
+    let project_key = git_project_key(&info).unwrap_or_else(|| format!("local:{key}"));
     Some(GitSpaceMetadata {
         key,
+        project_key,
         checkout_key,
         label,
         repo_root: info.repo_root,
         is_linked_worktree: info.is_linked_worktree,
     })
+}
+
+fn git_project_key(info: &GitWorktreeInfo) -> Option<String> {
+    let config = std::fs::read_to_string(info.git_common_dir.join("config")).ok()?;
+    let mut remote_name = None;
+    let mut first_remote = None;
+    let mut origin = None;
+
+    for raw_line in config.lines() {
+        let line = raw_line.trim();
+        if line.starts_with('[') {
+            remote_name = git_remote_section_name(line).map(str::to_string);
+            continue;
+        }
+        let Some(name) = remote_name.as_deref() else {
+            continue;
+        };
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if !key.trim().eq_ignore_ascii_case("url") {
+            continue;
+        }
+        let Some(normalized) = normalize_git_remote(value.trim()) else {
+            continue;
+        };
+        if first_remote.is_none() {
+            first_remote = Some(normalized.clone());
+        }
+        if name.eq_ignore_ascii_case("origin") {
+            origin = Some(normalized);
+        }
+    }
+
+    origin.or(first_remote)
+}
+
+fn git_remote_section_name(line: &str) -> Option<&str> {
+    let section = line.strip_prefix('[')?.strip_suffix(']')?.trim();
+    if section.len() < "remote".len() {
+        return None;
+    }
+    let (kind, rest) = section.split_at("remote".len());
+    if !kind.eq_ignore_ascii_case("remote") {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let name = rest.strip_prefix('"')?.strip_suffix('"')?;
+    (!name.is_empty()).then_some(name)
+}
+
+/// Reduce equivalent SSH and HTTPS Git remotes to a credential-free
+/// `host/path` identity. Local-path remotes deliberately return `None`: those
+/// are only safe to group on the member that owns the path.
+fn normalize_git_remote(remote: &str) -> Option<String> {
+    let remote = remote
+        .trim()
+        .strip_prefix('"')
+        .and_then(|remote| remote.strip_suffix('"'))
+        .unwrap_or_else(|| remote.trim())
+        .trim_end_matches('/');
+    let (authority, path) = if let Some((_, rest)) = remote.split_once("://") {
+        let (authority, path) = rest.split_once('/')?;
+        (authority, path)
+    } else {
+        let (authority, path) = remote.split_once(':')?;
+        if authority.contains('/')
+            || authority.contains('\\')
+            || (authority.len() == 1 && (path.starts_with('/') || path.starts_with('\\')))
+        {
+            return None;
+        }
+        (authority, path)
+    };
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = authority
+        .strip_suffix(":22")
+        .unwrap_or(authority)
+        .to_ascii_lowercase();
+    let path = path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(path)
+        .trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    (!host.is_empty() && !path.is_empty()).then(|| format!("{host}/{path}"))
 }
 
 pub(super) fn canonicalize_best_effort_path(path: &Path) -> PathBuf {
@@ -431,6 +524,70 @@ mod tests {
         assert_eq!(
             derive_label_from_cwd(&nested),
             root.file_name().and_then(|name| name.to_str()).unwrap()
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn normalizes_equivalent_git_remote_forms_without_credentials() {
+        for remote in [
+            "git@github.com:socialtechnologylab/geodeck2.git",
+            "ssh://git@github.com/socialtechnologylab/geodeck2.git",
+            "https://token@github.com/socialtechnologylab/geodeck2.git",
+            "https://github.com/socialtechnologylab/geodeck2/",
+            "\"https://github.com/socialtechnologylab/geodeck2.git\"",
+        ] {
+            assert_eq!(
+                normalize_git_remote(remote).as_deref(),
+                Some("github.com/socialtechnologylab/geodeck2")
+            );
+        }
+        assert_eq!(normalize_git_remote("../geodeck2"), None);
+        assert_eq!(normalize_git_remote("/srv/git/geodeck2.git"), None);
+        assert_eq!(normalize_git_remote(r"C:\repo\geodeck2"), None);
+    }
+
+    #[test]
+    fn remote_section_names_are_case_insensitive() {
+        assert_eq!(
+            git_remote_section_name(r#"[remote "origin"]"#),
+            Some("origin")
+        );
+        assert_eq!(
+            git_remote_section_name(r#"[Remote "upstream"]"#),
+            Some("upstream")
+        );
+        assert_eq!(git_remote_section_name(r#"[branch "main"]"#), None);
+    }
+
+    #[test]
+    fn git_space_project_key_prefers_origin_over_checkout_path() {
+        let root = temp_test_dir("project-key-origin");
+        run_git(&root, &["init", "."]);
+        run_git(
+            &root,
+            &[
+                "remote",
+                "add",
+                "backup",
+                "ssh://git@example.test/team/backup.git",
+            ],
+        );
+        run_git(
+            &root,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:socialtechnologylab/geodeck2.git",
+            ],
+        );
+
+        let metadata = git_space_metadata(&root).expect("Git repo should have space metadata");
+        assert_eq!(
+            metadata.project_key,
+            "github.com/socialtechnologylab/geodeck2"
         );
 
         std::fs::remove_dir_all(root).unwrap();

@@ -1958,6 +1958,7 @@ mod tests {
                         branch: None,
                         git_ahead_behind: None,
                         worktree: None,
+                        project: None,
                     }],
                     tabs: Vec::new(),
                     panes: Vec::new(),

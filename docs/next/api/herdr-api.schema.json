@@ -1072,6 +1072,17 @@
               "minimum": 0,
               "type": "integer"
             },
+            "project": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/WorkspaceProjectInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Host-independent repository identity used to organize the same project\nacross federation members and checkout paths."
+            },
             "tab_count": {
               "format": "uint",
               "minimum": 0,
@@ -1119,6 +1130,25 @@
             "tab_count",
             "active_tab_id",
             "agent_status"
+          ],
+          "type": "object"
+        },
+        "WorkspaceProjectInfo": {
+          "properties": {
+            "is_linked_worktree": {
+              "type": "boolean"
+            },
+            "key": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "name",
+            "is_linked_worktree"
           ],
           "type": "object"
         },
@@ -1359,6 +1389,17 @@
           },
           "required": [
             "title"
+          ],
+          "type": "object"
+        },
+        "DirectoryListParams": {
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
           ],
           "type": "object"
         },
@@ -4178,6 +4219,22 @@
         {
           "properties": {
             "method": {
+              "const": "directory.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/DirectoryListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "workspace.create",
               "type": "string"
             },
@@ -6390,6 +6447,17 @@
               "minimum": 0,
               "type": "integer"
             },
+            "project": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/sequenced_event/$defs/WorkspaceProjectInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Host-independent repository identity used to organize the same project\nacross federation members and checkout paths."
+            },
             "tab_count": {
               "format": "uint",
               "minimum": 0,
@@ -6437,6 +6505,25 @@
             "tab_count",
             "active_tab_id",
             "agent_status"
+          ],
+          "type": "object"
+        },
+        "WorkspaceProjectInfo": {
+          "properties": {
+            "is_linked_worktree": {
+              "type": "boolean"
+            },
+            "key": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "name",
+            "is_linked_worktree"
           ],
           "type": "object"
         },
@@ -6978,6 +7065,21 @@
             "failed"
           ],
           "type": "string"
+        },
+        "DirectoryEntry": {
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "path"
+          ],
+          "type": "object"
         },
         "EventData": {
           "oneOf": [
@@ -9228,6 +9330,35 @@
             },
             {
               "properties": {
+                "entries": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/DirectoryEntry"
+                  },
+                  "type": "array"
+                },
+                "parent": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "path": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "directory_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "path",
+                "entries"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "pid": {
                   "format": "uint32",
                   "minimum": 0,
@@ -10453,6 +10584,17 @@
               "minimum": 0,
               "type": "integer"
             },
+            "project": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/WorkspaceProjectInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Host-independent repository identity used to organize the same project\nacross federation members and checkout paths."
+            },
             "tab_count": {
               "format": "uint",
               "minimum": 0,
@@ -10500,6 +10642,25 @@
             "tab_count",
             "active_tab_id",
             "agent_status"
+          ],
+          "type": "object"
+        },
+        "WorkspaceProjectInfo": {
+          "properties": {
+            "is_linked_worktree": {
+              "type": "boolean"
+            },
+            "key": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "name",
+            "is_linked_worktree"
           ],
           "type": "object"
         },

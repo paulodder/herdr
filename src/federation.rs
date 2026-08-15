@@ -1556,6 +1556,7 @@ mod tests {
                 terminal_launcher_argv: None,
                 tokens: Default::default(),
                 worktree: None,
+                project: None,
                 branch: None,
                 git_ahead_behind: None,
             }],

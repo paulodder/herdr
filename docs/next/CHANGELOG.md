@@ -13,6 +13,9 @@
 - Copy mode now supports literal smart-case search with `/` and `?`, repeating with `n` and `N`, match highlighting, and tmux-style cross-line `w`/`b`/`e` word motions. (#1230)
 - Added maki detection with idle, working, and blocked screen states. (#1301, thanks @tontinton)
 
+### Changed
+- The workspace sidebar now recognizes equivalent Git remotes as one project across federation members and clone paths. Main checkouts stay at the project root, while handoffs and linked worktrees are nested beneath it with their owning member shown as the location.
+
 ### Fixed
 - Timed-out federation attachments are now discarded so the next selection opens a fresh SSH transport instead of reusing the stale connection.
 - Native Windows servers now detach from the terminal console that launched them, so closing WezTerm, Windows Terminal, or another host terminal no longer stops persistent pane processes. (#1329)

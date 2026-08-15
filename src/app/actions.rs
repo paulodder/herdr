@@ -3620,6 +3620,7 @@ mod tests {
                 branch: None,
                 git_ahead_behind: None,
                 worktree: None,
+                project: None,
             }],
             tabs: vec![
                 crate::api::schema::TabInfo {
@@ -3718,6 +3719,7 @@ mod tests {
                     terminal_launcher_argv: None,
                     tokens: Default::default(),
                     worktree: None,
+                    project: None,
                     branch: None,
                     git_ahead_behind: None,
                 }],
@@ -4530,6 +4532,7 @@ mod tests {
                 ahead_behind: None,
                 space: Some(crate::workspace::GitSpaceMetadata {
                     key: "other-repo-key".into(),
+                    project_key: "github.com/example/other".into(),
                     checkout_key: "/other/checkout".into(),
                     label: "other".into(),
                     repo_root: "/other/repo".into(),

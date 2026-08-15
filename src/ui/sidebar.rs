@@ -383,19 +383,14 @@ fn space_aggregate_state(app: &AppState, key: &str) -> (AgentState, bool) {
     let local = app
         .workspaces
         .iter()
-        .filter(|ws| ws.worktree_space().is_some_and(|space| space.key == key))
+        .filter(|ws| local_workspace_group_key(ws).as_deref() == Some(key))
         .map(|ws| ws.aggregate_state(&app.terminals));
     let remote = app.federation_states().flat_map(|endpoint| {
         endpoint
             .snapshot
             .iter()
             .flat_map(|snapshot| snapshot.workspaces.iter())
-            .filter(|workspace| {
-                workspace
-                    .worktree
-                    .as_ref()
-                    .is_some_and(|worktree| worktree.repo_key == key)
-            })
+            .filter(|workspace| remote_workspace_group_key(workspace).as_deref() == Some(key))
             .map(|workspace| agent_status_state(workspace.agent_status))
     });
     local
@@ -408,24 +403,41 @@ pub(crate) fn workspace_parent_group_state(
     app: &AppState,
     ws_idx: usize,
 ) -> Option<(String, bool)> {
-    let space = app.workspaces.get(ws_idx)?.worktree_space()?;
-    if space.is_linked_worktree {
+    let entries = workspace_list_entries(app);
+    let index = entries.iter().position(|entry| {
+        matches!(
+            entry,
+            WorkspaceListEntry::Workspace {
+                ws_idx: candidate,
+                indented: false,
+            } if *candidate == ws_idx
+        )
+    })?;
+    if !next_entry_is_indented_workspace(&entries, index) {
         return None;
     }
-    let member_count = app
-        .workspaces
-        .iter()
-        .filter(|ws| {
-            ws.worktree_space()
-                .is_some_and(|member| member.key == space.key)
+    let key = local_workspace_group_key(&app.workspaces[ws_idx])?;
+    Some((key.clone(), app.collapsed_space_keys.contains(&key)))
+}
+
+fn local_workspace_group_key(workspace: &crate::workspace::Workspace) -> Option<String> {
+    workspace
+        .git_space()
+        .map(|space| space.project_key.clone())
+        .or_else(|| workspace.worktree_space().map(|space| space.key.clone()))
+}
+
+fn remote_workspace_group_key(workspace: &crate::api::schema::WorkspaceInfo) -> Option<String> {
+    workspace
+        .project
+        .as_ref()
+        .map(|project| project.key.clone())
+        .or_else(|| {
+            workspace
+                .worktree
+                .as_ref()
+                .map(|worktree| worktree.repo_key.clone())
         })
-        .count();
-    (member_count >= 2).then(|| {
-        (
-            space.key.clone(),
-            app.collapsed_space_keys.contains(&space.key),
-        )
-    })
 }
 
 pub(crate) fn grouped_child_display_label(
@@ -441,6 +453,7 @@ pub(crate) fn grouped_child_display_label(
     };
     branch
         .strip_prefix("worktree/")
+        .or_else(|| branch.strip_prefix("handoff/"))
         .unwrap_or(branch)
         .to_string()
 }
@@ -497,7 +510,7 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
     #[derive(Clone)]
     struct Candidate {
         entry: WorkspaceListEntry,
-        worktree_key: Option<String>,
+        project_key: Option<String>,
         linked_worktree: bool,
     }
 
@@ -515,10 +528,16 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
                     ws_idx,
                     indented: false,
                 },
-                worktree_key: workspace.worktree_space().map(|space| space.key.clone()),
+                project_key: local_workspace_group_key(workspace),
                 linked_worktree: workspace
-                    .worktree_space()
-                    .is_some_and(|space| space.is_linked_worktree),
+                    .git_space()
+                    .map(|space| space.is_linked_worktree)
+                    .or_else(|| {
+                        workspace
+                            .worktree_space()
+                            .map(|space| space.is_linked_worktree)
+                    })
+                    .unwrap_or(false),
             })
             .collect(),
     );
@@ -540,14 +559,18 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
                         workspace_id: workspace.workspace_id.clone(),
                         indented: false,
                     },
-                    worktree_key: workspace
-                        .worktree
-                        .as_ref()
-                        .map(|worktree| worktree.repo_key.clone()),
+                    project_key: remote_workspace_group_key(workspace),
                     linked_worktree: workspace
-                        .worktree
+                        .project
                         .as_ref()
-                        .is_some_and(|worktree| worktree.is_linked_worktree),
+                        .map(|project| project.is_linked_worktree)
+                        .or_else(|| {
+                            workspace
+                                .worktree
+                                .as_ref()
+                                .map(|worktree| worktree.is_linked_worktree)
+                        })
+                        .unwrap_or(false),
                 })
                 .collect(),
         );
@@ -559,7 +582,7 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
         .collect::<Vec<_>>();
     let mut members_by_key = std::collections::HashMap::<String, Vec<usize>>::new();
     for (index, candidate) in candidates.iter().enumerate() {
-        if let Some(key) = &candidate.worktree_key {
+        if let Some(key) = &candidate.project_key {
             members_by_key.entry(key.clone()).or_default().push(index);
         }
     }
@@ -591,7 +614,7 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
         })
     });
     let active_group = active_candidate
-        .and_then(|index| candidates[index].worktree_key.as_deref())
+        .and_then(|index| candidates[index].project_key.as_deref())
         .map(str::to_string);
 
     let with_indentation = |entry: &WorkspaceListEntry, indented| match entry {
@@ -614,7 +637,7 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
     let mut entries = Vec::new();
     for (index, candidate) in candidates.iter().enumerate() {
         let Some(key) = candidate
-            .worktree_key
+            .project_key
             .as_ref()
             .filter(|key| grouped_keys.contains(*key))
         else {
@@ -672,20 +695,14 @@ pub(crate) fn remote_workspace<'a>(
 
 fn workspace_entry_group_key(app: &AppState, entry: &WorkspaceListEntry) -> Option<String> {
     match entry {
-        WorkspaceListEntry::Workspace { ws_idx, .. } => app
-            .workspaces
-            .get(*ws_idx)?
-            .worktree_space()
-            .map(|space| space.key.clone()),
+        WorkspaceListEntry::Workspace { ws_idx, .. } => {
+            local_workspace_group_key(app.workspaces.get(*ws_idx)?)
+        }
         WorkspaceListEntry::RemoteWorkspace {
             endpoint_id,
             workspace_id,
             ..
-        } => remote_workspace(app, endpoint_id, workspace_id)?
-            .1
-            .worktree
-            .as_ref()
-            .map(|worktree| worktree.repo_key.clone()),
+        } => remote_workspace_group_key(remote_workspace(app, endpoint_id, workspace_id)?.1),
     }
 }
 
@@ -701,10 +718,22 @@ fn remote_workspace_row_height(
     };
     let (state, seen) = agent_status_state(workspace.agent_status);
     let label = crate::metadata_tokens::unqualified_name(&workspace.label, &endpoint.endpoint.id);
+    let display_label = if indented {
+        grouped_child_display_label(
+            label,
+            workspace.branch.as_deref(),
+            workspace
+                .project
+                .as_ref()
+                .is_none_or(|project| project.name != label),
+        )
+    } else {
+        label.to_string()
+    };
     (tokens::space_rows(
         &app.sidebar_spaces,
         SpaceTokenContext {
-            workspace: label,
+            workspace: &display_label,
             branch: workspace.branch.as_deref(),
             state_text: state_label(state, seen),
             ahead_behind: workspace.git_ahead_behind,
@@ -1270,6 +1299,24 @@ fn render_remote_workspace_card(
         .map(|(key, _)| space_aggregate_state(app, key))
         .unwrap_or_else(|| agent_status_state(workspace.agent_status));
     let label = crate::metadata_tokens::unqualified_name(&workspace.label, &endpoint.endpoint.id);
+    let display_label = if card.indented {
+        grouped_child_display_label(
+            label,
+            workspace.branch.as_deref(),
+            workspace
+                .project
+                .as_ref()
+                .is_none_or(|project| project.name != label),
+        )
+    } else if card.group_parent {
+        workspace
+            .project
+            .as_ref()
+            .map(|project| project.name.clone())
+            .unwrap_or_else(|| label.to_string())
+    } else {
+        label.to_string()
+    };
     let state_icon = state_dot(state, seen, p);
     let state_text_style = Style::default()
         .fg(state_label_color(state, seen, p))
@@ -1278,7 +1325,7 @@ fn render_remote_workspace_card(
     let rows = tokens::space_rows(
         &app.sidebar_spaces,
         SpaceTokenContext {
-            workspace: label,
+            workspace: &display_label,
             branch: workspace.branch.as_deref(),
             state_text: state_label(state, seen),
             ahead_behind: workspace.git_ahead_behind,
@@ -1674,6 +1721,11 @@ fn render_workspace_list(
         let label = ws.base_display_name_from(&app.terminals, terminal_runtimes);
         let display_label = if card.indented {
             grouped_child_display_label(&label, ws.branch().as_deref(), ws.custom_name.is_some())
+        } else if card.group_parent {
+            ws.git_space()
+                .map(|space| space.label.clone())
+                .or_else(|| ws.worktree_space().map(|space| space.label.clone()))
+                .unwrap_or(label)
         } else {
             label
         };
@@ -2084,6 +2136,7 @@ mod tests {
                     branch: None,
                     git_ahead_behind: None,
                     worktree: None,
+                    project: None,
                 }],
                 tabs: Vec::new(),
                 panes: Vec::new(),
@@ -2332,6 +2385,79 @@ mod tests {
                     indented: true,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn project_identity_groups_different_clone_paths_across_federation() {
+        let mut app = AppState::test_new();
+        app.federation_member_id = "x1".into();
+        app.workspaces = vec![workspace_with_git_space(
+            "geodeck2",
+            "/home/paul/projects/geodeck2/.git",
+        )];
+        app.workspaces[0]
+            .cached_git_space
+            .as_mut()
+            .unwrap()
+            .project_key = "github.com/socialtechnologylab/geodeck2".into();
+        app.workspaces[0].cached_git_space.as_mut().unwrap().label = "geodeck2".into();
+
+        let mut remote = remote_endpoint("tana.stl.dev", "w2", "geodeck2");
+        let remote_workspace = &mut remote.snapshot.as_mut().unwrap().workspaces[0];
+        remote_workspace.branch = Some("handoff/c0633da8625f".into());
+        remote_workspace.project = Some(crate::api::schema::WorkspaceProjectInfo {
+            key: "github.com/socialtechnologylab/geodeck2".into(),
+            name: "geodeck2".into(),
+            is_linked_worktree: true,
+        });
+        app.federation_client_overlay
+            .insert("tana.stl.dev".into(), remote);
+
+        assert_eq!(
+            workspace_list_entries(&app),
+            vec![
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
+                    indented: false,
+                },
+                WorkspaceListEntry::RemoteWorkspace {
+                    endpoint_id: "tana.stl.dev".into(),
+                    workspace_id: "w2".into(),
+                    indented: true,
+                },
+            ]
+        );
+
+        let area = Rect::new(0, 0, 36, 18);
+        app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let cards = compute_workspace_card_areas(&app, area);
+        let parent_row = row_text(
+            terminal.backend().buffer(),
+            cards[0].rect.y,
+            cards[0].rect.width,
+        );
+        let handoff_row = row_text(
+            terminal.backend().buffer(),
+            cards[1].rect.y,
+            cards[1].rect.width,
+        );
+        assert!(
+            parent_row.contains("geodeck2"),
+            "rendered row: {parent_row:?}"
+        );
+        assert!(parent_row.ends_with("x1"), "rendered row: {parent_row:?}");
+        assert!(
+            handoff_row.contains("c0633da8625f"),
+            "rendered row: {handoff_row:?}"
+        );
+        assert!(
+            handoff_row.ends_with("tana.stl.dev"),
+            "rendered row: {handoff_row:?}"
         );
     }
 
@@ -2968,6 +3094,14 @@ mod tests {
     }
 
     #[test]
+    fn grouped_handoff_child_label_uses_compact_handoff_id() {
+        assert_eq!(
+            grouped_child_display_label("geodeck2", Some("handoff/c0633da8625f"), false),
+            "c0633da8625f"
+        );
+    }
+
+    #[test]
     fn workspace_list_truncates_cjk_branch_without_panic() {
         let mut app = crate::app::state::AppState::test_new();
         let mut ws = Workspace::test_new("repo");
@@ -3017,6 +3151,7 @@ mod tests {
         let mut ws = crate::workspace::Workspace::test_new(name);
         ws.cached_git_space = Some(crate::workspace::GitSpaceMetadata {
             key: key.into(),
+            project_key: format!("project:{key}"),
             checkout_key: format!("/repo/{name}"),
             label: "herdr".into(),
             repo_root: std::path::PathBuf::from(format!("/repo/{name}")),
@@ -3182,7 +3317,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_list_entries_do_not_group_normal_git_workspaces() {
+    fn workspace_list_entries_group_normal_clones_of_the_same_project() {
         let mut app = AppState::test_new();
         app.workspaces = vec![
             workspace_with_git_space("one", "repo-key"),
@@ -3198,7 +3333,7 @@ mod tests {
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
-                    indented: false,
+                    indented: true,
                 },
             ]
         );

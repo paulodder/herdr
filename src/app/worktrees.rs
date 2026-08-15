@@ -51,12 +51,16 @@ impl App {
                 "New and open worktree actions start from the repo parent workspace.".into(),
             );
         }
+        let discovered_project_key = git_space.as_ref().map(|space| space.project_key.clone());
 
         let space = existing_membership
             .as_ref()
             .map_or(git_space, |membership| {
                 Some(crate::workspace::GitSpaceMetadata {
                     key: membership.key.clone(),
+                    project_key: discovered_project_key
+                        .clone()
+                        .unwrap_or_else(|| format!("local:{}", membership.key)),
                     checkout_key: membership.checkout_path.display().to_string(),
                     label: membership.label.clone(),
                     repo_root: membership.repo_root.clone(),

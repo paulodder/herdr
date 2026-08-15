@@ -65,10 +65,21 @@ pub struct WorkspaceInfo {
     pub tokens: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorkspaceWorktreeInfo>,
+    /// Host-independent repository identity used to organize the same project
+    /// across federation members and checkout paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<WorkspaceProjectInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_ahead_behind: Option<(usize, usize)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkspaceProjectInfo {
+    pub key: String,
+    pub name: String,
+    pub is_linked_worktree: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

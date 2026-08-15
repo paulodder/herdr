@@ -694,6 +694,11 @@ fn worktree_request_and_response_round_trip() {
                 tokens: HashMap::new(),
                 branch: Some("worktree/api".into()),
                 git_ahead_behind: None,
+                project: Some(WorkspaceProjectInfo {
+                    key: "github.com/ogulcancelik/herdr".into(),
+                    name: "herdr".into(),
+                    is_linked_worktree: true,
+                }),
                 worktree: Some(WorkspaceWorktreeInfo {
                     repo_key: "/repo/herdr/.git".into(),
                     repo_name: "herdr".into(),
@@ -783,6 +788,11 @@ fn worktree_lifecycle_events_round_trip() {
         tokens: HashMap::new(),
         branch: Some("worktree/api".into()),
         git_ahead_behind: None,
+        project: Some(WorkspaceProjectInfo {
+            key: "github.com/ogulcancelik/herdr".into(),
+            name: "herdr".into(),
+            is_linked_worktree: true,
+        }),
         worktree: Some(WorkspaceWorktreeInfo {
             repo_key: "/repo/herdr/.git".into(),
             repo_name: "herdr".into(),
