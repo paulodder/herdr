@@ -576,6 +576,12 @@ pub struct FederatedWorkspaceTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FederatedAgentTarget {
+    pub endpoint_id: String,
+    pub pane_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceCardArea {
     pub ws_idx: usize,
     pub remote: Option<FederatedWorkspaceTarget>,
@@ -1442,6 +1448,9 @@ pub struct AppState {
     /// Latest workspace highlighted by direct global previous/next navigation.
     /// This advances locally even while a remote connection is still loading.
     pub(crate) global_workspace_cursor: Option<FederatedWorkspaceTarget>,
+    /// Latest agent highlighted by direct global previous/next navigation.
+    /// This advances independently of the pane that is still attached.
+    pub(crate) global_agent_cursor: Option<FederatedAgentTarget>,
     /// Ask the foreground thin client to close its inactive federation transports.
     pub(crate) request_federation_connection_reset: bool,
     /// Set when UI interaction requested a clipboard write that must be
@@ -1632,6 +1641,42 @@ impl AppState {
 
         cursor.endpoint_id != self.federation_member_id
             || cursor.workspace_id != active_workspace.id
+    }
+
+    pub(crate) fn federated_agent_target_for_local_pane(
+        &self,
+        ws_idx: usize,
+        pane_id: PaneId,
+    ) -> Option<FederatedAgentTarget> {
+        let workspace = self.workspaces.get(ws_idx)?;
+        let pane_number = workspace.public_pane_number(pane_id)?;
+        Some(FederatedAgentTarget {
+            endpoint_id: self.federation_member_id.clone(),
+            pane_id: crate::workspace::public_pane_id_for_number(&workspace.id, pane_number),
+        })
+    }
+
+    pub(crate) fn global_agent_cursor_is_ahead(&self) -> bool {
+        let Some(cursor) = self.global_agent_cursor.as_ref() else {
+            return false;
+        };
+        let Some((ws_idx, pane_id)) = self.active.and_then(|ws_idx| {
+            self.workspaces
+                .get(ws_idx)?
+                .focused_pane_id()
+                .map(|pane_id| (ws_idx, pane_id))
+        }) else {
+            return false;
+        };
+        let Some(active_agent) = self.federated_agent_target_for_local_pane(ws_idx, pane_id) else {
+            return false;
+        };
+
+        cursor != &active_agent
+    }
+
+    pub(crate) fn global_navigation_cursor_is_ahead(&self) -> bool {
+        self.global_workspace_cursor_is_ahead() || self.global_agent_cursor_is_ahead()
     }
 
     pub(crate) fn mark_session_dirty(&mut self) {
@@ -1856,6 +1901,7 @@ impl AppState {
             request_federation_attach: None,
             request_federation_attach_cancel: false,
             global_workspace_cursor: None,
+            global_agent_cursor: None,
             request_federation_connection_reset: false,
             request_clipboard_write: None,
             creating_new_tab: false,

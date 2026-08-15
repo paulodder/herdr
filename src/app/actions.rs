@@ -312,12 +312,14 @@ impl AppState {
         let Some(tab_idx) = ws.find_tab_index_for_pane(pane_id) else {
             return false;
         };
+        let agent_cursor = self.federated_agent_target_for_local_pane(ws_idx, pane_id);
         let previous = self.current_pane_focus_target();
         let target = PaneFocusTarget {
             workspace_id: ws.id.clone(),
             pane_id,
         };
         if previous.as_ref() == Some(&target) {
+            self.global_agent_cursor = agent_cursor;
             return false;
         }
 
@@ -331,6 +333,7 @@ impl AppState {
             .and_then(|ws| ws.tabs.get_mut(tab_idx))
         {
             tab.layout.focus_pane(pane_id);
+            self.global_agent_cursor = agent_cursor;
             self.previous_pane_focus = previous;
             self.mark_session_dirty();
             self.sync_copy_mode_with_focus();
@@ -1473,6 +1476,7 @@ impl AppState {
     pub fn switch_workspace(&mut self, idx: usize) {
         if idx < self.workspaces.len() {
             let previous_focus = self.current_pane_focus_target();
+            self.global_agent_cursor = None;
             self.active = Some(idx);
             self.selected = idx;
             let workspace_id = self.workspaces[idx].id.clone();
@@ -1510,6 +1514,7 @@ impl AppState {
         }
 
         let previous_focus = self.current_pane_focus_target();
+        self.global_agent_cursor = None;
         let workspace_changed = self.active != Some(ws_idx);
         self.active = Some(ws_idx);
         self.selected = ws_idx;

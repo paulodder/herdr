@@ -254,9 +254,7 @@ impl App {
                 }
             }
             NavigateAction::FocusAgent(idx) => {
-                if let Some(target) = self.agent_entry_target(idx) {
-                    self.state.focus_navigator_target(target);
-                    self.state.ensure_agent_panel_entry_visible(idx);
+                if self.focus_global_agent_entry(idx) {
                     leave_navigate_mode(&mut self.state);
                 }
             }
@@ -275,16 +273,14 @@ impl App {
                 }
             }
             NavigateAction::PreviousAgent => {
-                if let Some((idx, target)) = self.relative_agent_entry(false) {
-                    self.state.focus_navigator_target(target);
-                    self.state.ensure_agent_panel_entry_visible(idx);
+                if let Some(idx) = self.relative_agent_entry(false) {
+                    self.focus_global_agent_entry(idx);
                     leave_navigate_mode(&mut self.state);
                 }
             }
             NavigateAction::NextAgent => {
-                if let Some((idx, target)) = self.relative_agent_entry(true) {
-                    self.state.focus_navigator_target(target);
-                    self.state.ensure_agent_panel_entry_visible(idx);
+                if let Some(idx) = self.relative_agent_entry(true) {
+                    self.focus_global_agent_entry(idx);
                     leave_navigate_mode(&mut self.state);
                 }
             }
@@ -787,13 +783,24 @@ impl App {
         Some((ws.active_tab as isize + delta).rem_euclid(ws.tabs.len() as isize) as usize)
     }
 
-    fn agent_entry_target(&self, idx: usize) -> Option<NavigatorTarget> {
+    fn focus_global_agent_entry(&mut self, idx: usize) -> bool {
         let entries = crate::ui::agent_panel_entries(&self.state);
-        let target = entries.get(idx)?;
-        Some(target.target.navigator_target())
+        let Some(entry) = entries.get(idx) else {
+            return false;
+        };
+        let Some(cursor) = entry.target.federated_target(&self.state) else {
+            return false;
+        };
+        let target = entry.target.navigator_target();
+        if !self.state.focus_navigator_target(target) {
+            return false;
+        }
+        self.state.global_agent_cursor = Some(cursor);
+        self.state.ensure_agent_panel_entry_visible(idx);
+        true
     }
 
-    fn relative_agent_entry(&self, forward: bool) -> Option<(usize, NavigatorTarget)> {
+    fn relative_agent_entry(&self, forward: bool) -> Option<usize> {
         let entries = crate::ui::agent_panel_entries(&self.state);
         if entries.is_empty() {
             return None;
@@ -803,11 +810,20 @@ impl App {
             .active
             .and_then(|idx| self.state.workspaces.get(idx))
             .and_then(crate::workspace::Workspace::focused_pane_id);
-        let current_idx = entries
-            .iter()
-            .position(|entry| match entry.target {
-                crate::ui::AgentPanelTarget::Local { pane_id, .. } => Some(pane_id) == focused,
-                crate::ui::AgentPanelTarget::Remote { .. } => false,
+        let current_idx = self
+            .state
+            .global_agent_cursor
+            .as_ref()
+            .and_then(|cursor| {
+                entries.iter().position(|entry| {
+                    entry.target.federated_target(&self.state).as_ref() == Some(cursor)
+                })
+            })
+            .or_else(|| {
+                entries.iter().position(|entry| match entry.target {
+                    crate::ui::AgentPanelTarget::Local { pane_id, .. } => Some(pane_id) == focused,
+                    crate::ui::AgentPanelTarget::Remote { .. } => false,
+                })
             })
             .unwrap_or(0);
         let next_idx = if forward {
@@ -817,8 +833,7 @@ impl App {
         } else {
             current_idx - 1
         };
-        let target = entries.get(next_idx)?;
-        Some((next_idx, target.target.navigator_target()))
+        Some(next_idx)
     }
 
     fn pass_through_key_to_focused_pane(&mut self, key: TerminalKey) -> bool {
@@ -2009,6 +2024,37 @@ mod tests {
         );
     }
 
+    fn add_remote_agent(app: &mut App, member_id: &str, workspace_id: &str, pane_id: &str) {
+        add_remote_workspace(app, member_id, workspace_id);
+        let snapshot = app
+            .state
+            .federation_client_overlay
+            .get_mut(member_id)
+            .and_then(|endpoint| endpoint.snapshot.as_mut())
+            .expect("remote snapshot");
+        snapshot.agents.push(crate::api::schema::AgentInfo {
+            terminal_id: format!("terminal-{pane_id}"),
+            name: Some(format!("agent-{member_id}")),
+            agent: Some("codex".into()),
+            title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            display_agent: Some("Codex".into()),
+            agent_status: crate::api::schema::AgentStatus::Idle,
+            screen_detection_skipped: false,
+            state_labels: Default::default(),
+            tokens: Default::default(),
+            agent_session: None,
+            workspace_id: workspace_id.into(),
+            tab_id: format!("{workspace_id}:t1"),
+            pane_id: pane_id.into(),
+            focused: true,
+            cwd: None,
+            foreground_cwd: None,
+            revision: 1,
+        });
+    }
+
     #[test]
     fn next_workspace_action_crosses_the_federation_boundary() {
         let mut app = app_with_test_workspaces(&["home"]);
@@ -2071,6 +2117,54 @@ mod tests {
                 endpoint_id: "a-home".into(),
                 workspace_id: app.state.workspaces[0].id.clone(),
             })
+        );
+    }
+
+    #[test]
+    fn repeated_agent_navigation_advances_without_waiting_for_activation() {
+        let mut app = app_with_test_workspaces(&["home"]);
+        app.state.federation_member_id = "a-home".into();
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(
+                Some(crate::detect::Agent::Codex),
+                crate::detect::AgentState::Idle,
+            );
+        add_remote_agent(&mut app, "b-remote", "rw1", "rw1:p1");
+        add_remote_agent(&mut app, "c-remote", "rw2", "rw2:p1");
+
+        app.execute_tui_navigate_action(NavigateAction::NextAgent, ActionContext::Direct);
+        app.execute_tui_navigate_action(NavigateAction::NextAgent, ActionContext::Direct);
+
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(
+            app.state.global_agent_cursor,
+            Some(crate::app::state::FederatedAgentTarget {
+                endpoint_id: "c-remote".into(),
+                pane_id: "rw2:p1".into(),
+            })
+        );
+        let request = app
+            .state
+            .request_federation_attach
+            .as_ref()
+            .expect("the latest remote agent should replace the earlier request");
+        assert_eq!(request.endpoint_id, "c-remote");
+        assert_eq!(request.resource.as_ref().unwrap().resource_id, "rw2:p1");
+
+        app.execute_tui_navigate_action(NavigateAction::NextAgent, ActionContext::Direct);
+
+        assert!(app.state.request_federation_attach.is_none());
+        assert!(app.state.request_federation_attach_cancel);
+        assert_eq!(
+            app.state.global_agent_cursor,
+            app.state.federated_agent_target_for_local_pane(0, root)
         );
     }
 

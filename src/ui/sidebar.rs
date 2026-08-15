@@ -65,6 +65,24 @@ impl AgentPanelTarget {
             Self::Remote { .. } => false,
         }
     }
+
+    pub(crate) fn federated_target(
+        &self,
+        app: &AppState,
+    ) -> Option<crate::app::state::FederatedAgentTarget> {
+        match self {
+            Self::Local {
+                ws_idx, pane_id, ..
+            } => app.federated_agent_target_for_local_pane(*ws_idx, *pane_id),
+            Self::Remote {
+                endpoint_id,
+                pane_id,
+            } => Some(crate::app::state::FederatedAgentTarget {
+                endpoint_id: endpoint_id.clone(),
+                pane_id: pane_id.clone(),
+            }),
+        }
+    }
 }
 
 pub(crate) struct AgentPanelEntry {
@@ -1954,17 +1972,22 @@ fn render_agent_detail(
         }
 
         let is_active = detail.target.is_active(app);
-        let row_style = if is_active {
+        let cursor_selected = app
+            .global_agent_cursor
+            .as_ref()
+            .is_some_and(|cursor| detail.target.federated_target(app).as_ref() == Some(cursor));
+        let row_selected = cursor_selected || (is_active && app.global_agent_cursor.is_none());
+        let row_style = if row_selected {
             Style::default().bg(p.surface_dim)
         } else {
             Style::default()
         };
-        let title_style = if is_active {
+        let title_style = if row_selected {
             Style::default().fg(p.text).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
         };
-        let status_style = if is_active {
+        let status_style = if row_selected {
             Style::default().fg(label_color)
         } else {
             Style::default().fg(label_color).add_modifier(Modifier::DIM)
@@ -2252,6 +2275,51 @@ mod tests {
                 pane_id,
             } if endpoint_id == "c-tana" && pane_id == "w2:p1"
         ));
+    }
+
+    #[test]
+    fn global_agent_cursor_is_the_only_selected_agent_row() {
+        let mut app = AppState::test_new();
+        app.mode = Mode::Terminal;
+        app.federation_member_id = "b-stl".into();
+        app.workspaces = vec![Workspace::test_new("home")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        let root = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        let terminal_state = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal_state.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal_state.set_manual_label("home-agent".into());
+        app.federation_client_overlay.insert(
+            "c-tana".into(),
+            remote_endpoint_with_agent("c-tana", "w2", "geodeck", "tana-agent"),
+        );
+        app.global_agent_cursor = Some(crate::app::state::FederatedAgentTarget {
+            endpoint_id: "c-tana".into(),
+            pane_id: "w2:p1".into(),
+        });
+
+        let area = Rect::new(0, 0, 36, 24);
+        app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let (_, detail_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+        let body = agent_panel_body_rect(detail_area, false);
+        let buffer = terminal.backend().buffer();
+        let local_row = (body.y..body.y + body.height)
+            .find(|row| row_text(buffer, *row, body.width).contains("home"))
+            .expect("local agent row");
+        let remote_row = (body.y..body.y + body.height)
+            .find(|row| row_text(buffer, *row, body.width).contains("geodeck"))
+            .expect("remote agent row");
+
+        assert_ne!(buffer[(body.x, local_row)].bg, app.palette.surface_dim);
+        assert_eq!(buffer[(body.x, remote_row)].bg, app.palette.surface_dim);
     }
 
     fn member_workspace_order(app: &AppState) -> Vec<(String, String)> {

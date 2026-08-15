@@ -309,13 +309,13 @@ pub(super) fn render_panes(
 
     let multi_pane = ws.layout.pane_count() > 1;
     let terminal_active = app.mode == Mode::Terminal;
-    let workspace_cursor_ahead = app.global_workspace_cursor_is_ahead();
+    let navigation_cursor_ahead = app.global_navigation_cursor_is_ahead();
 
     for info in &app.view.pane_infos {
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
             let show_cursor = info.is_focused
                 && terminal_active
-                && !workspace_cursor_ahead
+                && !navigation_cursor_ahead
                 && !pane_is_scrolled_back(rt)
                 && !app.emacs.owns_pane_cursor(info.id) // Emacs layer seam (fork)
                 && app.pane_exposes_host_cursor(ws_idx, info.id);
@@ -371,7 +371,7 @@ pub(super) fn render_panes(
 
     render_pane_borders(app, ws, frame);
 
-    if workspace_cursor_ahead {
+    if navigation_cursor_ahead {
         let buffer = frame.buffer_mut();
         for y in area.y..area.y.saturating_add(area.height) {
             for x in area.x..area.x.saturating_add(area.width) {
@@ -980,6 +980,17 @@ mod tests {
             .draw(|frame| render_panes(&app, &terminal_runtimes, frame, area))
             .unwrap();
         assert!(!terminal.backend().buffer()[(0, 0)]
+            .modifier
+            .contains(Modifier::DIM));
+
+        app.global_agent_cursor = Some(crate::app::state::FederatedAgentTarget {
+            endpoint_id: "tana.stl.dev".into(),
+            pane_id: "remote-pane".into(),
+        });
+        terminal
+            .draw(|frame| render_panes(&app, &terminal_runtimes, frame, area))
+            .unwrap();
+        assert!(terminal.backend().buffer()[(0, 0)]
             .modifier
             .contains(Modifier::DIM));
     }
