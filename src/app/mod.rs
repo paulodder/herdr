@@ -5,6 +5,7 @@
 //! - `input.rs` — key/mouse → action translation
 
 pub(crate) mod actions;
+mod agent_archive;
 mod agent_resume;
 mod agents;
 mod api;
@@ -404,6 +405,7 @@ impl App {
             sidebar_width_source,
             sidebar_section_split,
             collapsed_space_keys,
+            archived_agent_sessions,
         ) = if no_session {
             (
                 Vec::new(),
@@ -413,8 +415,15 @@ impl App {
                 state::SidebarWidthSource::ConfigDefault,
                 0.5_f32,
                 std::collections::HashSet::new(),
+                std::collections::BTreeMap::new(),
             )
         } else if let Some(snap) = crate::persist::load() {
+            let archived_agent_sessions = snap
+                .archived_agent_sessions
+                .iter()
+                .cloned()
+                .map(|archive| (archive.archive_id.clone(), archive))
+                .collect::<std::collections::BTreeMap<_, _>>();
             let history = config
                 .experimental
                 .pane_history
@@ -449,6 +458,7 @@ impl App {
                     },
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
+                    archived_agent_sessions,
                 )
             } else {
                 crate::logging::session_restored(ws.len(), "ok");
@@ -466,6 +476,7 @@ impl App {
                     },
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
+                    archived_agent_sessions,
                 )
             }
         } else {
@@ -477,6 +488,7 @@ impl App {
                 state::SidebarWidthSource::ConfigDefault,
                 0.5_f32,
                 std::collections::HashSet::new(),
+                std::collections::BTreeMap::new(),
             )
         };
 
@@ -545,6 +557,7 @@ impl App {
                 .collect(),
             federation_client_overlay: std::collections::BTreeMap::new(),
             terminals: std::collections::HashMap::new(),
+            archived_agent_sessions,
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
@@ -558,6 +571,9 @@ impl App {
             detach_requested: false,
             request_new_workspace: false,
             request_new_tab: false,
+            request_reopen_archived_agent: None,
+            request_forget_archived_agent: None,
+            request_close_navigator_pane: None,
             request_new_linked_worktree: None,
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
@@ -667,6 +683,7 @@ impl App {
             redraw_on_focus_gained: config.ui.redraw_on_focus_gained,
             mouse_scroll_lines: config.ui.mouse_scroll_lines(),
             confirm_close: config.ui.confirm_close,
+            pending_close_action: None,
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
             pane_borders: config.ui.pane_borders,
             pane_gaps: config.ui.pane_gaps,
@@ -719,6 +736,7 @@ impl App {
         };
 
         state.terminals = restored_terminals;
+        state.reconcile_archived_agent_live_panes();
 
         for ws_idx in 0..state.workspaces.len() {
             let cwd = state.workspaces[ws_idx]
@@ -1008,6 +1026,49 @@ impl App {
                         env: Default::default(),
                     },
                 );
+                needs_render = true;
+            }
+
+            if let Some(archive_id) = self.state.request_reopen_archived_agent.take() {
+                if let Err(message) = self.reopen_archived_agent(&archive_id) {
+                    self.state.emacs.echo = Some(message);
+                }
+                needs_render = true;
+            }
+            if let Some(archive_id) = self.state.request_forget_archived_agent.take() {
+                match self.state.archived_agent_sessions.get(&archive_id) {
+                    Some(archive) if archive.is_closed() => {
+                        self.state.archived_agent_sessions.remove(&archive_id);
+                        self.schedule_session_save();
+                        self.emit_event(crate::api::schema::EventEnvelope {
+                            event: crate::api::schema::EventKind::AgentArchiveForgotten,
+                            data: crate::api::schema::EventData::AgentArchiveForgotten {
+                                archive_id,
+                            },
+                        });
+                        self.state.emacs.echo = Some("Archived agent forgotten".into());
+                    }
+                    Some(_) => {
+                        self.state.emacs.echo =
+                            Some("Close the active agent before forgetting it".into());
+                    }
+                    None => {
+                        self.state.emacs.echo = Some("Archived agent no longer exists".into());
+                    }
+                }
+                needs_render = true;
+            }
+            if let Some((ws_idx, pane_id)) = self.state.request_close_navigator_pane.take() {
+                if let Some(tab_idx) = self
+                    .state
+                    .workspaces
+                    .get(ws_idx)
+                    .and_then(|workspace| workspace.find_tab_index_for_pane(pane_id))
+                {
+                    self.state.switch_workspace_tab(ws_idx, tab_idx);
+                    self.state.focus_pane_in_workspace(ws_idx, pane_id);
+                    self.close_focused_pane_via_api_requires_confirmation();
+                }
                 needs_render = true;
             }
 

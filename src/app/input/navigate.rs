@@ -228,7 +228,11 @@ impl App {
             NavigateAction::CloseWorkspace => {
                 if let Some(ws_idx) = workspace_action_target(&self.state, context) {
                     self.state.selected = ws_idx;
-                    if self.state.confirm_close {
+                    if self.state.confirm_close
+                        || self
+                            .state
+                            .workspace_agent_close_requires_confirmation(ws_idx)
+                    {
                         super::modal::open_confirm_close(&mut self.state);
                     } else {
                         self.close_workspace_idx_via_api(ws_idx);
@@ -454,19 +458,37 @@ impl App {
         let Some(ws_idx) = self.state.active else {
             return false;
         };
-        if self
+        let closes_workspace = self
             .state
             .workspaces
             .get(ws_idx)
-            .is_some_and(|ws| ws.tabs.len() <= 1)
-        {
+            .is_some_and(|ws| ws.tabs.len() <= 1);
+        if closes_workspace {
             if self.state.confirm_implicit_worktree_group_close(ws_idx) {
+                return true;
+            }
+            if self
+                .state
+                .workspace_agent_close_requires_confirmation(ws_idx)
+            {
+                self.state.pending_close_action =
+                    Some(crate::app::state::PendingCloseAction::Workspace { ws_idx });
+                self.state.mode = Mode::ConfirmClose;
                 return true;
             }
             self.close_workspace_idx_via_api(ws_idx);
             return false;
         }
         let tab_idx = self.state.workspaces[ws_idx].active_tab_index();
+        if self
+            .state
+            .tab_agent_close_requires_confirmation(ws_idx, tab_idx)
+        {
+            self.state.pending_close_action =
+                Some(crate::app::state::PendingCloseAction::Tab { ws_idx, tab_idx });
+            self.state.mode = Mode::ConfirmClose;
+            return true;
+        }
         let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) else {
             return false;
         };
@@ -571,10 +593,24 @@ impl App {
         let Some((ws_idx, pane_id)) = self.focused_pane_target() else {
             return false;
         };
-        let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) else {
+        if self.state.close_pane_would_close_workspace(ws_idx, pane_id)
+            && self.state.confirm_implicit_worktree_group_close(ws_idx)
+        {
+            return true;
+        }
+        if self
+            .state
+            .pane_agent_close_requires_confirmation(ws_idx, pane_id)
+        {
+            self.state.pending_close_action =
+                Some(crate::app::state::PendingCloseAction::Pane { ws_idx, pane_id });
+            self.state.mode = Mode::ConfirmClose;
+            return true;
+        }
+        let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) else {
             return false;
         };
-        self.runtime_pane_close("tui.pane.close", pane_id);
+        self.runtime_pane_close("tui.pane.close", public_pane_id);
         self.state.mode == Mode::ConfirmClose
     }
 
@@ -2017,6 +2053,7 @@ mod tests {
                     panes: Vec::new(),
                     layouts: Vec::new(),
                     agents: Vec::new(),
+                    archived_agents: Vec::new(),
                 }),
                 cursor: Some(1),
                 error: None,

@@ -249,8 +249,15 @@ impl App {
                 None
             };
         let terminal_cwd_reported = matches!(ev, AppEvent::TerminalCwdReported { .. });
+        let archive_identity_may_change = matches!(
+            &ev,
+            AppEvent::HookStateReported { .. } | AppEvent::AgentSessionReported { .. }
+        );
         let previous_toast = self.state.toast.clone();
         let pane_updates = self.state.handle_app_event(ev);
+        if archive_identity_may_change {
+            self.emit_archived_agent_events();
+        }
         if let Some(agents) = manifest_update_agents {
             self.reset_agent_detection_for_agents(&agents);
         }
@@ -754,6 +761,44 @@ impl App {
         self.event_hub.push(event);
     }
 
+    pub(super) fn emit_archived_agent_events(&mut self) {
+        let archives = self
+            .state
+            .archived_agent_sessions
+            .values()
+            .map(|archive| crate::api::schema::ArchivedAgentInfo {
+                archive_id: archive.archive_id.clone(),
+                member_id: self.state.federation_member_id.clone(),
+                agent: archive.agent.clone(),
+                title: archive.title.clone(),
+                label: archive.label.clone(),
+                cwd: archive.cwd.display().to_string(),
+                workspace_id: archive.workspace_id.clone(),
+                workspace_name: archive.workspace_name.clone(),
+                project_key: archive
+                    .project_identity
+                    .as_ref()
+                    .map(|project| project.key.clone()),
+                project_name: archive
+                    .project_identity
+                    .as_ref()
+                    .map(|project| project.label.clone()),
+                tab_name: archive.tab_name.clone(),
+                resumable: archive.resume_plan().is_some(),
+                active_pane_id: archive.active_pane_id.clone(),
+                last_user_activity_at: archive.last_user_activity_at,
+                last_agent_activity_at: archive.last_agent_activity_at,
+                closed_at: archive.closed_at,
+            })
+            .collect::<Vec<_>>();
+        for archive in archives {
+            self.emit_event(crate::api::schema::EventEnvelope {
+                event: crate::api::schema::EventKind::AgentArchiveUpdated,
+                data: crate::api::schema::EventData::AgentArchiveUpdated { archive },
+            });
+        }
+    }
+
     pub(crate) fn emit_pane_updated(&mut self, ws_idx: usize, pane_id: crate::layout::PaneId) {
         if let Some(pane) = self.pane_info(ws_idx, pane_id) {
             self.emit_event(crate::api::schema::EventEnvelope {
@@ -1007,6 +1052,12 @@ impl App {
             Method::AgentRead(params) => return self.handle_agent_read(request.id, params),
             Method::AgentExplain(target) => return self.handle_agent_explain(request.id, target),
             Method::AgentSend(params) => return self.handle_agent_send(request.id, params),
+            Method::AgentArchiveReopen(target) => {
+                return self.handle_agent_archive_reopen(request.id, target);
+            }
+            Method::AgentArchiveForget(target) => {
+                return self.handle_agent_archive_forget(request.id, target);
+            }
             Method::PaneSplit(params) => return self.handle_pane_split(request.id, params),
             Method::PaneSwap(params) => return self.handle_pane_swap(request.id, params),
             Method::PaneMove(params) => return self.handle_pane_move(request.id, params),

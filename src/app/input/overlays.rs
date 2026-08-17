@@ -156,7 +156,8 @@ impl App {
                         if let Some((
                             NavigatorTarget::Workspace { .. }
                             | NavigatorTarget::Endpoint { .. }
-                            | NavigatorTarget::RemoteWorkspace { .. },
+                            | NavigatorTarget::RemoteWorkspace { .. }
+                            | NavigatorTarget::ArchivedWorkspace { .. },
                             true,
                         )) = target
                         {

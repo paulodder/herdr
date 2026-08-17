@@ -42,6 +42,7 @@ pub enum FederatedResourceKind {
     Pane,
     Terminal,
     Agent,
+    ArchivedAgent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1212,6 +1213,18 @@ pub fn apply_event(snapshot: &mut SessionSnapshot, envelope: &SequencedEventEnve
                 pane.state_labels.clone_from(state_labels);
             }
         }
+        EventData::AgentArchiveUpdated { archive } => {
+            upsert_by(
+                &mut snapshot.archived_agents,
+                archive.clone(),
+                |left, right| left.archive_id == right.archive_id,
+            );
+        }
+        EventData::AgentArchiveForgotten { archive_id } => {
+            snapshot
+                .archived_agents
+                .retain(|archive| archive.archive_id != *archive_id);
+        }
         EventData::LayoutUpdated { layout } => {
             upsert_by(&mut snapshot.layouts, layout.clone(), |left, right| {
                 left.tab_id == right.tab_id
@@ -1501,6 +1514,7 @@ mod tests {
             panes: Vec::new(),
             layouts: Vec::new(),
             agents: Vec::new(),
+            archived_agents: Vec::new(),
         };
         let error = validate_snapshot_member(&endpoint, &snapshot).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
@@ -1572,6 +1586,7 @@ mod tests {
             panes: vec![pane.clone()],
             layouts: Vec::new(),
             agents: vec![agent_info_from_pane(&pane)],
+            archived_agents: Vec::new(),
         };
 
         apply_event(
@@ -1624,5 +1639,70 @@ mod tests {
         assert!(snapshot.agents.is_empty());
         assert_eq!(snapshot.tabs[0].agent_status, AgentStatus::Unknown);
         assert_eq!(snapshot.workspaces[0].agent_status, AgentStatus::Unknown);
+    }
+
+    #[test]
+    fn archive_events_update_and_forget_cached_federation_records() {
+        let mut snapshot = SessionSnapshot {
+            identity: crate::api::schema::RuntimeIdentity::default(),
+            version: crate::build_info::version(),
+            protocol: crate::protocol::PROTOCOL_VERSION,
+            event_cursor: 0,
+            focused_workspace_id: None,
+            focused_tab_id: None,
+            focused_pane_id: None,
+            workspaces: Vec::new(),
+            tabs: Vec::new(),
+            panes: Vec::new(),
+            layouts: Vec::new(),
+            agents: Vec::new(),
+            archived_agents: Vec::new(),
+        };
+        let archive = crate::api::schema::ArchivedAgentInfo {
+            archive_id: "archive-1".into(),
+            member_id: "tana".into(),
+            agent: "codex".into(),
+            title: Some("old conversation".into()),
+            label: None,
+            cwd: "/repo".into(),
+            workspace_id: "w1".into(),
+            workspace_name: Some("project".into()),
+            project_key: Some("project-key".into()),
+            project_name: Some("project".into()),
+            tab_name: None,
+            resumable: true,
+            active_pane_id: None,
+            last_user_activity_at: Some(1),
+            last_agent_activity_at: Some(2),
+            closed_at: Some(3),
+        };
+
+        apply_event(
+            &mut snapshot,
+            &SequencedEventEnvelope {
+                cursor: 1,
+                event: crate::api::schema::EventEnvelope {
+                    event: crate::api::schema::EventKind::AgentArchiveUpdated,
+                    data: crate::api::schema::EventData::AgentArchiveUpdated {
+                        archive: archive.clone(),
+                    },
+                },
+            },
+        );
+        assert_eq!(snapshot.archived_agents, vec![archive]);
+
+        apply_event(
+            &mut snapshot,
+            &SequencedEventEnvelope {
+                cursor: 2,
+                event: crate::api::schema::EventEnvelope {
+                    event: crate::api::schema::EventKind::AgentArchiveForgotten,
+                    data: crate::api::schema::EventData::AgentArchiveForgotten {
+                        archive_id: "archive-1".into(),
+                    },
+                },
+            },
+        );
+        assert!(snapshot.archived_agents.is_empty());
     }
 }

@@ -305,6 +305,54 @@ pub(crate) fn handle_navigator_key(
                 -((state.navigator_body_rect().height / 2).max(1) as isize),
             ),
         KeyCode::Char(' ') => state.toggle_selected_navigator_workspace_from(terminal_runtimes),
+        KeyCode::Delete => {
+            if let Some(row) = state
+                .navigator_rows_from(terminal_runtimes)
+                .get(state.navigator.selected)
+            {
+                match &row.target {
+                    crate::app::state::NavigatorTarget::ArchivedAgent { archive_id } => {
+                        state.pending_close_action =
+                            Some(crate::app::state::PendingCloseAction::ForgetArchive {
+                                archive_id: archive_id.clone(),
+                            });
+                        state.mode = Mode::ConfirmClose;
+                    }
+                    crate::app::state::NavigatorTarget::RemoteArchivedAgent {
+                        endpoint_id, ..
+                    } => {
+                        state.emacs.echo = Some(format!(
+                            "Forget this archive on its owning member ({endpoint_id})"
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        KeyCode::Char('x') if key.modifiers.is_empty() => {
+            if let Some(row) = state
+                .navigator_rows_from(terminal_runtimes)
+                .get(state.navigator.selected)
+                .cloned()
+            {
+                match row.target {
+                    crate::app::state::NavigatorTarget::Pane {
+                        ws_idx, pane_id, ..
+                    } => {
+                        state.request_close_navigator_pane = Some((ws_idx, pane_id));
+                        state.mode = Mode::Terminal;
+                    }
+                    crate::app::state::NavigatorTarget::RemotePane {
+                        ref endpoint_id, ..
+                    } => {
+                        state.emacs.echo = Some(format!(
+                            "Close this pane on its owning member ({endpoint_id})"
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
         KeyCode::Home => {
             state.navigator.selected = 0;
             state.ensure_navigator_selection_visible_from(terminal_runtimes);
@@ -682,6 +730,11 @@ pub(crate) fn handle_resize_key(state: &mut AppState, raw_key: TerminalKey) {
 }
 
 pub(super) fn open_confirm_close(state: &mut AppState) {
+    state
+        .pending_close_action
+        .get_or_insert(crate::app::state::PendingCloseAction::Workspace {
+            ws_idx: state.selected,
+        });
     state.mode = Mode::ConfirmClose;
 }
 
@@ -696,6 +749,7 @@ pub(super) fn confirm_close_accept(state: &mut AppState) {
 }
 
 pub(super) fn confirm_close_cancel(state: &mut AppState) {
+    state.pending_close_action = None;
     state.mode = Mode::Navigate;
 }
 
@@ -1052,9 +1106,30 @@ impl App {
     }
 
     pub(super) fn confirm_close_accept_via_api(&mut self) {
-        let ws_idx = self.state.selected;
-        if ws_idx < self.state.workspaces.len() {
-            self.close_workspace_idx_via_api(ws_idx);
+        let pending = self.state.pending_close_action.take().unwrap_or(
+            crate::app::state::PendingCloseAction::Workspace {
+                ws_idx: self.state.selected,
+            },
+        );
+        match pending {
+            crate::app::state::PendingCloseAction::Workspace { ws_idx } => {
+                if ws_idx < self.state.workspaces.len() {
+                    self.close_workspace_idx_via_api(ws_idx);
+                }
+            }
+            crate::app::state::PendingCloseAction::Tab { ws_idx, tab_idx } => {
+                if let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) {
+                    self.runtime_tab_close("tui.tab.close.confirmed", tab_id);
+                }
+            }
+            crate::app::state::PendingCloseAction::Pane { ws_idx, pane_id } => {
+                if let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) {
+                    self.runtime_pane_close("tui.pane.close.confirmed", pane_id);
+                }
+            }
+            crate::app::state::PendingCloseAction::ForgetArchive { archive_id } => {
+                self.state.request_forget_archived_agent = Some(archive_id);
+            }
         }
         self.state.mode = if self.state.active.is_some() {
             Mode::Terminal
@@ -1181,7 +1256,11 @@ impl App {
                 Some("Close" | "Close group"),
             ) => {
                 self.state.selected = ws_idx;
-                if self.state.confirm_close {
+                if self.state.confirm_close
+                    || self
+                        .state
+                        .workspace_agent_close_requires_confirmation(ws_idx)
+                {
                     open_confirm_close(&mut self.state);
                 } else {
                     self.close_workspace_idx_via_api(ws_idx);

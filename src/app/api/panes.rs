@@ -1012,6 +1012,7 @@ impl App {
         self.state.remove_alias_shadowed_by_new_pane(moved_pane_id);
         self.state.mark_session_dirty();
         self.schedule_session_save();
+        self.state.reconcile_archived_agent_live_panes();
         let Some(pane) = self.pane_info(target_ws_idx, moved_pane_id) else {
             return encode_error(id, "pane_move_failed", "moved pane is unavailable");
         };
@@ -1089,6 +1090,7 @@ impl App {
             self.emit_layout_updated_snapshot(source_layout);
         }
         self.emit_layout_updated_snapshot((*move_result.target_layout).clone());
+        self.emit_archived_agent_events();
 
         encode_success(id, ResponseResult::PaneMove { move_result })
     }
@@ -1567,6 +1569,7 @@ impl App {
         if let Err(err) = runtime.try_send_bytes(Bytes::from(params.text)) {
             return encode_error(id, "pane_send_failed", err.to_string());
         }
+        self.state.mark_pane_user_activity(pane_id);
 
         encode_success(id, ResponseResult::Ok {})
     }
@@ -1597,6 +1600,7 @@ impl App {
                 return encode_error(id, "pane_send_failed", err.to_string());
             }
         }
+        self.state.mark_pane_user_activity(pane_id);
 
         encode_success(id, ResponseResult::Ok {})
     }
@@ -1629,6 +1633,10 @@ impl App {
         }
         let workspace_snapshot = self.workspace_info(ws_idx);
         let terminal_id = self.state.terminal_id_for_pane(ws_idx, pane_id);
+        let closes_workspace = self.state.close_pane_would_close_workspace(ws_idx, pane_id);
+        if !closes_workspace {
+            self.state.archive_panes_for_explicit_close([pane_id]);
+        }
         let should_close_workspace = {
             let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
                 return Err(pane_not_found(id, &target.pane_id));
@@ -1669,6 +1677,7 @@ impl App {
                 self.emit_layout_updated_event(ws_idx, tab_idx);
             }
         }
+        self.emit_archived_agent_events();
 
         Ok(())
     }
@@ -1693,6 +1702,7 @@ impl App {
                 return encode_error(id, "pane_send_failed", err.to_string());
             }
         }
+        self.state.mark_pane_user_activity(pane_id);
 
         encode_success(id, ResponseResult::Ok {})
     }

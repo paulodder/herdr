@@ -9,7 +9,7 @@ use crate::terminal::TerminalRuntimeRegistry;
 use crate::workspace::Workspace;
 
 /// Current snapshot format version.
-pub(super) const SNAPSHOT_VERSION: u32 = 3;
+pub(super) const SNAPSHOT_VERSION: u32 = 4;
 
 /// Serializable snapshot of the entire herdr session.
 #[derive(Serialize, Deserialize)]
@@ -18,6 +18,8 @@ pub struct SessionSnapshot {
     #[serde(default)]
     pub version: u32,
     pub workspaces: Vec<WorkspaceSnapshot>,
+    #[serde(default)]
+    pub archived_agent_sessions: Vec<crate::agent_archive::ArchivedAgentSession>,
     pub active: Option<usize>,
     pub selected: usize,
     #[serde(default)]
@@ -111,6 +113,10 @@ pub struct PaneSnapshot {
     pub launch_argv: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restore_argv: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_user_activity_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_agent_activity_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -181,6 +187,8 @@ struct RawSessionSnapshot {
     #[serde(default)]
     workspaces: Vec<serde_json::Value>,
     #[serde(default)]
+    archived_agent_sessions: Vec<crate::agent_archive::ArchivedAgentSession>,
+    #[serde(default)]
     active: Option<usize>,
     #[serde(default)]
     selected: usize,
@@ -200,6 +208,7 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
             .into_iter()
             .map(migrate_workspace)
             .collect::<Result<Vec<_>, _>>()?,
+        archived_agent_sessions: raw.archived_agent_sessions,
         active: raw.active,
         selected: raw.selected,
         sidebar_width: raw.sidebar_width,
@@ -262,6 +271,10 @@ pub fn capture(
         crate::terminal::TerminalState,
     >,
     terminal_runtimes: &TerminalRuntimeRegistry,
+    archived_agent_sessions: &std::collections::BTreeMap<
+        String,
+        crate::agent_archive::ArchivedAgentSession,
+    >,
     active: Option<usize>,
     selected: usize,
     sidebar_width: u16,
@@ -274,6 +287,7 @@ pub fn capture(
             .iter()
             .map(|workspace| capture_workspace(workspace, terminals, terminal_runtimes))
             .collect(),
+        archived_agent_sessions: archived_agent_sessions.values().cloned().collect(),
         active,
         selected,
         sidebar_width: Some(sidebar_width),
@@ -349,6 +363,16 @@ fn capture_tab(
             .get(id)
             .and_then(|pane| terminals.get(&pane.attached_terminal_id))
             .and_then(|terminal| terminal.restore_argv.clone());
+        let last_user_activity_at = tab
+            .panes
+            .get(id)
+            .and_then(|pane| terminals.get(&pane.attached_terminal_id))
+            .and_then(|terminal| terminal.last_user_activity_at);
+        let last_agent_activity_at = tab
+            .panes
+            .get(id)
+            .and_then(|pane| terminals.get(&pane.attached_terminal_id))
+            .and_then(|terminal| terminal.last_agent_activity_at);
         let agent_session =
             tab.panes
                 .get(id)
@@ -382,6 +406,8 @@ fn capture_tab(
                 agent_session,
                 launch_argv,
                 restore_argv,
+                last_user_activity_at,
+                last_agent_activity_at,
             },
         );
     }
@@ -550,6 +576,7 @@ mod tests {
             &state.workspaces,
             &state.terminals,
             terminal_runtimes,
+            &state.archived_agent_sessions,
             state.active,
             state.selected,
             state.sidebar_width,
@@ -577,6 +604,7 @@ mod tests {
         let snap = SessionSnapshot {
             version: SNAPSHOT_VERSION,
             workspaces: vec![],
+            archived_agent_sessions: vec![],
             active: None,
             selected: 0,
             sidebar_width: Some(26),
@@ -625,6 +653,8 @@ mod tests {
                 agent_session: None,
                 launch_argv: None,
                 restore_argv: None,
+                last_user_activity_at: None,
+                last_agent_activity_at: None,
             },
         );
         panes.insert(
@@ -636,10 +666,13 @@ mod tests {
                 agent_session: None,
                 launch_argv: None,
                 restore_argv: None,
+                last_user_activity_at: None,
+                last_agent_activity_at: None,
             },
         );
 
         let snap = SessionSnapshot {
+            archived_agent_sessions: Vec::new(),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("wproj".to_string()),
                 custom_name: Some("pi-mono".to_string()),
@@ -1227,6 +1260,8 @@ mod tests {
                 agent_session: None,
                 launch_argv: None,
                 restore_argv: None,
+                last_user_activity_at: None,
+                last_agent_activity_at: None,
             },
         );
         panes.insert(
@@ -1240,11 +1275,14 @@ mod tests {
                 agent_session: None,
                 launch_argv: None,
                 restore_argv: None,
+                last_user_activity_at: None,
+                last_agent_activity_at: None,
             },
         );
 
         let snap = SessionSnapshot {
             version: SNAPSHOT_VERSION,
+            archived_agent_sessions: Vec::new(),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("test-ws".to_string()),
                 custom_name: Some("fallback test".to_string()),

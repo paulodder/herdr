@@ -59,6 +59,23 @@ fn render_search(app: &AppState, frame: &mut Frame, area: Rect) {
             .values()
             .filter_map(|endpoint| endpoint.snapshot.as_ref())
             .map(|snapshot| snapshot.panes.len())
+            .sum::<usize>()
+        + app
+            .archived_agent_sessions
+            .values()
+            .filter(|archive| archive.is_closed())
+            .count()
+        + app
+            .federation_states()
+            .filter(|endpoint| endpoint.endpoint.id != app.federation_member_id)
+            .filter_map(|endpoint| endpoint.snapshot.as_ref())
+            .map(|snapshot| {
+                snapshot
+                    .archived_agents
+                    .iter()
+                    .filter(|archive| archive.active_pane_id.is_none())
+                    .count()
+            })
             .sum::<usize>();
     let mut spans = vec![Span::styled(" / ", focus_style)];
     let query = app.navigator.query.trim();
@@ -328,7 +345,8 @@ fn selected_detail(app: &AppState, terminal_runtimes: &TerminalRuntimeRegistry) 
         NavigatorTarget::Endpoint { endpoint_id }
         | NavigatorTarget::RemoteWorkspace { endpoint_id, .. }
         | NavigatorTarget::RemoteTab { endpoint_id, .. }
-        | NavigatorTarget::RemotePane { endpoint_id, .. } => {
+        | NavigatorTarget::RemotePane { endpoint_id, .. }
+        | NavigatorTarget::RemoteArchivedAgent { endpoint_id, .. } => {
             federation_detail(app, endpoint_id, row)
         }
         NavigatorTarget::Workspace { ws_idx } => workspace_detail(app, terminal_runtimes, *ws_idx),
@@ -340,6 +358,19 @@ fn selected_detail(app: &AppState, terminal_runtimes: &TerminalRuntimeRegistry) 
             tab_idx,
             pane_id,
         } => pane_detail(app, terminal_runtimes, *ws_idx, *tab_idx, *pane_id),
+        NavigatorTarget::ArchivedWorkspace { workspace_id } => workspace_id.clone(),
+        NavigatorTarget::ArchivedAgent { archive_id } => app
+            .archived_agent_sessions
+            .get(archive_id)
+            .map(|archive| {
+                format!(
+                    "{} · {} · {}",
+                    archive.agent,
+                    archive.cwd.display(),
+                    row.meta
+                )
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -534,6 +565,10 @@ fn render_footer(app: &AppState, frame: &mut Frame, area: Rect) {
             Span::styled(" states  ", dim),
             Span::styled("j/k/↑↓", key),
             Span::styled(" move  ", dim),
+            Span::styled("x", key),
+            Span::styled(" close  ", dim),
+            Span::styled("del", key),
+            Span::styled(" forget  ", dim),
             Span::styled("esc", key),
             Span::styled(" close", dim),
         ])

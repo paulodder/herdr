@@ -867,6 +867,10 @@ pub(crate) enum NavigatorTarget {
         endpoint_id: String,
         pane_id: String,
     },
+    RemoteArchivedAgent {
+        endpoint_id: String,
+        archive_id: String,
+    },
     Workspace {
         ws_idx: usize,
     },
@@ -879,6 +883,20 @@ pub(crate) enum NavigatorTarget {
         tab_idx: usize,
         pane_id: PaneId,
     },
+    ArchivedWorkspace {
+        workspace_id: String,
+    },
+    ArchivedAgent {
+        archive_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PendingCloseAction {
+    Workspace { ws_idx: usize },
+    Tab { ws_idx: usize, tab_idx: usize },
+    Pane { ws_idx: usize, pane_id: PaneId },
+    ForgetArchive { archive_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1408,6 +1426,8 @@ pub struct AppState {
         std::collections::BTreeMap<String, crate::federation::EndpointState>,
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
+    pub(crate) archived_agent_sessions:
+        std::collections::BTreeMap<String, crate::agent_archive::ArchivedAgentSession>,
     /// Terminal ids whose size is currently owned by a direct attach client.
     pub direct_attach_resize_locks: std::collections::HashSet<crate::terminal::TerminalId>,
     pub(crate) pane_id_aliases: std::collections::HashMap<u32, PaneId>,
@@ -1425,6 +1445,9 @@ pub struct AppState {
     pub detach_requested: bool,
     pub request_new_workspace: bool,
     pub request_new_tab: bool,
+    pub(crate) request_reopen_archived_agent: Option<String>,
+    pub(crate) request_forget_archived_agent: Option<String>,
+    pub(crate) request_close_navigator_pane: Option<(usize, PaneId)>,
     pub request_new_linked_worktree: Option<usize>,
     pub request_open_existing_worktree: Option<usize>,
     pub request_new_workspace_cwd: Option<std::path::PathBuf>,
@@ -1531,6 +1554,7 @@ pub struct AppState {
     pub redraw_on_focus_gained: bool,
     pub mouse_scroll_lines: usize,
     pub confirm_close: bool,
+    pub(crate) pending_close_action: Option<PendingCloseAction>,
     pub prompt_new_tab_name: bool,
     pub pane_borders: bool,
     pub pane_gaps: bool,
@@ -1874,6 +1898,7 @@ impl AppState {
             federation: std::collections::BTreeMap::new(),
             federation_client_overlay: std::collections::BTreeMap::new(),
             terminals: std::collections::HashMap::new(),
+            archived_agent_sessions: std::collections::BTreeMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
@@ -1887,6 +1912,9 @@ impl AppState {
             detach_requested: false,
             request_new_workspace: false,
             request_new_tab: false,
+            request_reopen_archived_agent: None,
+            request_forget_archived_agent: None,
+            request_close_navigator_pane: None,
             request_new_linked_worktree: None,
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
@@ -1987,6 +2015,7 @@ impl AppState {
             redraw_on_focus_gained: true,
             mouse_scroll_lines: crate::config::DEFAULT_MOUSE_SCROLL_LINES,
             confirm_close: true,
+            pending_close_action: None,
             prompt_new_tab_name: true,
             pane_borders: true,
             pane_gaps: false,

@@ -125,6 +125,10 @@ pub enum Method {
     AgentFocus(AgentTarget),
     #[serde(rename = "agent.start")]
     AgentStart(AgentStartParams),
+    #[serde(rename = "agent.archive.reopen")]
+    AgentArchiveReopen(AgentArchiveTarget),
+    #[serde(rename = "agent.archive.forget")]
+    AgentArchiveForget(AgentArchiveTarget),
     #[serde(rename = "pane.split")]
     PaneSplit(PaneSplitParams),
     #[serde(rename = "pane.swap")]

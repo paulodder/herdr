@@ -136,12 +136,7 @@ async fn emacs_conformance_corpus_matches() {
                 case.name
             );
             for (index, step) in case.steps.iter().enumerate() {
-                replay_keys(
-                    &mut app,
-                    &case.name,
-                    &step.keys,
-                    step.input_kind.as_deref(),
-                );
+                replay_keys(&mut app, &case.name, &step.keys, step.input_kind.as_deref());
                 let expected = match step.comparison.as_deref().unwrap_or("exact") {
                     "exact" => {
                         assert!(

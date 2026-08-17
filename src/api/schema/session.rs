@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::agents::AgentInfo;
+use super::agents::{AgentInfo, ArchivedAgentInfo};
 use super::panes::{PaneInfo, PaneLayoutSnapshot};
 use super::tabs::TabInfo;
 use super::workspaces::WorkspaceInfo;
@@ -42,4 +42,6 @@ pub struct SessionSnapshot {
     pub panes: Vec<PaneInfo>,
     pub layouts: Vec<PaneLayoutSnapshot>,
     pub agents: Vec<AgentInfo>,
+    #[serde(default)]
+    pub archived_agents: Vec<ArchivedAgentInfo>,
 }

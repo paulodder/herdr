@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Added a federated agent archive: explicitly closed agent panes, tabs, and workspaces remain in `C-x b` under their workspace, retain separate user/agent/close activity times, and can be resumed on their owning server. Working, blocked, and non-resumable agents prompt before close; archived records remain until confirmed deletion.
 - Added Ctrl-click image previews for local and federated pane paths. PNG files can open in a dismissible Kitty-graphics overlay on the foreground client, while JPEG, GIF, WebP, BMP, and non-Kitty PNG previews use the client's native image viewer.
 - Added personal Herdr federation: stable server/session identities, atomic cursor-based `session.watch`, reconnecting SSH endpoint streams, a combined local/remote navigator, native remote attachment, and `herdr federation list|watch|attach` diagnostics.
 - Added an in-app **reset connections** action and `M-x reset-federation-connections` command that close inactive federation transports without restarting the client or persistent servers.

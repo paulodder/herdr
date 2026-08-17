@@ -1004,6 +1004,7 @@ impl HeadlessServer {
             &self.app.state.workspaces,
             &self.app.state.terminals,
             &self.app.terminal_runtimes,
+            &self.app.state.archived_agent_sessions,
             self.app.state.active,
             self.app.state.selected,
             self.app.state.sidebar_width,
@@ -2631,7 +2632,10 @@ impl HeadlessServer {
 
         if let Some(request) = self.app.state.request_federation_attach.take() {
             let endpoint_id = request.endpoint_id;
-            info!(client_id, endpoint_id, "federation workspace activation requested");
+            info!(
+                client_id,
+                endpoint_id, "federation workspace activation requested"
+            );
             let directory = self.federation_directory();
             self.send_client_graphics_cleanup(client_id);
             self.send_to_client(

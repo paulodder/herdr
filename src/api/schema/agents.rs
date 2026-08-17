@@ -23,6 +23,11 @@ pub struct AgentSendParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentArchiveTarget {
+    pub archive_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentRenameParams {
     pub target: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -89,4 +94,34 @@ pub struct AgentSessionInfo {
     pub agent: String,
     pub kind: crate::agent_resume::AgentSessionRefKind,
     pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ArchivedAgentInfo {
+    pub archive_id: String,
+    pub member_id: String,
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub cwd: String,
+    pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_name: Option<String>,
+    pub resumable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_pane_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_user_activity_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_agent_activity_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<u64>,
 }

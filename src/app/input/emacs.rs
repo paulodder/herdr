@@ -2427,9 +2427,7 @@ mod tests {
         app.route_client_input(vec![0x1b, b'<']); // M-<
         app.route_client_input(vec![0x00]); // C-SPC
 
-        app.route_client_input(
-            b"\x1b[110;5:1u\x1b[110;5:2u\x1b[110;5:2u\x1b[110;5:3u".to_vec(),
-        );
+        app.route_client_input(b"\x1b[110;5:1u\x1b[110;5:2u\x1b[110;5:2u\x1b[110;5:3u".to_vec());
 
         let text = app.state.emacs.text_mode.as_ref().unwrap();
         assert_eq!(text.point.row, 3, "press plus two repeats move three rows");
@@ -2447,8 +2445,7 @@ mod tests {
         // already moved point. The late one-shot repeat must not set mark
         // again at row 1; C-n repeats must continue to row 3.
         app.route_client_input(
-            b"\x1b[32;5:1u\x1b[110;5:1u\x1b[32;5:2u\x1b[110;5:2u\x1b[110;5:2u"
-                .to_vec(),
+            b"\x1b[32;5:1u\x1b[110;5:1u\x1b[32;5:2u\x1b[110;5:2u\x1b[110;5:2u".to_vec(),
         );
 
         let text = app.state.emacs.text_mode.as_ref().unwrap();

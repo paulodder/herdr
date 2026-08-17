@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 21,
+  "protocol": 22,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -78,6 +78,103 @@
             "unknown"
           ],
           "type": "string"
+        },
+        "ArchivedAgentInfo": {
+          "properties": {
+            "active_pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "agent": {
+              "type": "string"
+            },
+            "archive_id": {
+              "type": "string"
+            },
+            "closed_at": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "last_agent_activity_at": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "last_user_activity_at": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "member_id": {
+              "type": "string"
+            },
+            "project_key": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "project_name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resumable": {
+              "type": "boolean"
+            },
+            "tab_name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            },
+            "workspace_name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "archive_id",
+            "member_id",
+            "agent",
+            "cwd",
+            "workspace_id",
+            "resumable"
+          ],
+          "type": "object"
         },
         "EventData": {
           "oneOf": [
@@ -665,6 +762,38 @@
             },
             {
               "properties": {
+                "archive": {
+                  "$ref": "#/schemas/event/$defs/ArchivedAgentInfo"
+                },
+                "type": {
+                  "const": "agent_archive_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "archive"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "archive_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "agent_archive_forgotten",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "archive_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "layout": {
                   "$ref": "#/schemas/event/$defs/PaneLayoutSnapshot"
                 },
@@ -707,6 +836,8 @@
             "pane_exited",
             "pane_agent_detected",
             "pane_agent_status_changed",
+            "agent_archive_updated",
+            "agent_archive_forgotten",
             "layout_updated"
           ],
           "type": "string"
@@ -1241,6 +1372,17 @@
     },
     "request": {
       "$defs": {
+        "AgentArchiveTarget": {
+          "properties": {
+            "archive_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "archive_id"
+          ],
+          "type": "object"
+        },
         "AgentReadParams": {
           "properties": {
             "format": {
@@ -4683,6 +4825,38 @@
         {
           "properties": {
             "method": {
+              "const": "agent.archive.reopen",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentArchiveTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.archive.forget",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentArchiveTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.split",
               "type": "string"
             },
@@ -5454,6 +5628,103 @@
           ],
           "type": "string"
         },
+        "ArchivedAgentInfo": {
+          "properties": {
+            "active_pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "agent": {
+              "type": "string"
+            },
+            "archive_id": {
+              "type": "string"
+            },
+            "closed_at": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "last_agent_activity_at": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "last_user_activity_at": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "member_id": {
+              "type": "string"
+            },
+            "project_key": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "project_name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resumable": {
+              "type": "boolean"
+            },
+            "tab_name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            },
+            "workspace_name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "archive_id",
+            "member_id",
+            "agent",
+            "cwd",
+            "workspace_id",
+            "resumable"
+          ],
+          "type": "object"
+        },
         "EventData": {
           "oneOf": [
             {
@@ -6040,6 +6311,38 @@
             },
             {
               "properties": {
+                "archive": {
+                  "$ref": "#/schemas/sequenced_event/$defs/ArchivedAgentInfo"
+                },
+                "type": {
+                  "const": "agent_archive_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "archive"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "archive_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "agent_archive_forgotten",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "archive_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "layout": {
                   "$ref": "#/schemas/sequenced_event/$defs/PaneLayoutSnapshot"
                 },
@@ -6082,6 +6385,8 @@
             "pane_exited",
             "pane_agent_detected",
             "pane_agent_status_changed",
+            "agent_archive_updated",
+            "agent_archive_forgotten",
             "layout_updated"
           ],
           "type": "string"
@@ -7050,6 +7355,103 @@
           ],
           "type": "string"
         },
+        "ArchivedAgentInfo": {
+          "properties": {
+            "active_pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "agent": {
+              "type": "string"
+            },
+            "archive_id": {
+              "type": "string"
+            },
+            "closed_at": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "last_agent_activity_at": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "last_user_activity_at": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "member_id": {
+              "type": "string"
+            },
+            "project_key": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "project_name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resumable": {
+              "type": "boolean"
+            },
+            "tab_name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            },
+            "workspace_name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "archive_id",
+            "member_id",
+            "agent",
+            "cwd",
+            "workspace_id",
+            "resumable"
+          ],
+          "type": "object"
+        },
         "ClientWindowTitleReason": {
           "enum": [
             "set",
@@ -7667,6 +8069,38 @@
             },
             {
               "properties": {
+                "archive": {
+                  "$ref": "#/schemas/success_response/$defs/ArchivedAgentInfo"
+                },
+                "type": {
+                  "const": "agent_archive_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "archive"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "archive_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "agent_archive_forgotten",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "archive_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "layout": {
                   "$ref": "#/schemas/success_response/$defs/PaneLayoutSnapshot"
                 },
@@ -7724,6 +8158,8 @@
             "pane_exited",
             "pane_agent_detected",
             "pane_agent_status_changed",
+            "agent_archive_updated",
+            "agent_archive_forgotten",
             "layout_updated"
           ],
           "type": "string"
@@ -10413,6 +10849,13 @@
             "agents": {
               "items": {
                 "$ref": "#/schemas/success_response/$defs/AgentInfo"
+              },
+              "type": "array"
+            },
+            "archived_agents": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ArchivedAgentInfo"
               },
               "type": "array"
             },

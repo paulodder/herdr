@@ -214,6 +214,8 @@ pub enum EventKind {
     PaneExited,
     PaneAgentDetected,
     PaneAgentStatusChanged,
+    AgentArchiveUpdated,
+    AgentArchiveForgotten,
     LayoutUpdated,
 }
 
@@ -244,6 +246,8 @@ impl EventKind {
             EventKind::PaneExited => "pane.exited",
             EventKind::PaneAgentDetected => "pane.agent_detected",
             EventKind::PaneAgentStatusChanged => "pane.agent_status_changed",
+            EventKind::AgentArchiveUpdated => "agent.archive_updated",
+            EventKind::AgentArchiveForgotten => "agent.archive_forgotten",
             EventKind::LayoutUpdated => "layout.updated",
         }
     }
@@ -275,6 +279,8 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::PaneExited,
     EventKind::PaneAgentDetected,
     EventKind::PaneAgentStatusChanged,
+    EventKind::AgentArchiveUpdated,
+    EventKind::AgentArchiveForgotten,
     EventKind::LayoutUpdated,
 ];
 
@@ -533,6 +539,12 @@ pub enum EventData {
         display_agent: Option<String>,
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         state_labels: HashMap<String, String>,
+    },
+    AgentArchiveUpdated {
+        archive: super::agents::ArchivedAgentInfo,
+    },
+    AgentArchiveForgotten {
+        archive_id: String,
     },
     LayoutUpdated {
         layout: super::panes::PaneLayoutSnapshot,

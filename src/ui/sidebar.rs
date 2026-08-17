@@ -2190,6 +2190,7 @@ mod tests {
                 panes: Vec::new(),
                 layouts: Vec::new(),
                 agents: Vec::new(),
+                archived_agents: Vec::new(),
             }),
             cursor: Some(1),
             error: None,

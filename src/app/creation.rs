@@ -132,7 +132,6 @@ impl App {
         }
     }
 
-    #[cfg(test)]
     pub(super) fn create_tab_with_options(
         &mut self,
         initial_cwd: PathBuf,

@@ -160,6 +160,8 @@ impl App {
                 .state
                 .terminal_ids_for_tab(target_ws_idx, target_tab_idx);
             let plugin_pane_ids = self.state.pane_ids_for_tab(target_ws_idx, target_tab_idx);
+            self.state
+                .archive_panes_for_explicit_close(plugin_pane_ids.iter().copied());
             let Some(ws) = self.state.workspaces.get_mut(target_ws_idx) else {
                 return encode_error(id, "tab_not_found", "tab not found");
             };
@@ -175,6 +177,7 @@ impl App {
                     },
                 });
             }
+            self.emit_archived_agent_events();
         }
 
         let Some(new_tab_idx) = self.state.workspaces[ws_idx]

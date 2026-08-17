@@ -1,14 +1,61 @@
 use bytes::Bytes;
 
 use crate::api::schema::{
-    AgentRenameParams, AgentSendParams, AgentStartParams, AgentTarget, PaneReadResult, ReadFormat,
-    ReadSource, ResponseResult,
+    AgentArchiveTarget, AgentRenameParams, AgentSendParams, AgentStartParams, AgentTarget,
+    PaneReadResult, ReadFormat, ReadSource, ResponseResult,
 };
 use crate::app::App;
 
 use super::responses::{encode_error, encode_error_body, encode_success};
 
 impl App {
+    pub(super) fn handle_agent_archive_reopen(
+        &mut self,
+        id: String,
+        target: AgentArchiveTarget,
+    ) -> String {
+        let (ws_idx, pane_id) = match self.reopen_archived_agent(&target.archive_id) {
+            Ok(target) => target,
+            Err(message) => return encode_error(id, "agent_archive_reopen_failed", message),
+        };
+        let Some(pane) = self.pane_info(ws_idx, pane_id) else {
+            return encode_error(
+                id,
+                "agent_archive_reopen_failed",
+                "reopened pane has no public identity",
+            );
+        };
+        encode_success(id, ResponseResult::PaneInfo { pane })
+    }
+
+    pub(super) fn handle_agent_archive_forget(
+        &mut self,
+        id: String,
+        target: AgentArchiveTarget,
+    ) -> String {
+        let Some(archive) = self.state.archived_agent_sessions.get(&target.archive_id) else {
+            return encode_error(id, "agent_archive_not_found", "archived agent not found");
+        };
+        if !archive.is_closed() {
+            return encode_error(
+                id,
+                "agent_archive_active",
+                "close the active agent before forgetting its archive",
+            );
+        }
+        self.state
+            .archived_agent_sessions
+            .remove(&target.archive_id);
+        self.schedule_session_save();
+        self.emit_event(crate::api::schema::EventEnvelope {
+            event: crate::api::schema::EventKind::AgentArchiveForgotten,
+            data: crate::api::schema::EventData::AgentArchiveForgotten {
+                archive_id: target.archive_id,
+            },
+        });
+        encode_success(id, ResponseResult::Ok {})
+    }
+
     pub(super) fn handle_agent_list(&mut self, id: String) -> String {
         encode_success(
             id,
@@ -190,6 +237,7 @@ impl App {
         if let Err(err) = runtime.try_send_bytes(Bytes::from(params.text)) {
             return encode_error(id, "agent_send_failed", err.to_string());
         }
+        self.state.mark_pane_user_activity(resolved.pane_id);
 
         encode_success(id, ResponseResult::Ok {})
     }

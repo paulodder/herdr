@@ -255,7 +255,7 @@ impl App {
             .and_then(|ws| ws.tabs.get(tab_idx))
             .map(|tab| tab.layout.pane_ids())
             .unwrap_or_default();
-        let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
+        let Some(ws) = self.state.workspaces.get(ws_idx) else {
             return tab_not_found(id, &target.tab_id);
         };
         if ws.tabs.len() <= 1 {
@@ -265,6 +265,11 @@ impl App {
                 "cannot close the last tab in a workspace",
             );
         }
+        self.state
+            .archive_panes_for_explicit_close(pane_ids.iter().copied());
+        let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
+            return tab_not_found(id, &target.tab_id);
+        };
         if !ws.close_tab(tab_idx) {
             return encode_error(
                 id,
@@ -283,6 +288,7 @@ impl App {
                 workspace_id,
             },
         });
+        self.emit_archived_agent_events();
 
         encode_success(id, ResponseResult::Ok {})
     }

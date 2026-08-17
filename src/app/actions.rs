@@ -361,6 +361,15 @@ impl AppState {
         for ws in &self.workspaces {
             self.navigator.expanded_workspaces.insert(ws.id.clone());
         }
+        for archive in self
+            .archived_agent_sessions
+            .values()
+            .filter(|archive| archive.is_closed())
+        {
+            self.navigator
+                .expanded_workspaces
+                .insert(archive.workspace_id.clone());
+        }
         let federation_workspaces = self
             .federation_states()
             .map(|endpoint| {
@@ -370,11 +379,19 @@ impl AppState {
                         .snapshot
                         .as_ref()
                         .map(|snapshot| {
-                            snapshot
+                            let mut workspace_ids = snapshot
                                 .workspaces
                                 .iter()
                                 .map(|workspace| workspace.workspace_id.clone())
-                                .collect::<Vec<_>>()
+                                .collect::<std::collections::BTreeSet<_>>();
+                            workspace_ids.extend(
+                                snapshot
+                                    .archived_agents
+                                    .iter()
+                                    .filter(|archive| archive.active_pane_id.is_none())
+                                    .map(|archive| archive.workspace_id.clone()),
+                            );
+                            workspace_ids.into_iter().collect::<Vec<_>>()
                         })
                         .unwrap_or_default(),
                 )
@@ -411,6 +428,11 @@ impl AppState {
         let query = self.navigator.query.trim().to_lowercase();
         let query_kind = navigator_query_kind(&query, self.navigator.state_filter);
         let mut rows = Vec::new();
+        let live_workspace_ids = self
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.id.as_str())
+            .collect::<std::collections::HashSet<_>>();
         for (ws_idx, ws) in self.workspaces.iter().enumerate() {
             let workspace_label = ws.base_display_name_from(&self.terminals, terminal_runtimes);
             let activity = workspace_activity_summary(ws, &self.terminals);
@@ -455,10 +477,20 @@ impl AppState {
                 || self.navigator.expanded_workspaces.contains(&ws.id);
             let (state, seen) = ws.aggregate_state(&self.terminals);
             let pane_count = ws.tabs.iter().map(|tab| tab.panes.len()).sum::<usize>();
+            let archive_count = self
+                .archived_agent_sessions
+                .values()
+                .filter(|archive| archive.is_closed() && archive.workspace_id == ws.id)
+                .count();
+            let count_label = if archive_count == 0 {
+                format!("{pane_count}")
+            } else {
+                format!("{pane_count} open · {archive_count} archived")
+            };
             rows.push(NavigatorRow {
                 target: NavigatorTarget::Workspace { ws_idx },
                 depth: 0,
-                label: format!("{workspace_label} ({pane_count})"),
+                label: format!("{workspace_label} ({count_label})"),
                 meta: activity,
                 status: state,
                 seen,
@@ -468,6 +500,57 @@ impl AppState {
                 is_tab: false,
                 expanded,
                 search_text: workspace_search_text,
+            });
+            if expanded {
+                rows.extend(child_rows);
+            }
+        }
+
+        let archived_workspace_ids = self
+            .archived_agent_sessions
+            .values()
+            .filter(|archive| {
+                archive.is_closed() && !live_workspace_ids.contains(archive.workspace_id.as_str())
+            })
+            .map(|archive| archive.workspace_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        for workspace_id in archived_workspace_ids {
+            let child_rows = self.archived_agent_rows(&workspace_id, query_kind, &query);
+            if child_rows.is_empty() {
+                continue;
+            }
+            let archive = self
+                .archived_agent_sessions
+                .values()
+                .find(|archive| archive.is_closed() && archive.workspace_id == *workspace_id);
+            let label = archive
+                .and_then(|archive| archive.workspace_name.clone())
+                .or_else(|| {
+                    archive.and_then(|archive| {
+                        archive
+                            .project_identity
+                            .as_ref()
+                            .map(|project| project.label.clone())
+                    })
+                })
+                .unwrap_or_else(|| workspace_id.clone());
+            let expanded = !matches!(query_kind, NavigatorQueryKind::Empty)
+                || self.navigator.expanded_workspaces.contains(&workspace_id);
+            rows.push(NavigatorRow {
+                target: NavigatorTarget::ArchivedWorkspace {
+                    workspace_id: workspace_id.clone(),
+                },
+                depth: 0,
+                label,
+                meta: format!("{} archived", child_rows.len()),
+                status: AgentState::Unknown,
+                seen: false,
+                is_current: false,
+                is_endpoint: false,
+                is_workspace: true,
+                is_tab: false,
+                expanded,
+                search_text: workspace_id.to_lowercase(),
             });
             if expanded {
                 rows.extend(child_rows);
@@ -528,11 +611,24 @@ impl AppState {
             endpoint.status == crate::federation::EndpointConnectionStatus::Connected;
 
         let mut children = Vec::new();
+        let live_workspace_ids = snapshot
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.workspace_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
         for workspace in &snapshot.workspaces {
             let workspace_label =
                 crate::metadata_tokens::unqualified_name(&workspace.label, &endpoint.endpoint.id)
                     .to_string();
             let (state, seen) = agent_status_state(workspace.agent_status);
+            let archive_count = snapshot
+                .archived_agents
+                .iter()
+                .filter(|archive| {
+                    archive.active_pane_id.is_none()
+                        && archive.workspace_id == workspace.workspace_id
+                })
+                .count();
             let workspace_search = format!(
                 "{} {} {} {}",
                 label, workspace_label, endpoint.endpoint.target, endpoint.endpoint.session
@@ -651,6 +747,16 @@ impl AppState {
                 }
                 workspace_children.append(&mut pane_rows);
             }
+            workspace_children.extend(remote_archived_agent_rows(
+                endpoint,
+                snapshot.archived_agents.iter().filter(|archive| {
+                    archive.active_pane_id.is_none()
+                        && archive.workspace_id == workspace.workspace_id
+                }),
+                query_kind,
+                query,
+                1,
+            ));
             if workspace_matches || !workspace_children.is_empty() {
                 let expanded = !matches!(query_kind, NavigatorQueryKind::Empty)
                     || self
@@ -668,17 +774,35 @@ impl AppState {
                     depth: 0,
                     label: workspace_label,
                     meta: if endpoint_available {
-                        format!(
-                            "{} · {} panes",
-                            state_label_text(state, seen),
-                            workspace.pane_count
-                        )
+                        if archive_count == 0 {
+                            format!(
+                                "{} · {} panes",
+                                state_label_text(state, seen),
+                                workspace.pane_count
+                            )
+                        } else {
+                            format!(
+                                "{} · {} panes · {} archived",
+                                state_label_text(state, seen),
+                                workspace.pane_count,
+                                archive_count
+                            )
+                        }
                     } else {
-                        format!(
-                            "{} · last snapshot · {} panes",
-                            federation_connection_label(endpoint.status),
-                            workspace.pane_count
-                        )
+                        if archive_count == 0 {
+                            format!(
+                                "{} · last snapshot · {} panes",
+                                federation_connection_label(endpoint.status),
+                                workspace.pane_count
+                            )
+                        } else {
+                            format!(
+                                "{} · last snapshot · {} panes · {} archived",
+                                federation_connection_label(endpoint.status),
+                                workspace.pane_count,
+                                archive_count
+                            )
+                        }
                     },
                     status: state,
                     seen: seen && endpoint_available,
@@ -692,6 +816,73 @@ impl AppState {
                 if expanded {
                     children.extend(workspace_children);
                 }
+            }
+        }
+
+        let archived_workspace_ids = snapshot
+            .archived_agents
+            .iter()
+            .filter(|archive| {
+                archive.active_pane_id.is_none()
+                    && !live_workspace_ids.contains(archive.workspace_id.as_str())
+            })
+            .map(|archive| archive.workspace_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        for workspace_id in archived_workspace_ids {
+            let workspace_children = remote_archived_agent_rows(
+                endpoint,
+                snapshot.archived_agents.iter().filter(|archive| {
+                    archive.active_pane_id.is_none() && archive.workspace_id == workspace_id
+                }),
+                query_kind,
+                query,
+                1,
+            );
+            if workspace_children.is_empty() {
+                continue;
+            }
+            let archive = snapshot.archived_agents.iter().find(|archive| {
+                archive.active_pane_id.is_none() && archive.workspace_id == workspace_id
+            });
+            let workspace_label = archive
+                .and_then(|archive| archive.workspace_name.clone())
+                .or_else(|| archive.and_then(|archive| archive.project_name.clone()))
+                .unwrap_or_else(|| workspace_id.clone());
+            let expanded = !matches!(query_kind, NavigatorQueryKind::Empty)
+                || self
+                    .navigator
+                    .expanded_workspaces
+                    .contains(&federation_workspace_key(
+                        &endpoint.endpoint.id,
+                        &workspace_id,
+                    ));
+            children.push(NavigatorRow {
+                target: NavigatorTarget::RemoteWorkspace {
+                    endpoint_id: endpoint.endpoint.id.clone(),
+                    workspace_id: workspace_id.clone(),
+                },
+                depth: 0,
+                label: workspace_label,
+                meta: if endpoint_available {
+                    format!("{} archived", workspace_children.len())
+                } else {
+                    format!(
+                        "{} · {} archived",
+                        federation_connection_label(endpoint.status),
+                        workspace_children.len()
+                    )
+                },
+                status: AgentState::Unknown,
+                seen: false,
+                is_current: false,
+                is_endpoint: false,
+                is_workspace: true,
+                is_tab: false,
+                expanded,
+                search_text: format!("{label} {workspace_id}").to_lowercase(),
+            });
+            if expanded {
+                children.extend(workspace_children);
             }
         }
 
@@ -739,7 +930,84 @@ impl AppState {
             }
             rows.extend(filtered_panes);
         }
+        rows.extend(self.archived_agent_rows(&ws.id, query_kind, query));
         rows
+    }
+
+    fn archived_agent_rows(
+        &self,
+        workspace_id: &str,
+        query_kind: NavigatorQueryKind,
+        query: &str,
+    ) -> Vec<NavigatorRow> {
+        let mut archives = self
+            .archived_agent_sessions
+            .values()
+            .filter(|archive| archive.is_closed() && archive.workspace_id == workspace_id)
+            .collect::<Vec<_>>();
+        archives.sort_by_key(|archive| std::cmp::Reverse(archive.closed_at.unwrap_or_default()));
+        archives
+            .into_iter()
+            .filter_map(|archive| {
+                let label = archive
+                    .title
+                    .clone()
+                    .or_else(|| archive.label.clone())
+                    .or_else(|| archive.agent_name.clone())
+                    .unwrap_or_else(|| archive.agent.clone());
+                let meta = archived_activity_summary(
+                    archive.last_user_activity_at,
+                    archive.last_agent_activity_at,
+                    archive.closed_at,
+                    archive.resume_plan().is_some(),
+                );
+                let search_text = format!(
+                    "{label} {} {} {} {} {} {} {} {} {meta}",
+                    archive.agent,
+                    archive.cwd.display(),
+                    archive.tab_name.as_deref().unwrap_or_default(),
+                    archive.workspace_name.as_deref().unwrap_or_default(),
+                    archive
+                        .project_identity
+                        .as_ref()
+                        .map(|project| project.key.as_str())
+                        .unwrap_or_default(),
+                    archive
+                        .project_identity
+                        .as_ref()
+                        .map(|project| project.label.as_str())
+                        .unwrap_or_default(),
+                    archive
+                        .worktree_space
+                        .as_ref()
+                        .map(|space| space.label.as_str())
+                        .unwrap_or_default(),
+                    archive
+                        .worktree_space
+                        .as_ref()
+                        .map(|space| space.repo_root.display().to_string())
+                        .unwrap_or_default()
+                )
+                .to_lowercase();
+                navigator_row_matches(query_kind, query, AgentState::Unknown, false, &search_text)
+                    .then(|| NavigatorRow {
+                        target: NavigatorTarget::ArchivedAgent {
+                            archive_id: archive.archive_id.clone(),
+                        },
+                        depth: 1,
+                        label,
+                        meta,
+                        status: AgentState::Unknown,
+                        seen: false,
+                        is_current: false,
+                        is_endpoint: false,
+                        is_workspace: false,
+                        is_tab: false,
+                        expanded: false,
+                        search_text,
+                    })
+            })
+            .collect()
     }
 
     fn navigator_tab_row(&self, ws_idx: usize, tab_idx: usize) -> NavigatorRow {
@@ -962,6 +1230,7 @@ impl AppState {
                 endpoint_id,
                 workspace_id,
             } => federation_workspace_key(&endpoint_id, &workspace_id),
+            NavigatorTarget::ArchivedWorkspace { workspace_id } => workspace_id,
             _ => return,
         };
         if self.navigator.expanded_workspaces.contains(&key) {
@@ -1022,6 +1291,14 @@ impl AppState {
                 &endpoint_id,
                 crate::federation::FederatedResourceKind::Pane,
                 Some(pane_id),
+            ),
+            NavigatorTarget::RemoteArchivedAgent {
+                endpoint_id,
+                archive_id,
+            } => self.request_federation_target(
+                &endpoint_id,
+                crate::federation::FederatedResourceKind::ArchivedAgent,
+                Some(archive_id),
             ),
             NavigatorTarget::Workspace { ws_idx } => {
                 if ws_idx >= self.workspaces.len() {
@@ -1090,6 +1367,12 @@ impl AppState {
                 }
                 false
             }
+            NavigatorTarget::ArchivedWorkspace { .. } => false,
+            NavigatorTarget::ArchivedAgent { archive_id } => {
+                self.request_reopen_archived_agent = Some(archive_id);
+                self.mode = Mode::Terminal;
+                true
+            }
         }
     }
 
@@ -1138,9 +1421,13 @@ impl AppState {
         let Some(endpoint) = self.federation_state(endpoint_id).cloned() else {
             return false;
         };
-        if endpoint.status != crate::federation::EndpointConnectionStatus::Connected {
+        if matches!(
+            endpoint.status,
+            crate::federation::EndpointConnectionStatus::Disabled
+                | crate::federation::EndpointConnectionStatus::Incompatible
+        ) {
             self.emacs.echo = Some(format!(
-                "{} is {}. Reconnect it from x1 and retry; the last snapshot remains read-only.",
+                "{} is {}; it cannot be opened until that federation member is enabled and compatible.",
                 endpoint.endpoint.id,
                 federation_connection_label(endpoint.status)
             ));
@@ -1208,6 +1495,115 @@ fn navigator_row_matches(
         NavigatorQueryKind::Empty => true,
         NavigatorQueryKind::State(filter) => navigator_state_filter_matches(filter, state, seen),
         NavigatorQueryKind::Text => navigator_matches(query, search_text),
+    }
+}
+
+fn remote_archived_agent_rows<'a>(
+    endpoint: &crate::federation::EndpointState,
+    archives: impl Iterator<Item = &'a crate::api::schema::ArchivedAgentInfo>,
+    query_kind: NavigatorQueryKind,
+    query: &str,
+    depth: u8,
+) -> Vec<NavigatorRow> {
+    let mut archives = archives.collect::<Vec<_>>();
+    archives.sort_by_key(|archive| std::cmp::Reverse(archive.closed_at.unwrap_or_default()));
+    let available = endpoint.status == crate::federation::EndpointConnectionStatus::Connected;
+    archives
+        .into_iter()
+        .filter_map(|archive| {
+            let label = archive
+                .title
+                .clone()
+                .or_else(|| archive.label.clone())
+                .unwrap_or_else(|| archive.agent.clone());
+            let activity = archived_activity_summary(
+                archive.last_user_activity_at,
+                archive.last_agent_activity_at,
+                archive.closed_at,
+                archive.resumable,
+            );
+            let owner = endpoint
+                .endpoint
+                .label
+                .as_deref()
+                .unwrap_or(&endpoint.endpoint.id);
+            let meta = if available {
+                format!("{owner} · {activity}")
+            } else {
+                format!(
+                    "{owner} · {} · {activity}",
+                    federation_connection_label(endpoint.status)
+                )
+            };
+            let search_text = format!(
+                "{} {label} {} {} {} {} {} {} {meta}",
+                endpoint.endpoint.id,
+                archive.agent,
+                archive.cwd,
+                archive.tab_name.as_deref().unwrap_or_default(),
+                archive.workspace_name.as_deref().unwrap_or_default(),
+                archive.project_key.as_deref().unwrap_or_default(),
+                archive.project_name.as_deref().unwrap_or_default()
+            )
+            .to_lowercase();
+            navigator_row_matches(query_kind, query, AgentState::Unknown, false, &search_text).then(
+                || NavigatorRow {
+                    target: NavigatorTarget::RemoteArchivedAgent {
+                        endpoint_id: endpoint.endpoint.id.clone(),
+                        archive_id: archive.archive_id.clone(),
+                    },
+                    depth,
+                    label,
+                    meta,
+                    status: AgentState::Unknown,
+                    seen: false,
+                    is_current: false,
+                    is_endpoint: false,
+                    is_workspace: false,
+                    is_tab: false,
+                    expanded: false,
+                    search_text,
+                },
+            )
+        })
+        .collect()
+}
+
+fn archived_activity_summary(
+    last_user_activity_at: Option<u64>,
+    last_agent_activity_at: Option<u64>,
+    closed_at: Option<u64>,
+    resumable: bool,
+) -> String {
+    let now = crate::agent_archive::unix_ms_now();
+    let mut parts = Vec::new();
+    if let Some(at) = last_user_activity_at {
+        parts.push(format!("you {}", relative_activity_age(now, at)));
+    }
+    if let Some(at) = last_agent_activity_at {
+        parts.push(format!("agent {}", relative_activity_age(now, at)));
+    }
+    if let Some(at) = closed_at {
+        parts.push(format!("closed {}", relative_activity_age(now, at)));
+    }
+    if !resumable {
+        parts.push("not resumable".to_string());
+    }
+    if parts.is_empty() {
+        "archived".to_string()
+    } else {
+        parts.join(" · ")
+    }
+}
+
+fn relative_activity_age(now: u64, at: u64) -> String {
+    let seconds = now.saturating_sub(at) / 1_000;
+    match seconds {
+        0..=59 => "just now".to_string(),
+        60..=3_599 => format!("{}m ago", seconds / 60),
+        3_600..=86_399 => format!("{}h ago", seconds / 3_600),
+        86_400..=2_591_999 => format!("{}d ago", seconds / 86_400),
+        _ => format!("{}mo ago", seconds / 2_592_000),
     }
 }
 
@@ -2013,6 +2409,245 @@ impl AppState {
         }
     }
 
+    pub(crate) fn archive_panes_for_explicit_close(
+        &mut self,
+        pane_ids: impl IntoIterator<Item = PaneId>,
+    ) {
+        let now = crate::agent_archive::unix_ms_now();
+        let mut captured = Vec::new();
+        let mut closing_public_pane_ids = Vec::new();
+        for pane_id in pane_ids {
+            let Some((ws_idx, tab_idx, terminal)) =
+                self.workspaces
+                    .iter()
+                    .enumerate()
+                    .find_map(|(ws_idx, workspace)| {
+                        workspace
+                            .tabs
+                            .iter()
+                            .enumerate()
+                            .find_map(|(tab_idx, tab)| {
+                                let pane = tab.panes.get(&pane_id)?;
+                                let terminal = self.terminals.get(&pane.attached_terminal_id)?;
+                                Some((ws_idx, tab_idx, terminal))
+                            })
+                    })
+            else {
+                continue;
+            };
+            let Some(agent) = terminal.effective_agent_label().map(str::to_string) else {
+                continue;
+            };
+            let workspace = &self.workspaces[ws_idx];
+            if let Some(number) = workspace.public_pane_number(pane_id) {
+                closing_public_pane_ids.push(crate::workspace::public_pane_id_for_number(
+                    &workspace.id,
+                    number,
+                ));
+            }
+            let tab = &workspace.tabs[tab_idx];
+            let session = terminal
+                .hook_authority
+                .as_ref()
+                .and_then(|authority| {
+                    authority.session_ref.as_ref().map(|session_ref| {
+                        (
+                            authority.source.clone(),
+                            session_ref.kind,
+                            session_ref.value.clone(),
+                        )
+                    })
+                })
+                .or_else(|| {
+                    terminal.persisted_agent_session.as_ref().map(|session| {
+                        (
+                            session.source.clone(),
+                            session.session_ref.kind,
+                            session.session_ref.value.clone(),
+                        )
+                    })
+                });
+            let (source, session_ref) = session
+                .map(|(source, kind, value)| {
+                    (
+                        Some(source),
+                        Some(crate::agent_archive::ArchivedAgentSessionRef { kind, value }),
+                    )
+                })
+                .unwrap_or((None, None));
+            let presentation = terminal.effective_presentation();
+            captured.push(crate::agent_archive::ArchivedAgentSession {
+                archive_id: String::new(),
+                source,
+                agent,
+                session_ref,
+                title: presentation
+                    .title
+                    .or_else(|| terminal.terminal_title_stripped()),
+                label: terminal.manual_label.clone(),
+                agent_name: terminal.agent_name.clone(),
+                cwd: terminal.cwd.clone(),
+                project_root: workspace
+                    .worktree_space()
+                    .map(|space| space.repo_root.clone())
+                    .or_else(|| Some(workspace.identity_cwd.clone())),
+                workspace_id: workspace.id.clone(),
+                workspace_name: workspace.custom_name.clone(),
+                project_identity: workspace.project_identity().cloned(),
+                worktree_space: workspace.worktree_space().cloned(),
+                tab_name: tab.custom_name.clone(),
+                last_user_activity_at: terminal.last_user_activity_at,
+                last_agent_activity_at: terminal.last_agent_activity_at,
+                closed_at: Some(now),
+                active_pane_id: None,
+            });
+        }
+
+        let mut changed = false;
+        for archive in self.archived_agent_sessions.values_mut() {
+            if archive
+                .active_pane_id
+                .as_ref()
+                .is_some_and(|pane_id| closing_public_pane_ids.contains(pane_id))
+            {
+                archive.active_pane_id = None;
+                archive.closed_at = Some(now);
+                changed = true;
+            }
+        }
+        for mut archive in captured {
+            let existing_id = archive.dedupe_key().and_then(|dedupe_key| {
+                self.archived_agent_sessions
+                    .values()
+                    .find(|existing| existing.dedupe_key().as_deref() == Some(&dedupe_key))
+                    .map(|existing| existing.archive_id.clone())
+            });
+            let archive_id = existing_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            if let Some(previous) = self.archived_agent_sessions.get(&archive_id) {
+                archive.last_user_activity_at = archive
+                    .last_user_activity_at
+                    .or(previous.last_user_activity_at);
+                archive.last_agent_activity_at = archive
+                    .last_agent_activity_at
+                    .or(previous.last_agent_activity_at);
+            }
+            archive.archive_id = archive_id.clone();
+            self.archived_agent_sessions.insert(archive_id, archive);
+            changed = true;
+        }
+        if changed {
+            self.mark_session_dirty();
+        }
+    }
+
+    pub(crate) fn reconcile_archived_agent_live_panes(&mut self) {
+        let mut live_by_session = std::collections::HashMap::new();
+        for workspace in &self.workspaces {
+            for tab in &workspace.tabs {
+                for (pane_id, pane) in &tab.panes {
+                    let Some(terminal) = self.terminals.get(&pane.attached_terminal_id) else {
+                        continue;
+                    };
+                    let Some(session) = terminal.persisted_agent_session.as_ref() else {
+                        continue;
+                    };
+                    let Some(number) = workspace.public_pane_number(*pane_id) else {
+                        continue;
+                    };
+                    live_by_session.insert(
+                        crate::agent_resume::dedupe_key(
+                            &session.source,
+                            &session.agent,
+                            &session.session_ref,
+                        ),
+                        crate::workspace::public_pane_id_for_number(&workspace.id, number),
+                    );
+                }
+            }
+        }
+        for archive in self.archived_agent_sessions.values_mut() {
+            archive.active_pane_id = archive
+                .dedupe_key()
+                .and_then(|key| live_by_session.get(&key).cloned());
+            if archive.active_pane_id.is_some() {
+                archive.closed_at = None;
+            }
+        }
+    }
+
+    pub(crate) fn mark_pane_user_activity(&mut self, pane_id: PaneId) {
+        let Some(terminal_id) = self.workspaces.iter().find_map(|workspace| {
+            workspace
+                .pane_state(pane_id)
+                .map(|pane| pane.attached_terminal_id.clone())
+        }) else {
+            return;
+        };
+        let Some(terminal) = self.terminals.get_mut(&terminal_id) else {
+            return;
+        };
+        if terminal.effective_agent_label().is_some() {
+            terminal.last_user_activity_at = Some(crate::agent_archive::unix_ms_now());
+        }
+    }
+
+    pub(crate) fn pane_agent_close_requires_confirmation(
+        &self,
+        ws_idx: usize,
+        pane_id: PaneId,
+    ) -> bool {
+        let Some(terminal_id) = self.terminal_id_for_pane(ws_idx, pane_id) else {
+            return false;
+        };
+        let Some(terminal) = self.terminals.get(&terminal_id) else {
+            return false;
+        };
+        let Some(agent) = terminal.effective_agent_label() else {
+            return false;
+        };
+        if matches!(terminal.state, AgentState::Working | AgentState::Blocked) {
+            return true;
+        }
+        let resumable = terminal
+            .hook_authority
+            .as_ref()
+            .and_then(|authority| {
+                authority.session_ref.as_ref().and_then(|session_ref| {
+                    crate::agent_resume::plan(&authority.source, agent, session_ref)
+                })
+            })
+            .or_else(|| {
+                terminal
+                    .persisted_agent_session
+                    .as_ref()
+                    .and_then(|session| {
+                        crate::agent_resume::plan(
+                            &session.source,
+                            &session.agent,
+                            &session.session_ref,
+                        )
+                    })
+            })
+            .is_some();
+        !resumable
+    }
+
+    pub(crate) fn tab_agent_close_requires_confirmation(
+        &self,
+        ws_idx: usize,
+        tab_idx: usize,
+    ) -> bool {
+        self.pane_ids_for_tab(ws_idx, tab_idx)
+            .into_iter()
+            .any(|pane_id| self.pane_agent_close_requires_confirmation(ws_idx, pane_id))
+    }
+
+    pub(crate) fn workspace_agent_close_requires_confirmation(&self, ws_idx: usize) -> bool {
+        self.pane_ids_for_workspace(ws_idx)
+            .into_iter()
+            .any(|pane_id| self.pane_agent_close_requires_confirmation(ws_idx, pane_id))
+    }
+
     pub(crate) fn remove_plugin_pane_records(
         &mut self,
         pane_ids: impl IntoIterator<Item = PaneId>,
@@ -2066,6 +2701,7 @@ impl AppState {
                 crate::logging::workspace_closed(&workspace_id);
             }
         }
+        self.archive_panes_for_explicit_close(pane_ids.iter().copied());
         self.remove_plugin_pane_records(pane_ids);
         for idx in close_indices.iter().rev() {
             self.workspaces.remove(*idx);
@@ -2355,6 +2991,8 @@ impl AppState {
     pub(crate) fn confirm_implicit_worktree_group_close(&mut self, ws_idx: usize) -> bool {
         if self.confirm_close && self.workspace_close_would_close_worktree_group(ws_idx) {
             self.selected = ws_idx;
+            self.pending_close_action =
+                Some(super::state::PendingCloseAction::Workspace { ws_idx });
             self.mode = Mode::ConfirmClose;
             true
         } else {
@@ -2412,6 +3050,11 @@ impl AppState {
             .and_then(|i| self.workspaces.get(i).and_then(|ws| ws.focused_pane_id()))
             .into_iter()
             .collect::<Vec<_>>();
+        let closes_workspace =
+            active.is_some_and(|ws_idx| self.close_focused_pane_would_close_workspace(ws_idx));
+        if !closes_workspace {
+            self.archive_panes_for_explicit_close(pane_ids.iter().copied());
+        }
         let should_close_workspace = active
             .and_then(|i| self.workspaces.get_mut(i))
             .is_some_and(|ws| ws.close_focused());
@@ -2468,6 +3111,7 @@ impl AppState {
                 .get(ws_idx)
                 .map(|ws| self.pane_ids_for_tab(ws_idx, ws.active_tab))
                 .unwrap_or_default();
+            self.archive_panes_for_explicit_close(pane_ids.iter().copied());
             let Some(ws) = self.workspaces.get_mut(ws_idx) else {
                 return false;
             };
@@ -3301,10 +3945,15 @@ impl AppState {
         let previous_seen = self.workspaces[ws_idx].pane_state(pane_id)?.seen;
         let mutation = {
             let terminal = self.terminals.get_mut(&terminal_id)?;
-            update(terminal)?
+            let mutation = update(terminal)?;
+            if terminal.effective_agent_label().is_some() {
+                terminal.last_agent_activity_at = Some(crate::agent_archive::unix_ms_now());
+            }
+            mutation
         };
         if mutation.session_ref_changed {
             self.mark_session_dirty();
+            self.reconcile_archived_agent_live_panes();
         }
         let change = mutation.effective_state_change?;
         if change.previous_state != change.state {
@@ -3740,6 +4389,7 @@ mod tests {
             }],
             layouts: Vec::new(),
             agents: Vec::new(),
+            archived_agents: Vec::new(),
         };
         state.federation.insert(
             endpoint.id.clone(),
@@ -3802,6 +4452,7 @@ mod tests {
                 panes: Vec::new(),
                 layouts: Vec::new(),
                 agents: Vec::new(),
+                archived_agents: Vec::new(),
             }),
             cursor: Some(1),
             error: None,
@@ -6306,5 +6957,100 @@ mod tests {
         assert!(!deferred);
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "notes");
+    }
+
+    fn configure_archivable_codex(
+        state: &mut AppState,
+        agent_state: AgentState,
+        resumable: bool,
+    ) -> PaneId {
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.terminal_id_for_pane(0, pane_id).unwrap();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Codex), agent_state);
+        terminal.last_user_activity_at = Some(1_000);
+        terminal.last_agent_activity_at = Some(2_000);
+        if resumable {
+            terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                session_ref: crate::agent_resume::AgentSessionRef::id("session-1").unwrap(),
+            });
+        }
+        pane_id
+    }
+
+    #[test]
+    fn explicit_close_capture_archives_agent_metadata_and_timestamps() {
+        let mut state = app_with_workspaces(&["project"]);
+        let pane_id = configure_archivable_codex(&mut state, AgentState::Idle, true);
+
+        state.archive_panes_for_explicit_close([pane_id]);
+
+        let archive = state.archived_agent_sessions.values().next().unwrap();
+        assert_eq!(archive.agent, "codex");
+        assert_eq!(archive.workspace_id, state.workspaces[0].id);
+        assert_eq!(archive.last_user_activity_at, Some(1_000));
+        assert_eq!(archive.last_agent_activity_at, Some(2_000));
+        assert!(archive.closed_at.is_some());
+        assert!(archive.resume_plan().is_some());
+    }
+
+    #[test]
+    fn archive_capture_deduplicates_native_agent_session() {
+        let mut state = app_with_workspaces(&["project"]);
+        let pane_id = configure_archivable_codex(&mut state, AgentState::Idle, true);
+
+        state.archive_panes_for_explicit_close([pane_id]);
+        let archive_id = state
+            .archived_agent_sessions
+            .keys()
+            .next()
+            .cloned()
+            .unwrap();
+        state.archive_panes_for_explicit_close([pane_id]);
+
+        assert_eq!(state.archived_agent_sessions.len(), 1);
+        assert!(state.archived_agent_sessions.contains_key(&archive_id));
+    }
+
+    #[test]
+    fn close_confirmation_is_required_for_active_or_non_resumable_agents() {
+        let mut working = app_with_workspaces(&["working"]);
+        let working_pane = configure_archivable_codex(&mut working, AgentState::Working, true);
+        assert!(working.pane_agent_close_requires_confirmation(0, working_pane));
+
+        let mut idle = app_with_workspaces(&["idle"]);
+        let idle_pane = configure_archivable_codex(&mut idle, AgentState::Idle, true);
+        assert!(!idle.pane_agent_close_requires_confirmation(0, idle_pane));
+
+        let mut non_resumable = app_with_workspaces(&["non-resumable"]);
+        let pane = configure_archivable_codex(&mut non_resumable, AgentState::Idle, false);
+        assert!(non_resumable.pane_agent_close_requires_confirmation(0, pane));
+    }
+
+    #[test]
+    fn navigator_keeps_archived_agent_under_archived_only_workspace() {
+        let mut state = app_with_workspaces(&["project"]);
+        let pane_id = configure_archivable_codex(&mut state, AgentState::Idle, true);
+        let workspace_id = state.workspaces[0].id.clone();
+        state.archive_panes_for_explicit_close([pane_id]);
+        state.workspaces.clear();
+        state.terminals.clear();
+        state.active = None;
+        state
+            .navigator
+            .expanded_workspaces
+            .insert(workspace_id.clone());
+
+        let rows = state.navigator_rows();
+
+        assert!(rows.iter().any(|row| matches!(
+            &row.target,
+            NavigatorTarget::ArchivedWorkspace { workspace_id: id } if id == &workspace_id
+        )));
+        assert!(rows
+            .iter()
+            .any(|row| matches!(row.target, NavigatorTarget::ArchivedAgent { .. })));
     }
 }

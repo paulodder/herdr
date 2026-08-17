@@ -620,6 +620,7 @@ fn session_snapshot_request_and_response_round_trip() {
                 panes: Vec::new(),
                 layouts: Vec::new(),
                 agents: Vec::new(),
+                archived_agents: Vec::new(),
             }),
         },
     };

@@ -453,10 +453,7 @@ const DEFAULT_GLOBAL_BINDINGS: &[(&str, EmacsCommand)] = &[
     ("C-x 0", EmacsCommand::Herdr(NavigateAction::ClosePane)),
     ("C-x 1", EmacsCommand::Herdr(NavigateAction::Zoom)),
     ("C-x b", EmacsCommand::Herdr(NavigateAction::OpenNavigator)),
-    (
-        "C-x C-f",
-        EmacsCommand::Herdr(NavigateAction::NewWorkspace),
-    ),
+    ("C-x C-f", EmacsCommand::Herdr(NavigateAction::NewWorkspace)),
     ("C-x c", EmacsCommand::Herdr(NavigateAction::NewTab)),
     ("C-x n", EmacsCommand::Herdr(NavigateAction::NextTab)),
     ("C-x p", EmacsCommand::Herdr(NavigateAction::PreviousTab)),

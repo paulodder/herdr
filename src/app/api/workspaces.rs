@@ -283,6 +283,7 @@ impl App {
                 workspace: Some(workspace),
             },
         });
+        self.emit_archived_agent_events();
 
         encode_success(id, ResponseResult::Ok {})
     }

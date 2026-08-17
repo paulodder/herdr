@@ -73,6 +73,8 @@ Press `ctrl+b q` to detach the client. The server and pane processes keep runnin
 
 **Agent awareness.** The sidebar shows blocked, working, done, and idle states. Detection works with process names and terminal output by default. Official integrations can add native session identity for restore, semantic state reports, or both.
 
+**Agent archive.** Explicitly closing a recognized agent pane archives its native conversation before terminating the pane. In Emacs mode, `C-x 0` closes a pane and `C-x k` closes a tab; `C-x b` shows closed conversations dimmed beneath their workspace alongside live panes. Press Enter to resume one on its owning local or federated server, or Delete and confirm to forget it permanently. Working, blocked, and non-resumable agents ask for confirmation before closing.
+
 ## update
 
 Herdr notifies you when a new version is available. Run manually:

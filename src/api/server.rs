@@ -445,6 +445,8 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::AgentRename(_) => "agent.rename",
         Method::AgentFocus(_) => "agent.focus",
         Method::AgentStart(_) => "agent.start",
+        Method::AgentArchiveReopen(_) => "agent.archive.reopen",
+        Method::AgentArchiveForget(_) => "agent.archive.forget",
         Method::PaneSplit(_) => "pane.split",
         Method::PaneSwap(_) => "pane.swap",
         Method::PaneMove(_) => "pane.move",
@@ -1074,6 +1076,7 @@ mod tests {
             panes: Vec::new(),
             layouts: Vec::new(),
             agents: Vec::new(),
+            archived_agents: Vec::new(),
         }
     }
 

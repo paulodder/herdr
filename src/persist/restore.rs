@@ -597,6 +597,9 @@ fn restore_tab(
             let terminal_id = TerminalId::alloc();
             let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone())
                 .with_pending_agent_resume_plan(plan);
+            terminal.last_user_activity_at = saved_pane.and_then(|pane| pane.last_user_activity_at);
+            terminal.last_agent_activity_at =
+                saved_pane.and_then(|pane| pane.last_agent_activity_at);
             if let Some(label) = saved_label {
                 terminal.set_manual_label(label);
             }
@@ -713,6 +716,10 @@ fn restore_tab(
             Ok(runtime) => {
                 let terminal_id = TerminalId::alloc();
                 let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone());
+                terminal.last_user_activity_at =
+                    saved_pane.and_then(|pane| pane.last_user_activity_at);
+                terminal.last_agent_activity_at =
+                    saved_pane.and_then(|pane| pane.last_agent_activity_at);
                 if was_imported {
                     if let Some(argv) = saved_launch_argv {
                         terminal = terminal.with_launch_argv(argv).with_respawn_shell_on_exit();
@@ -1107,6 +1114,7 @@ mod tests {
         let mut workspaces = vec![parent, child];
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
+            archived_agent_sessions: Vec::new(),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some(child_id),
                 custom_name: Some("sportplek-producer-tana".into()),
@@ -1132,6 +1140,8 @@ mod tests {
                             agent_session: None,
                             launch_argv: None,
                             restore_argv: None,
+                            last_user_activity_at: None,
+                            last_agent_activity_at: None,
                         },
                     )]),
                     zoomed: false,
@@ -1321,6 +1331,7 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
+            archived_agent_sessions: Vec::new(),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("workspace".into()),
                 custom_name: None,
@@ -1349,6 +1360,8 @@ mod tests {
                             }),
                             launch_argv: None,
                             restore_argv: None,
+                            last_user_activity_at: None,
+                            last_agent_activity_at: None,
                         },
                     )]),
                     zoomed: false,
@@ -1401,6 +1414,7 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
+            archived_agent_sessions: Vec::new(),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("w1".into()),
                 custom_name: None,
@@ -1430,6 +1444,8 @@ mod tests {
                                 agent_session: None,
                                 launch_argv: None,
                                 restore_argv: None,
+                                last_user_activity_at: None,
+                                last_agent_activity_at: None,
                             },
                         ),
                         (
@@ -1441,6 +1457,8 @@ mod tests {
                                 agent_session: None,
                                 launch_argv: None,
                                 restore_argv: None,
+                                last_user_activity_at: None,
+                                last_agent_activity_at: None,
                             },
                         ),
                     ]),
@@ -1494,6 +1512,8 @@ mod tests {
                     agent_session: None,
                     launch_argv: None,
                     restore_argv: None,
+                    last_user_activity_at: None,
+                    last_agent_activity_at: None,
                 },
             )
         };
@@ -1509,9 +1529,12 @@ mod tests {
             }),
             launch_argv: None,
             restore_argv: None,
+            last_user_activity_at: None,
+            last_agent_activity_at: None,
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
+            archived_agent_sessions: Vec::new(),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("w1".into()),
                 custom_name: None,
@@ -1639,6 +1662,7 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
+            archived_agent_sessions: Vec::new(),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("workspace".into()),
                 custom_name: None,
@@ -1667,6 +1691,8 @@ mod tests {
                             }),
                             launch_argv: None,
                             restore_argv: None,
+                            last_user_activity_at: None,
+                            last_agent_activity_at: None,
                         },
                     )]),
                     zoomed: false,
@@ -1829,6 +1855,8 @@ mod tests {
                 agent_session: None,
                 launch_argv: None,
                 restore_argv: None,
+                last_user_activity_at: None,
+                last_agent_activity_at: None,
             },
         );
         let history = SessionHistorySnapshot {
@@ -1847,6 +1875,7 @@ mod tests {
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
+            archived_agent_sessions: Vec::new(),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("workspace".into()),
                 custom_name: None,

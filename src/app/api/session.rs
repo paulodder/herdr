@@ -66,6 +66,35 @@ impl App {
             panes: self.collect_panes_for_workspace(None).unwrap_or_default(),
             layouts,
             agents: self.collect_agent_infos(),
+            archived_agents: self
+                .state
+                .archived_agent_sessions
+                .values()
+                .map(|archive| crate::api::schema::ArchivedAgentInfo {
+                    archive_id: archive.archive_id.clone(),
+                    member_id: self.state.federation_member_id.clone(),
+                    agent: archive.agent.clone(),
+                    title: archive.title.clone(),
+                    label: archive.label.clone(),
+                    cwd: archive.cwd.display().to_string(),
+                    workspace_id: archive.workspace_id.clone(),
+                    workspace_name: archive.workspace_name.clone(),
+                    project_key: archive
+                        .project_identity
+                        .as_ref()
+                        .map(|project| project.key.clone()),
+                    project_name: archive
+                        .project_identity
+                        .as_ref()
+                        .map(|project| project.label.clone()),
+                    tab_name: archive.tab_name.clone(),
+                    resumable: archive.resume_plan().is_some(),
+                    active_pane_id: archive.active_pane_id.clone(),
+                    last_user_activity_at: archive.last_user_activity_at,
+                    last_agent_activity_at: archive.last_agent_activity_at,
+                    closed_at: archive.closed_at,
+                })
+                .collect(),
         }
     }
 
@@ -160,6 +189,10 @@ impl App {
                             })
                         })
                 }),
+            crate::federation::FederatedResourceKind::ArchivedAgent => {
+                let archive_id = resource.resource_id.clone();
+                return self.reopen_archived_agent(&archive_id).map(|_| ());
+            }
         }
         .ok_or_else(|| {
             format!(

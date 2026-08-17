@@ -43,7 +43,7 @@ pub const LIVE_HANDOFF_RECONNECT_REASON: &str =
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 21;
+pub const PROTOCOL_VERSION: u32 = 22;
 
 /// Maximum UTF-8 clipboard payload the client may carry between federation
 /// members. This keeps the control path bounded independently of frame size.
@@ -2234,6 +2234,7 @@ mod tests {
                     panes: Vec::new(),
                     layouts: Vec::new(),
                     agents: Vec::new(),
+                    archived_agents: Vec::new(),
                 }),
                 cursor: Some(9),
                 error: Some("offline".into()),
@@ -2270,6 +2271,7 @@ mod tests {
             panes: Vec::new(),
             layouts: Vec::new(),
             agents: Vec::new(),
+            archived_agents: Vec::new(),
         };
         let endpoint = crate::config::FederationEndpointConfig {
             id: "tana.stl.dev".into(),

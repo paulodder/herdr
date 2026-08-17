@@ -910,6 +910,7 @@ mod tests {
             panes: Vec::new(),
             layouts: Vec::new(),
             agents: Vec::new(),
+            archived_agents: Vec::new(),
         };
 
         record_federated_workspace_created(&mut snapshot, &workspace, &tab, &pane);

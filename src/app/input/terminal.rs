@@ -22,8 +22,12 @@ impl App {
         let Some(input) = self.prepare_terminal_key_forward(key) else {
             return;
         };
-        if let Some(runtime) = self.lookup_runtime_sender(input.ws_idx, input.pane_id) {
-            let _ = runtime.try_send_bytes(input.bytes);
+        let pane_id = input.pane_id;
+        if self
+            .lookup_runtime_sender(input.ws_idx, pane_id)
+            .is_some_and(|runtime| runtime.try_send_bytes(input.bytes).is_ok())
+        {
+            self.state.mark_pane_user_activity(pane_id);
         }
     }
 
@@ -208,8 +212,14 @@ impl App {
         let Some(input) = self.prepare_terminal_key_forward(key) else {
             return;
         };
-        if let Some(runtime) = self.lookup_runtime_sender(input.ws_idx, input.pane_id) {
-            let _ = runtime.send_bytes(input.bytes).await;
+        let pane_id = input.pane_id;
+        let sent = if let Some(runtime) = self.lookup_runtime_sender(input.ws_idx, pane_id) {
+            runtime.send_bytes(input.bytes).await.is_ok()
+        } else {
+            false
+        };
+        if sent {
+            self.state.mark_pane_user_activity(pane_id);
         }
     }
 }

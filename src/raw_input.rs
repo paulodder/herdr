@@ -1008,9 +1008,8 @@ mod tests {
 
     #[test]
     fn frames_held_kitty_ctrl_n_as_press_repeats_and_release() {
-        let events = parse_raw_input_bytes_sync(
-            b"\x1b[110;5:1u\x1b[110;5:2u\x1b[110;5:2u\x1b[110;5:3u",
-        );
+        let events =
+            parse_raw_input_bytes_sync(b"\x1b[110;5:1u\x1b[110;5:2u\x1b[110;5:2u\x1b[110;5:3u");
         let kinds = events
             .into_iter()
             .map(|event| match event {

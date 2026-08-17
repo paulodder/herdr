@@ -179,6 +179,14 @@ impl App {
                     context.focused_pane_id = Some(pane_id.clone());
                     context
                 }),
+            EventData::AgentArchiveUpdated { archive } => self
+                .plugin_context_for_workspace_id(&archive.workspace_id, correlation_id)
+                .unwrap_or_else(|| {
+                    let mut context = empty_plugin_context(correlation_id);
+                    context.workspace_id = Some(archive.workspace_id.clone());
+                    context
+                }),
+            EventData::AgentArchiveForgotten { .. } => empty_plugin_context(correlation_id),
         }
     }
 

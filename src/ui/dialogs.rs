@@ -108,16 +108,15 @@ pub(super) fn render_new_workspace_overlay(app: &AppState, frame: &mut Frame, ar
                             "  {}",
                             match &server.kind {
                                 crate::app::state::WorkspaceCreateServerKind::Local => "local",
-                                crate::app::state::WorkspaceCreateServerKind::Federation { .. } =>
-                                    "remote",
+                                crate::app::state::WorkspaceCreateServerKind::Federation {
+                                    ..
+                                } => "remote",
                             }
                         ),
                         Style::default().fg(app.palette.overlay0),
                     ),
                     Span::styled(
-                        if server.status
-                            == crate::federation::EndpointConnectionStatus::Connected
-                        {
+                        if server.status == crate::federation::EndpointConnectionStatus::Connected {
                             String::new()
                         } else {
                             format!("  · {status}")
@@ -874,6 +873,47 @@ fn render_open_worktree_search(
 }
 
 fn confirm_close_overlay_text(app: &AppState) -> (String, String) {
+    match app.pending_close_action.as_ref() {
+        Some(crate::app::state::PendingCloseAction::Pane { ws_idx, pane_id }) => {
+            let label = app
+                .terminal_id_for_pane(*ws_idx, *pane_id)
+                .and_then(|terminal_id| app.terminals.get(&terminal_id))
+                .and_then(|terminal| {
+                    terminal
+                        .effective_title()
+                        .or_else(|| terminal.effective_agent_label().map(str::to_string))
+                })
+                .unwrap_or_else(|| "agent pane".to_string());
+            return (
+                "Archive active agent?".to_string(),
+                format!("{label} — it will remain available in C-x b"),
+            );
+        }
+        Some(crate::app::state::PendingCloseAction::Tab { ws_idx, tab_idx }) => {
+            let label = app
+                .workspaces
+                .get(*ws_idx)
+                .and_then(|workspace| workspace.tab_display_name(*tab_idx))
+                .unwrap_or_else(|| format!("tab {}", tab_idx + 1));
+            let count = app.pane_ids_for_tab(*ws_idx, *tab_idx).len();
+            return (
+                "Archive active agents?".to_string(),
+                format!("{label} — {count} panes; agents remain available in C-x b"),
+            );
+        }
+        Some(crate::app::state::PendingCloseAction::ForgetArchive { archive_id }) => {
+            let label = app
+                .archived_agent_sessions
+                .get(archive_id)
+                .and_then(|archive| archive.title.clone().or_else(|| archive.label.clone()))
+                .unwrap_or_else(|| "archived agent".to_string());
+            return (
+                "Forget archived agent?".to_string(),
+                format!("{label} — this removes it from C-x b permanently"),
+            );
+        }
+        _ => {}
+    }
     let ws_name = app
         .workspaces
         .get(app.selected)
@@ -932,7 +972,19 @@ fn confirm_close_overlay_text(app: &AppState) -> (String, String) {
     } else {
         "Close workspace?"
     };
-    let detail = format!("{ws_name} — {workspace_text}{pane_text}");
+    let includes_guarded_agent = if closes_group {
+        group_member_indices
+            .iter()
+            .any(|idx| app.workspace_agent_close_requires_confirmation(*idx))
+    } else {
+        app.workspace_agent_close_requires_confirmation(app.selected)
+    };
+    let archive_note = if includes_guarded_agent {
+        "; agents remain available in C-x b"
+    } else {
+        ""
+    };
+    let detail = format!("{ws_name} — {workspace_text}{pane_text}{archive_note}");
     (title.to_string(), detail)
 }
 
