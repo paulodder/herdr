@@ -556,6 +556,7 @@ impl App {
                 .map(|state| (state.endpoint.id.clone(), state))
                 .collect(),
             federation_client_overlay: std::collections::BTreeMap::new(),
+            federation_client_directory_active: false,
             terminals: std::collections::HashMap::new(),
             archived_agent_sessions,
             direct_attach_resize_locks: std::collections::HashSet::new(),

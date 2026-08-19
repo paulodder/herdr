@@ -100,32 +100,30 @@ impl App {
 
     pub(crate) fn apply_federation_directory(
         &mut self,
-        directory: Vec<crate::federation::EndpointState>,
+        directory: Option<Vec<crate::federation::EndpointState>>,
     ) {
+        let Some(directory) = directory else {
+            self.state.federation_client_overlay.clear();
+            self.state.federation_client_directory_active = false;
+            return;
+        };
         let mut overlay = std::collections::BTreeMap::new();
         for mut state in directory {
-            if state.endpoint.id == self.state.federation_member_id {
-                continue;
-            }
             if state.snapshot.is_none() {
                 if let Some(previous) = self.state.federation_client_overlay.get(&state.endpoint.id)
                 {
-                    state.snapshot = previous.snapshot.clone();
-                    state.cursor = state.cursor.or(previous.cursor);
+                    let same_runtime = previous.endpoint.target == state.endpoint.target
+                        && previous.endpoint.session == state.endpoint.session;
+                    if same_runtime {
+                        state.snapshot = previous.snapshot.clone();
+                        state.cursor = state.cursor.or(previous.cursor);
+                    }
                 }
             }
-            let authoritative_connected = self
-                .state
-                .federation
-                .get(&state.endpoint.id)
-                .is_some_and(|current| {
-                    current.status == crate::federation::EndpointConnectionStatus::Connected
-                });
-            if !authoritative_connected {
-                overlay.insert(state.endpoint.id.clone(), state);
-            }
+            overlay.insert(state.endpoint.id.clone(), state);
         }
         self.state.federation_client_overlay = overlay;
+        self.state.federation_client_directory_active = true;
     }
 
     pub(crate) fn focus_federated_resource(
@@ -233,6 +231,169 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app
+    }
+
+    fn endpoint_state(
+        id: &str,
+        target: &str,
+        status: crate::federation::EndpointConnectionStatus,
+        snapshot: Option<crate::api::schema::SessionSnapshot>,
+    ) -> crate::federation::EndpointState {
+        crate::federation::EndpointState {
+            endpoint: crate::config::FederationEndpointConfig {
+                id: id.into(),
+                target: target.into(),
+                label: None,
+                session: "default".into(),
+                enabled: true,
+            },
+            status,
+            cursor: snapshot.as_ref().map(|snapshot| snapshot.event_cursor),
+            snapshot,
+            error: None,
+        }
+    }
+
+    fn snapshot_for_member(
+        app: &crate::app::App,
+        member_id: &str,
+        workspace_label: &str,
+    ) -> crate::api::schema::SessionSnapshot {
+        let mut snapshot = app.session_snapshot();
+        snapshot.identity.member_id = member_id.into();
+        snapshot.identity.member_target = format!("{member_id}.example");
+        snapshot.workspaces[0].label = workspace_label.into();
+        snapshot
+    }
+
+    #[test]
+    fn client_directory_wins_over_receivers_connected_watcher_cache() {
+        let mut app = app_with_two_tabs();
+        app.state.federation_member_id = "member-b".into();
+        let stale = snapshot_for_member(&app, "member-a", "stale receiver label");
+        app.state.federation.insert(
+            "member-a".into(),
+            endpoint_state(
+                "member-a",
+                "member-a.example",
+                crate::federation::EndpointConnectionStatus::Connected,
+                Some(stale),
+            ),
+        );
+        let fresh = snapshot_for_member(&app, "member-a", "pinned home label");
+        let active = snapshot_for_member(&app, "member-b", "active member label");
+
+        app.apply_federation_directory(Some(vec![
+            endpoint_state(
+                "member-a",
+                "member-a.example",
+                crate::federation::EndpointConnectionStatus::Connected,
+                Some(fresh),
+            ),
+            endpoint_state(
+                "member-b",
+                "member-b.example",
+                crate::federation::EndpointConnectionStatus::Connected,
+                Some(active),
+            ),
+        ]));
+
+        assert_eq!(
+            app.state
+                .federation_state("member-a")
+                .and_then(|state| state.snapshot.as_ref())
+                .and_then(|snapshot| snapshot.workspaces.first())
+                .map(|workspace| workspace.label.as_str()),
+            Some("pinned home label")
+        );
+        assert!(app.state.federation_client_overlay.contains_key("member-b"));
+        assert_eq!(
+            app.state
+                .federation_states()
+                .map(|state| state.endpoint.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["member-a"]
+        );
+    }
+
+    #[test]
+    fn client_directory_preserves_transient_snapshots_and_replaces_membership() {
+        let mut app = app_with_two_tabs();
+        app.state.federation_member_id = "member-b".into();
+        let member_a = snapshot_for_member(&app, "member-a", "stable label");
+        let member_b = snapshot_for_member(&app, "member-b", "active label");
+        let member_c = snapshot_for_member(&app, "member-c", "revoked label");
+        app.apply_federation_directory(Some(vec![
+            endpoint_state(
+                "member-a",
+                "member-a.example",
+                crate::federation::EndpointConnectionStatus::Connected,
+                Some(member_a),
+            ),
+            endpoint_state(
+                "member-b",
+                "member-b.example",
+                crate::federation::EndpointConnectionStatus::Connected,
+                Some(member_b.clone()),
+            ),
+            endpoint_state(
+                "member-c",
+                "member-c.example",
+                crate::federation::EndpointConnectionStatus::Connected,
+                Some(member_c),
+            ),
+        ]));
+
+        app.apply_federation_directory(Some(vec![
+            endpoint_state(
+                "member-a",
+                "member-a.example",
+                crate::federation::EndpointConnectionStatus::Disconnected,
+                None,
+            ),
+            endpoint_state(
+                "member-b",
+                "member-b.example",
+                crate::federation::EndpointConnectionStatus::Connected,
+                Some(member_b),
+            ),
+        ]));
+
+        let member_a = app.state.federation_state("member-a").unwrap();
+        assert_eq!(
+            member_a
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.workspaces.first())
+                .map(|workspace| workspace.label.as_str()),
+            Some("stable label")
+        );
+        assert_eq!(
+            member_a.status,
+            crate::federation::EndpointConnectionStatus::Disconnected
+        );
+        assert!(app.state.federation_state("member-c").is_none());
+    }
+
+    #[test]
+    fn authoritative_empty_directory_does_not_fall_back_to_receiver_watchers() {
+        let mut app = app_with_two_tabs();
+        app.state.federation.insert(
+            "receiver-only".into(),
+            endpoint_state(
+                "receiver-only",
+                "receiver.example",
+                crate::federation::EndpointConnectionStatus::Connected,
+                None,
+            ),
+        );
+
+        app.apply_federation_directory(Some(Vec::new()));
+        assert!(app.state.federation_state("receiver-only").is_none());
+        assert_eq!(app.state.federation_states().count(), 0);
+
+        app.apply_federation_directory(None);
+        assert!(app.state.federation_state("receiver-only").is_some());
     }
 
     #[test]

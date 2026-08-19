@@ -248,7 +248,12 @@ impl App {
             } else {
                 None
             };
-        let terminal_cwd_reported = matches!(ev, AppEvent::TerminalCwdReported { .. });
+        let terminal_cwd_workspace = match &ev {
+            AppEvent::TerminalCwdReported { pane_id, .. } => self
+                .find_pane(*pane_id)
+                .map(|(ws_idx, _)| (ws_idx, self.workspace_info(ws_idx))),
+            _ => None,
+        };
         let archive_identity_may_change = matches!(
             &ev,
             AppEvent::HookStateReported { .. } | AppEvent::AgentSessionReported { .. }
@@ -275,10 +280,13 @@ impl App {
             }
         }
         self.sync_full_lifecycle_authority_detection_pauses();
-        if terminal_cwd_reported {
+        if let Some((ws_idx, before)) = terminal_cwd_workspace {
             self.mark_git_status_refresh_due(Instant::now());
             self.render_dirty.store(true, Ordering::Release);
             self.render_notify.notify_one();
+            if self.workspace_info(ws_idx) != before {
+                self.emit_workspace_metadata_updated(ws_idx);
+            }
         }
         for update in &pane_updates {
             self.refresh_new_herdr_toast_context_for_update(update, &previous_toast);
@@ -808,9 +816,10 @@ impl App {
         }
     }
 
-    pub(crate) fn emit_workspace_token_updated(&mut self, ws_idx: usize) {
-        // Token updates bypass plugin hooks so a hook cannot refresh its own
-        // token and recursively trigger workspace.updated.
+    pub(crate) fn emit_workspace_metadata_updated(&mut self, ws_idx: usize) {
+        // Presentation-only metadata updates bypass plugin hooks so a hook
+        // cannot refresh its own token and recursively trigger
+        // workspace.updated.
         self.event_hub.push(crate::api::schema::EventEnvelope {
             event: crate::api::schema::EventKind::WorkspaceMetadataUpdated,
             data: crate::api::schema::EventData::WorkspaceMetadataUpdated {
@@ -2161,5 +2170,42 @@ mod tests {
             app.state.toast.as_ref().map(|toast| toast.context.as_str()),
             Some("__herdr_original__ · 1")
         );
+    }
+
+    #[test]
+    fn terminal_cwd_change_publishes_the_new_workspace_label() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let event_hub = crate::api::EventHub::default();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
+        let mut workspace = crate::workspace::Workspace::test_new("old-custom-name");
+        workspace.custom_name = None;
+        let pane_id = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        let directory =
+            std::env::temp_dir().join(format!("herdr-stable-sidebar-cwd-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let before = event_hub.current_sequence();
+
+        app.handle_internal_event(AppEvent::TerminalCwdReported {
+            pane_id,
+            cwd: directory.clone(),
+        });
+
+        let expected = directory.file_name().unwrap().to_string_lossy();
+        assert!(event_hub.events_after(before).iter().any(|(_, envelope)| {
+            matches!(
+                &envelope.data,
+                crate::api::schema::EventData::WorkspaceMetadataUpdated { workspace }
+                    if workspace.label == expected
+            )
+        }));
+        let _ = std::fs::remove_dir_all(directory);
     }
 }

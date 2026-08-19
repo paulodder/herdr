@@ -247,7 +247,7 @@ impl App {
             .patch(tokens, ttl, std::time::Instant::now());
         if changed {
             self.sync_agent_metadata_deadline();
-            self.emit_workspace_token_updated(index);
+            self.emit_workspace_metadata_updated(index);
         }
         encode_success(id, ResponseResult::Ok {})
     }

@@ -863,7 +863,7 @@ impl HeadlessServer {
 
     fn sync_foreground_client_state(&mut self) {
         let Some(client_id) = self.foreground_client_id else {
-            self.app.apply_federation_directory(Vec::new());
+            self.app.apply_federation_directory(None);
             self.effective_size = (MIN_COLS, MIN_ROWS);
             self.app.state.outer_terminal_focus = None;
             let server_keybindings = self.server_keybindings.clone();
@@ -873,7 +873,7 @@ impl HeadlessServer {
         };
         let Some(client) = self.clients.get(&client_id) else {
             self.foreground_client_id = None;
-            self.app.apply_federation_directory(Vec::new());
+            self.app.apply_federation_directory(None);
             self.effective_size = (MIN_COLS, MIN_ROWS);
             self.app.state.outer_terminal_focus = None;
             let server_keybindings = self.server_keybindings.clone();
@@ -896,7 +896,8 @@ impl HeadlessServer {
             .clone();
 
         self.effective_size = terminal_size;
-        self.app.apply_federation_directory(federation_directory);
+        self.app
+            .apply_federation_directory(Some(federation_directory));
         self.app.state.outer_terminal_focus = outer_terminal_focus;
         apply_keybindings(&mut self.app, &keybindings);
         self.sync_visible_server_config_diagnostic(uses_local_keybindings);
@@ -2203,8 +2204,15 @@ impl HeadlessServer {
                             workspace.project_identity().cloned(),
                         )
                     })
-                    .ne(before);
-                if changed {
+                    .enumerate()
+                    .filter_map(|(index, metadata)| {
+                        (before.get(index) != Some(&metadata)).then_some(index)
+                    })
+                    .collect::<Vec<_>>();
+                for ws_idx in &changed {
+                    self.app.emit_workspace_metadata_updated(*ws_idx);
+                }
+                if !changed.is_empty() {
                     self.broadcast_federation_directory();
                 }
                 true
@@ -2651,6 +2659,13 @@ impl HeadlessServer {
                         sidebar_section_split: self.app.state.sidebar_section_split,
                         sidebar_collapsed: self.app.state.sidebar_collapsed,
                         workspace_scroll: self.app.state.workspace_scroll,
+                        agent_panel_scroll: self.app.state.agent_panel_scroll,
+                        agent_panel_priority: matches!(
+                            self.app.state.agent_panel_sort,
+                            crate::app::state::AgentPanelSort::Priority
+                        ),
+                        sidebar_agents: Box::new(self.app.state.sidebar_agents.clone()),
+                        sidebar_spaces: Box::new(self.app.state.sidebar_spaces.clone()),
                         collapsed_space_keys: {
                             let mut keys = self
                                 .app
@@ -2928,6 +2943,14 @@ impl HeadlessServer {
                             presentation.sidebar_section_split.clamp(0.1, 0.9);
                         self.app.state.sidebar_collapsed = presentation.sidebar_collapsed;
                         self.app.state.workspace_scroll = presentation.workspace_scroll;
+                        self.app.state.agent_panel_scroll = presentation.agent_panel_scroll;
+                        self.app.state.agent_panel_sort = if presentation.agent_panel_priority {
+                            crate::app::state::AgentPanelSort::Priority
+                        } else {
+                            crate::app::state::AgentPanelSort::Spaces
+                        };
+                        self.app.state.sidebar_agents = *presentation.sidebar_agents;
+                        self.app.state.sidebar_spaces = *presentation.sidebar_spaces;
                         self.app.state.collapsed_space_keys =
                             presentation.collapsed_space_keys.into_iter().collect();
                         self.app.state.mark_session_dirty();
@@ -3720,7 +3743,8 @@ impl HeadlessServer {
                 .get(&client_id)
                 .map(|client| client.federation_directory.clone())
                 .unwrap_or_default();
-            self.app.apply_federation_directory(federation_directory);
+            self.app
+                .apply_federation_directory(Some(federation_directory));
             let area = Rect::new(0, 0, cols, rows);
             let is_app_client = matches!(mode, ClientConnectionMode::App);
             let mut frame = match mode {
@@ -4896,6 +4920,7 @@ mod tests {
         let resolved_identity_cwd = server.app.state.workspaces[0]
             .resolved_identity_cwd()
             .expect("workspace identity cwd");
+        let before_git_cursor = server.app.event_hub.current_sequence();
         server.handle_internal_event_with_forwarding(AppEvent::GitStatusRefreshed {
             results: vec![crate::workspace::WorkspaceGitStatus {
                 workspace_id,
@@ -4906,6 +4931,17 @@ mod tests {
             }],
             cache_updates: Vec::new(),
         });
+        assert!(server
+            .app
+            .event_hub
+            .events_after(before_git_cursor)
+            .iter()
+            .any(|(_, envelope)| matches!(
+                &envelope.data,
+                api::schema::EventData::WorkspaceMetadataUpdated { workspace }
+                    if workspace.branch.as_deref() == Some("feature/consistent-sidebar")
+                        && workspace.git_ahead_behind == Some((2, 1))
+            )));
         let git_update = read_server_message(control_rx.recv().expect("git snapshot update"));
         let ServerMessage::FederationDirectoryUpdate { directory } = git_update else {
             panic!("expected git directory update, got {git_update:?}");
@@ -4999,6 +5035,10 @@ mod tests {
                     sidebar_section_split: 0.62,
                     sidebar_collapsed: true,
                     workspace_scroll: 0,
+                    agent_panel_scroll: 4,
+                    agent_panel_priority: true,
+                    sidebar_agents: Box::new(crate::config::AgentsSidebarConfig::default()),
+                    sidebar_spaces: Box::new(crate::config::SpacesSidebarConfig::default()),
                     collapsed_space_keys: vec!["/repo/herdr/.git".into()],
                 }),
             })
@@ -5008,6 +5048,11 @@ mod tests {
         assert_eq!(server.app.state.sidebar_section_split, 0.62);
         assert!(server.app.state.sidebar_collapsed);
         assert_eq!(server.app.state.workspace_scroll, 0);
+        assert_eq!(server.app.state.agent_panel_scroll, 4);
+        assert_eq!(
+            server.app.state.agent_panel_sort,
+            crate::app::state::AgentPanelSort::Priority
+        );
         assert!(server
             .app
             .state

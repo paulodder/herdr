@@ -58,6 +58,10 @@ pub struct FederationPresentation {
     /// Canonical workspace-list offset, transferred before activation so the
     /// sidebar does not jump when the active federation member changes.
     pub workspace_scroll: usize,
+    pub agent_panel_scroll: usize,
+    pub agent_panel_priority: bool,
+    pub sidebar_agents: Box<crate::config::AgentsSidebarConfig>,
+    pub sidebar_spaces: Box<crate::config::SpacesSidebarConfig>,
     pub collapsed_space_keys: Vec<String>,
 }
 
@@ -2137,6 +2141,10 @@ mod tests {
                 sidebar_section_split: 0.5,
                 sidebar_collapsed: false,
                 workspace_scroll: 2,
+                agent_panel_scroll: 3,
+                agent_panel_priority: true,
+                sidebar_agents: Box::new(crate::config::AgentsSidebarConfig::default()),
+                sidebar_spaces: Box::new(crate::config::SpacesSidebarConfig::default()),
                 collapsed_space_keys: vec!["/repo/herdr/.git".into()],
             },
         };

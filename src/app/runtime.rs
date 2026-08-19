@@ -373,7 +373,7 @@ impl App {
             self.emit_pane_updated(ws_idx, pane_id);
         }
         for ws_idx in workspaces {
-            self.emit_workspace_token_updated(ws_idx);
+            self.emit_workspace_metadata_updated(ws_idx);
         }
         self.sync_agent_metadata_deadline();
     }

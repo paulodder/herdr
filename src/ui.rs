@@ -241,11 +241,6 @@ fn compute_view_internal(
         let (_, detail_area) = expanded_sidebar_sections(sidebar_area, app.sidebar_section_split);
         let max_agent_scroll = agent_panel_scroll_metrics(app, detail_area).max_offset_from_bottom;
         app.agent_panel_scroll = app.agent_panel_scroll.min(max_agent_scroll);
-    } else {
-        app.workspace_scroll = app
-            .workspace_scroll
-            .min(app.workspaces.len().saturating_sub(1));
-        app.agent_panel_scroll = 0;
     }
 
     let workspace_card_areas = if app.sidebar_collapsed {

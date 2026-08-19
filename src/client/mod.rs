@@ -2066,8 +2066,13 @@ fn merge_federation_directory(
             .find(|existing| existing.endpoint.id == state.endpoint.id)
         {
             // A temporary disconnect must not erase the last useful global
-            // directory snapshot that the client already has.
-            if state.snapshot.is_none() {
+            // directory snapshot that the client already has. An endpoint
+            // retarget or session change is a new runtime and must not inherit
+            // the old member's presentation state.
+            if state.snapshot.is_none()
+                && existing.endpoint.target == state.endpoint.target
+                && existing.endpoint.session == state.endpoint.session
+            {
                 state.snapshot = existing.snapshot.clone();
                 state.cursor = state.cursor.or(existing.cursor);
             }
@@ -5183,6 +5188,34 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["stl-agents-1", "x1"]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_merge_retains_only_same_runtime_cursor() {
+        let endpoint = |target: &str, session: &str, cursor| {
+            let mut state = crate::federation::EndpointState::configured(
+                crate::config::FederationEndpointConfig {
+                    id: "member".into(),
+                    target: target.into(),
+                    session: session.into(),
+                    ..crate::config::FederationEndpointConfig::default()
+                },
+            );
+            state.cursor = cursor;
+            state
+        };
+
+        let mut directory = vec![endpoint("old.example", "main", Some(7))];
+        merge_federation_directory(&mut directory, vec![endpoint("old.example", "main", None)]);
+        assert_eq!(directory[0].cursor, Some(7));
+
+        merge_federation_directory(&mut directory, vec![endpoint("new.example", "main", None)]);
+        assert_eq!(directory[0].cursor, None);
+
+        directory = vec![endpoint("old.example", "main", Some(9))];
+        merge_federation_directory(&mut directory, vec![endpoint("old.example", "other", None)]);
+        assert_eq!(directory[0].cursor, None);
     }
 
     #[cfg(unix)]

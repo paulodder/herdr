@@ -1424,6 +1424,10 @@ pub struct AppState {
     /// This is intentionally distinct from authoritative watcher state.
     pub(crate) federation_client_overlay:
         std::collections::BTreeMap<String, crate::federation::EndpointState>,
+    /// True while the foreground client supplies the complete, pinned-home
+    /// federation directory. In this mode omitted members are revoked and
+    /// must not leak back in from this server's own watcher configuration.
+    pub(crate) federation_client_directory_active: bool,
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
     pub(crate) archived_agent_sessions:
@@ -1633,12 +1637,15 @@ impl AppState {
     pub(crate) fn federation_states(
         &self,
     ) -> impl Iterator<Item = &crate::federation::EndpointState> {
+        let use_client_directory =
+            self.federation_client_directory_active || !self.federation_client_overlay.is_empty();
         self.federation_client_overlay
             .values()
-            .chain(self.federation.values().filter(|state| {
-                !self
-                    .federation_client_overlay
-                    .contains_key(&state.endpoint.id)
+            .filter(move |state| {
+                use_client_directory && state.endpoint.id != self.federation_member_id
+            })
+            .chain(self.federation.values().filter(move |state| {
+                !use_client_directory && state.endpoint.id != self.federation_member_id
             }))
     }
 
@@ -1646,9 +1653,11 @@ impl AppState {
         &self,
         endpoint_id: &str,
     ) -> Option<&crate::federation::EndpointState> {
-        self.federation_client_overlay
-            .get(endpoint_id)
-            .or_else(|| self.federation.get(endpoint_id))
+        if self.federation_client_directory_active || !self.federation_client_overlay.is_empty() {
+            self.federation_client_overlay.get(endpoint_id)
+        } else {
+            self.federation.get(endpoint_id)
+        }
     }
 
     /// Whether global workspace navigation has moved ahead of the pane that is
@@ -1897,6 +1906,7 @@ impl AppState {
             federation_member_label: None,
             federation: std::collections::BTreeMap::new(),
             federation_client_overlay: std::collections::BTreeMap::new(),
+            federation_client_directory_active: false,
             terminals: std::collections::HashMap::new(),
             archived_agent_sessions: std::collections::BTreeMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
