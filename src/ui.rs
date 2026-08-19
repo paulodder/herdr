@@ -79,7 +79,7 @@ pub(crate) use self::{
         normalized_workspace_scroll, sidebar_section_divider_rect, workspace_drop_indicator_row,
         workspace_list_entries, workspace_list_entries_expanded, workspace_list_rect,
         workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
-        AgentPanelTarget, WorkspaceListEntry,
+        workspace_scroll_anchor, workspace_scroll_for_anchor, AgentPanelTarget, WorkspaceListEntry,
     },
 };
 pub(crate) use self::{

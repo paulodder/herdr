@@ -986,6 +986,7 @@ struct PendingFederationActivation {
     expected_resource: Option<crate::federation::FederatedResourceRef>,
     expected_runtime_identity: Option<(String, String)>,
     request_id: u64,
+    navigation_generation: Option<u64>,
     retain_current: bool,
     restore_if_rejected: bool,
     deadline: Instant,
@@ -1001,6 +1002,7 @@ struct FederationConnectIntent {
     directory: Vec<crate::federation::EndpointState>,
     presentation: crate::protocol::FederationPresentation,
     expected_runtime_identity: (String, String),
+    navigation_generation: u64,
 }
 
 #[cfg(unix)]
@@ -2097,6 +2099,14 @@ fn authoritative_directory_update_for_renderer(
 }
 
 #[cfg(unix)]
+fn superseding_navigation_generation(
+    pending_generation: Option<u64>,
+    desired_generation: Option<u64>,
+) -> Option<u64> {
+    pending_generation.and_then(|pending| desired_generation.filter(|desired| *desired > pending))
+}
+
+#[cfg(unix)]
 fn activate_federation_connection(
     stream: &mut LocalStream,
     request_id: u64,
@@ -2177,6 +2187,7 @@ fn begin_suspended_fallback(
             connection: resumed,
             expected_resource: None,
             request_id,
+            navigation_generation: None,
             retain_current: false,
             restore_if_rejected: false,
             deadline: Instant::now() + FEDERATION_ACTIVATION_TIMEOUT,
@@ -2312,6 +2323,8 @@ async fn run_client_loop(
     let mut pending_federation_connect_generation: Option<u64> = None;
     #[cfg(unix)]
     let mut next_federation_connect_generation = 1_u64;
+    #[cfg(unix)]
+    let mut next_federation_navigation_generation = 1_u64;
     #[cfg(unix)]
     let mut federated_clipboard_text: Option<String> = None;
     #[cfg(unix)]
@@ -2625,6 +2638,42 @@ async fn run_client_loop(
                             server_id,
                             session_id,
                         );
+                        let superseded_by = superseding_navigation_generation(
+                            pending.navigation_generation,
+                            desired_federation_attach
+                                .as_ref()
+                                .map(|(_, intent)| intent.navigation_generation),
+                        );
+                        if let Some(superseded_by) =
+                            superseded_by.filter(|_| *accepted && identity_matches)
+                        {
+                            let _ = write_to_server(
+                                &mut pending.connection.stream,
+                                &ClientMessage::FederationSuspend,
+                            );
+                            let connection = pending.connection;
+                            info!(
+                                endpoint_id = pending.endpoint_id,
+                                request_id,
+                                navigation_generation = ?pending.navigation_generation,
+                                superseded_by,
+                                "kept superseded federation activation off-screen"
+                            );
+                            suspended_connections.push(SuspendedClientConnection {
+                                member_id: connection.member_id,
+                                server_id: connection.server_id,
+                                session_id: connection.session_id,
+                                stream: connection.stream,
+                                connection_id: connection.connection_id,
+                                remote: connection.remote,
+                                mouse_capture_active: connection.mouse_capture_active,
+                                window_title: connection.window_title,
+                                prefix_input_source_active: connection.prefix_input_source_active,
+                                is_remote_client: connection.is_remote_client,
+                            });
+                            state.request_full_redraw();
+                            continue;
+                        }
                         if *accepted && identity_matches {
                             dismiss_inline_image_preview(&mut state, true);
                             if pending.retain_current {
@@ -2721,6 +2770,7 @@ async fn run_client_loop(
                                 member_id,
                                 server_id,
                                 session_id,
+                                navigation_generation = ?pending.navigation_generation,
                                 ?reconnected_encoding,
                                 connection_id = resumed_id,
                                 "federation member activation accepted"
@@ -3007,6 +3057,7 @@ async fn run_client_loop(
                                                     .clone()
                                                     .zip(active_session_id.clone()),
                                                 request_id,
+                                                navigation_generation: None,
                                                 retain_current: false,
                                                 restore_if_rejected: false,
                                                 deadline: Instant::now()
@@ -3278,6 +3329,26 @@ async fn run_client_loop(
                                 next_federation_connect_generation =
                                     next_federation_connect_generation.wrapping_add(1);
                             }
+                            let navigation_generation = next_federation_navigation_generation;
+                            next_federation_navigation_generation =
+                                next_federation_navigation_generation.wrapping_add(1);
+                            info!(
+                                navigation_generation,
+                                endpoint_id,
+                                resource_id = resource
+                                    .as_ref()
+                                    .map(|resource| resource.resource_id.as_str()),
+                                workspace_scroll = presentation.workspace_scroll,
+                                anchor_endpoint = presentation
+                                    .workspace_scroll_anchor
+                                    .as_ref()
+                                    .map(|anchor| anchor.endpoint_id.as_str()),
+                                anchor_workspace = presentation
+                                    .workspace_scroll_anchor
+                                    .as_ref()
+                                    .map(|anchor| anchor.workspace_id.as_str()),
+                                "recorded federated sidebar transition"
+                            );
                             desired_federation_attach = Some((
                                 Instant::now() + FEDERATION_NAVIGATION_SETTLE,
                                 FederationConnectIntent {
@@ -3288,6 +3359,7 @@ async fn run_client_loop(
                                     directory: federation_directory.clone(),
                                     presentation,
                                     expected_runtime_identity,
+                                    navigation_generation,
                                 },
                             ));
                             state.request_full_redraw();
@@ -3434,6 +3506,7 @@ async fn run_client_loop(
                             expected_runtime_identity: Some(intent.expected_runtime_identity),
                             expected_resource: intent.resource,
                             request_id,
+                            navigation_generation: Some(intent.navigation_generation),
                             retain_current: true,
                             restore_if_rejected: false,
                             deadline: Instant::now() + FEDERATION_ACTIVATION_TIMEOUT,
@@ -3642,6 +3715,7 @@ async fn run_client_loop(
                                 expected_runtime_identity: Some(intent.expected_runtime_identity),
                                 expected_resource: intent.resource,
                                 request_id,
+                                navigation_generation: Some(intent.navigation_generation),
                                 retain_current: true,
                                 restore_if_rejected: true,
                                 deadline: Instant::now() + FEDERATION_ACTIVATION_TIMEOUT,
@@ -5275,6 +5349,16 @@ mod tests {
         assert!(canonical
             .iter()
             .all(|state| state.endpoint.id != "untrusted"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn newer_navigation_supersedes_an_in_flight_activation() {
+        assert_eq!(superseding_navigation_generation(Some(4), Some(5)), Some(5));
+        assert_eq!(superseding_navigation_generation(Some(4), Some(4)), None);
+        assert_eq!(superseding_navigation_generation(Some(4), Some(3)), None);
+        assert_eq!(superseding_navigation_generation(Some(4), None), None);
+        assert_eq!(superseding_navigation_generation(None, Some(5)), None);
     }
 
     #[cfg(unix)]

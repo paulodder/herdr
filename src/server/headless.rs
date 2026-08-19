@@ -2659,6 +2659,10 @@ impl HeadlessServer {
                         sidebar_section_split: self.app.state.sidebar_section_split,
                         sidebar_collapsed: self.app.state.sidebar_collapsed,
                         workspace_scroll: self.app.state.workspace_scroll,
+                        workspace_scroll_anchor: crate::ui::workspace_scroll_anchor(
+                            &self.app.state,
+                        )
+                        .map(Box::new),
                         agent_panel_scroll: self.app.state.agent_panel_scroll,
                         agent_panel_priority: matches!(
                             self.app.state.agent_panel_sort,
@@ -2932,6 +2936,16 @@ impl HeadlessServer {
                 };
                 let accepted = activation_error.is_none();
                 if accepted {
+                    if let Some(client) = self.clients.get_mut(&client_id) {
+                        client.federation_directory = directory;
+                        client.suspended = false;
+                        client.request_full_redraw();
+                    }
+                    // Materialize the client-owned canonical directory before
+                    // resolving presentation anchors. Otherwise a retained
+                    // member can clamp the incoming offset against its own
+                    // watcher cache and visibly move the sidebar after attach.
+                    self.promote_client_to_foreground(client_id);
                     if let Some(presentation) = presentation {
                         self.app.state.sidebar_width = presentation.sidebar_width.clamp(
                             self.app.state.sidebar_min_width,
@@ -2942,7 +2956,6 @@ impl HeadlessServer {
                         self.app.state.sidebar_section_split =
                             presentation.sidebar_section_split.clamp(0.1, 0.9);
                         self.app.state.sidebar_collapsed = presentation.sidebar_collapsed;
-                        self.app.state.workspace_scroll = presentation.workspace_scroll;
                         self.app.state.agent_panel_scroll = presentation.agent_panel_scroll;
                         self.app.state.agent_panel_sort = if presentation.agent_panel_priority {
                             crate::app::state::AgentPanelSort::Priority
@@ -2953,14 +2966,31 @@ impl HeadlessServer {
                         self.app.state.sidebar_spaces = *presentation.sidebar_spaces;
                         self.app.state.collapsed_space_keys =
                             presentation.collapsed_space_keys.into_iter().collect();
+                        let raw_scroll = presentation.workspace_scroll;
+                        self.app.state.workspace_scroll = presentation
+                            .workspace_scroll_anchor
+                            .as_ref()
+                            .and_then(|anchor| {
+                                crate::ui::workspace_scroll_for_anchor(&self.app.state, anchor)
+                            })
+                            .unwrap_or(raw_scroll);
+                        info!(
+                            client_id,
+                            request_id,
+                            raw_scroll,
+                            resolved_scroll = self.app.state.workspace_scroll,
+                            anchor_endpoint = presentation
+                                .workspace_scroll_anchor
+                                .as_ref()
+                                .map(|anchor| anchor.endpoint_id.as_str()),
+                            anchor_workspace = presentation
+                                .workspace_scroll_anchor
+                                .as_ref()
+                                .map(|anchor| anchor.workspace_id.as_str()),
+                            "applied federated sidebar presentation"
+                        );
                         self.app.state.mark_session_dirty();
                     }
-                    if let Some(client) = self.clients.get_mut(&client_id) {
-                        client.federation_directory = directory;
-                        client.suspended = false;
-                        client.request_full_redraw();
-                    }
-                    self.promote_client_to_foreground(client_id);
                     self.resize_shared_runtime_to_effective_size();
                 }
                 self.send_to_client(
@@ -5035,6 +5065,7 @@ mod tests {
                     sidebar_section_split: 0.62,
                     sidebar_collapsed: true,
                     workspace_scroll: 0,
+                    workspace_scroll_anchor: None,
                     agent_panel_scroll: 4,
                     agent_panel_priority: true,
                     sidebar_agents: Box::new(crate::config::AgentsSidebarConfig::default()),

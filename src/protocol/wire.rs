@@ -43,7 +43,7 @@ pub const LIVE_HANDOFF_RECONNECT_REASON: &str =
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 22;
+pub const PROTOCOL_VERSION: u32 = 23;
 
 /// Maximum UTF-8 clipboard payload the client may carry between federation
 /// members. This keeps the control path bounded independently of frame size.
@@ -58,11 +58,22 @@ pub struct FederationPresentation {
     /// Canonical workspace-list offset, transferred before activation so the
     /// sidebar does not jump when the active federation member changes.
     pub workspace_scroll: usize,
+    /// Identity of the first workspace entry in the visible list. The numeric
+    /// offset remains as a compatibility fallback, but this anchor is what
+    /// preserves the viewport when a member has not materialized an identical
+    /// list at the instant activation begins.
+    pub workspace_scroll_anchor: Option<Box<FederationWorkspaceAnchor>>,
     pub agent_panel_scroll: usize,
     pub agent_panel_priority: bool,
     pub sidebar_agents: Box<crate::config::AgentsSidebarConfig>,
     pub sidebar_spaces: Box<crate::config::SpacesSidebarConfig>,
     pub collapsed_space_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FederationWorkspaceAnchor {
+    pub endpoint_id: String,
+    pub workspace_id: String,
 }
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
@@ -2141,6 +2152,10 @@ mod tests {
                 sidebar_section_split: 0.5,
                 sidebar_collapsed: false,
                 workspace_scroll: 2,
+                workspace_scroll_anchor: Some(Box::new(FederationWorkspaceAnchor {
+                    endpoint_id: "x1".into(),
+                    workspace_id: "w2".into(),
+                })),
                 agent_panel_scroll: 3,
                 agent_panel_priority: true,
                 sidebar_agents: Box::new(crate::config::AgentsSidebarConfig::default()),

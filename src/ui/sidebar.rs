@@ -634,6 +634,51 @@ pub(crate) fn normalized_workspace_scroll(app: &AppState, area: Rect, requested:
     }
 }
 
+pub(crate) fn workspace_scroll_anchor(
+    app: &AppState,
+) -> Option<crate::protocol::FederationWorkspaceAnchor> {
+    let entry = workspace_list_entries(app)
+        .get(app.workspace_scroll)?
+        .clone();
+    let (endpoint_id, workspace_id) = match entry {
+        WorkspaceListEntry::Workspace { ws_idx, .. } => (
+            app.federation_member_id.clone(),
+            app.workspaces.get(ws_idx)?.id.clone(),
+        ),
+        WorkspaceListEntry::RemoteWorkspace {
+            endpoint_id,
+            workspace_id,
+            ..
+        } => (endpoint_id, workspace_id),
+    };
+    Some(crate::protocol::FederationWorkspaceAnchor {
+        endpoint_id,
+        workspace_id,
+    })
+}
+
+pub(crate) fn workspace_scroll_for_anchor(
+    app: &AppState,
+    anchor: &crate::protocol::FederationWorkspaceAnchor,
+) -> Option<usize> {
+    workspace_list_entries(app)
+        .iter()
+        .position(|entry| match entry {
+            WorkspaceListEntry::Workspace { ws_idx, .. } => {
+                anchor.endpoint_id == app.federation_member_id
+                    && app
+                        .workspaces
+                        .get(*ws_idx)
+                        .is_some_and(|workspace| workspace.id == anchor.workspace_id)
+            }
+            WorkspaceListEntry::RemoteWorkspace {
+                endpoint_id,
+                workspace_id,
+                ..
+            } => endpoint_id == &anchor.endpoint_id && workspace_id == &anchor.workspace_id,
+        })
+}
+
 pub(crate) fn workspace_list_entries(app: &AppState) -> Vec<WorkspaceListEntry> {
     workspace_list_entries_inner(app, false)
 }
@@ -2575,7 +2620,9 @@ mod tests {
 
         let mut on_b = AppState::test_new();
         on_b.federation_member_id = "b".into();
-        on_b.workspaces = vec![Workspace::test_new("b-workspace")];
+        let mut local_b = Workspace::test_new("b-workspace");
+        local_b.id = "b-workspace".into();
+        on_b.workspaces = vec![local_b];
         on_b.federation_client_overlay.insert(
             "a".into(),
             remote_endpoint("a", "a-workspace", "a workspace"),
@@ -2594,6 +2641,41 @@ mod tests {
             ]
         );
         assert_eq!(member_workspace_order(&on_b), member_workspace_order(&on_a));
+    }
+
+    #[test]
+    fn workspace_scroll_anchor_survives_federation_activation() {
+        let mut on_a = AppState::test_new();
+        on_a.federation_member_id = "a".into();
+        on_a.workspaces = vec![Workspace::test_new("a-workspace")];
+        on_a.federation_client_overlay.insert(
+            "b".into(),
+            remote_endpoint("b", "b-workspace", "b workspace"),
+        );
+        on_a.federation_client_overlay.insert(
+            "c".into(),
+            remote_endpoint("c", "c-workspace", "c workspace"),
+        );
+        on_a.workspace_scroll = 1;
+
+        let mut on_b = AppState::test_new();
+        on_b.federation_member_id = "b".into();
+        let mut local_b = Workspace::test_new("b-workspace");
+        local_b.id = "b-workspace".into();
+        on_b.workspaces = vec![local_b];
+        on_b.federation_client_overlay.insert(
+            "a".into(),
+            remote_endpoint("a", "a-workspace", "a workspace"),
+        );
+        on_b.federation_client_overlay.insert(
+            "c".into(),
+            remote_endpoint("c", "c-workspace", "c workspace"),
+        );
+
+        let anchor = workspace_scroll_anchor(&on_a).expect("visible top workspace anchor");
+        assert_eq!(anchor.endpoint_id, "b");
+        assert_eq!(anchor.workspace_id, "b-workspace");
+        assert_eq!(workspace_scroll_for_anchor(&on_b, &anchor), Some(1));
     }
 
     #[test]
