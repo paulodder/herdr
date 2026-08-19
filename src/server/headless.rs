@@ -2369,6 +2369,61 @@ impl HeadlessServer {
         }
     }
 
+    /// Sends the source member's newly selected sidebar state through the
+    /// reliable control queue immediately before a federation attach. Render
+    /// frames normally use a separate, droppable queue whose writer gives
+    /// control messages priority. Without this preview the attach can overtake
+    /// the frame produced by the same navigation key, and the connecting UI
+    /// briefly redraws the previous selection from its semantic-frame cache.
+    fn send_federation_selection_preview(&mut self, client_id: u64) -> bool {
+        let Some((terminal_size, cell_size, directory, is_foreground)) =
+            self.clients.get(&client_id).map(|client| {
+                (
+                    client.terminal_size,
+                    client.cell_size,
+                    client.federation_directory.clone(),
+                    self.foreground_client_id == Some(client_id),
+                )
+            })
+        else {
+            return false;
+        };
+        if !self
+            .clients
+            .get(&client_id)
+            .is_some_and(|client| matches!(client.mode, ClientConnectionMode::App))
+        {
+            return false;
+        }
+
+        self.app.apply_federation_directory(Some(directory));
+        let area = Rect::new(0, 0, terminal_size.0, terminal_size.1);
+        let render_cell_size = if self.app.state.kitty_graphics_enabled && cell_size.is_known() {
+            cell_size
+        } else {
+            crate::kitty_graphics::HostCellSize::default()
+        };
+        let (buffer, cursor) = crate::server::render_stream::render_virtual_with_runtime_registry(
+            &mut self.app.state,
+            &self.app.terminal_runtimes,
+            area,
+            is_foreground,
+            render_cell_size,
+        );
+        let hyperlinks = crate::server::render_stream::visible_hyperlinks(
+            &self.app.state,
+            &self.app.terminal_runtimes,
+        );
+        let frame = FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, cursor, &hyperlinks);
+
+        // The preview bypasses ClientRenderState, so the next ordinary frame
+        // must be complete if the attach is cancelled or rejected.
+        if let Some(client) = self.clients.get_mut(&client_id) {
+            client.request_full_redraw();
+        }
+        self.send_to_client(client_id, ServerMessage::Frame(frame))
+    }
+
     fn federation_directory(&self) -> Vec<crate::federation::EndpointState> {
         let mut directory = self
             .app
@@ -2646,6 +2701,30 @@ impl HeadlessServer {
             );
             let directory = self.federation_directory();
             self.send_client_graphics_cleanup(client_id);
+            if self.send_federation_selection_preview(client_id) {
+                info!(
+                    client_id,
+                    endpoint_id,
+                    selected_endpoint = self
+                        .app
+                        .state
+                        .global_workspace_cursor
+                        .as_ref()
+                        .map(|cursor| cursor.endpoint_id.as_str()),
+                    selected_workspace = self
+                        .app
+                        .state
+                        .global_workspace_cursor
+                        .as_ref()
+                        .map(|cursor| cursor.workspace_id.as_str()),
+                    "sent stable federation selection preview"
+                );
+            } else {
+                warn!(
+                    client_id,
+                    endpoint_id, "could not send stable federation selection preview"
+                );
+            }
             self.send_to_client(
                 client_id,
                 ServerMessage::FederationAttach {
@@ -8550,6 +8629,62 @@ next_tab = ""
             other => panic!("expected FederationAttachCancel, got {other:?}"),
         }
         assert!(!server.app.state.request_federation_attach_cancel);
+    }
+
+    #[test]
+    fn federation_attach_sends_current_selection_frame_before_control_handoff() {
+        let mut server = test_headless_server();
+        server.app.state.federation_member_id = "home".into();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("local")];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.ensure_test_terminals();
+        server.app.state.global_workspace_cursor =
+            Some(crate::app::state::FederatedWorkspaceTarget {
+                endpoint_id: "remote".into(),
+                workspace_id: "remote-workspace".into(),
+            });
+        server.app.state.request_federation_attach =
+            Some(crate::app::state::FederationAttachRequest {
+                endpoint_id: "remote".into(),
+                target: "remote.example".into(),
+                session: "main".into(),
+                resource: None,
+            });
+
+        let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+
+        assert!(server.handle_client_input_events(1, Vec::new()));
+
+        assert!(matches!(
+            read_server_message(
+                client_control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("selection preview")
+            ),
+            ServerMessage::Frame(_)
+        ));
+        assert!(matches!(
+            read_server_message(
+                client_control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("federation attach")
+            ),
+            ServerMessage::FederationAttach { endpoint_id, .. } if endpoint_id == "remote"
+        ));
     }
 
     #[test]
