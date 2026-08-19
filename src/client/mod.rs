@@ -2083,6 +2083,20 @@ fn merge_federation_directory(
 }
 
 #[cfg(unix)]
+fn authoritative_directory_update_for_renderer(
+    connection_id: u64,
+    directory_authority_connection_id: u64,
+    federation_directory: &mut Vec<crate::federation::EndpointState>,
+    incoming: Vec<crate::federation::EndpointState>,
+) -> Option<Vec<crate::federation::EndpointState>> {
+    if connection_id != directory_authority_connection_id {
+        return None;
+    }
+    merge_federation_directory(federation_directory, incoming);
+    Some(federation_directory.clone())
+}
+
+#[cfg(unix)]
 fn activate_federation_connection(
     stream: &mut LocalStream,
     request_id: u64,
@@ -2504,16 +2518,22 @@ async fn run_client_loop(
             } => {
                 #[cfg(unix)]
                 if let ServerMessage::FederationDirectoryUpdate { directory } = &message {
-                    if connection_id == directory_authority_connection_id {
-                        merge_federation_directory(&mut federation_directory, directory.clone());
-                        if active_connection_id != directory_authority_connection_id {
-                            let _ = write_to_server(
-                                &mut write_stream,
-                                &ClientMessage::FederationDirectoryUpdate {
-                                    directory: federation_directory.clone(),
-                                },
-                            );
-                        }
+                    if let Some(directory) = authoritative_directory_update_for_renderer(
+                        connection_id,
+                        directory_authority_connection_id,
+                        &mut federation_directory,
+                        directory.clone(),
+                    ) {
+                        // The active renderer always consumes the client-owned
+                        // canonical directory, including when the pinned home
+                        // connection is itself active. This message only
+                        // updates that client's private server-side state, so
+                        // sending it back to home cannot create a broadcast
+                        // loop.
+                        let _ = write_to_server(
+                            &mut write_stream,
+                            &ClientMessage::FederationDirectoryUpdate { directory },
+                        );
                         state.request_full_redraw();
                     } else {
                         warn!(
@@ -5216,6 +5236,45 @@ mod tests {
         directory = vec![endpoint("old.example", "main", Some(9))];
         merge_federation_directory(&mut directory, vec![endpoint("old.example", "other", None)]);
         assert_eq!(directory[0].cursor, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn home_authority_directory_update_is_forwarded_to_active_renderer() {
+        let endpoint = |id: &str| {
+            crate::federation::EndpointState::configured(crate::config::FederationEndpointConfig {
+                id: id.into(),
+                target: id.into(),
+                ..crate::config::FederationEndpointConfig::default()
+            })
+        };
+        let mut canonical = Vec::new();
+
+        let forwarded = authoritative_directory_update_for_renderer(
+            7,
+            7,
+            &mut canonical,
+            vec![endpoint("home"), endpoint("remote")],
+        )
+        .expect("the pinned home update must be forwarded even while home is active");
+
+        assert_eq!(
+            forwarded
+                .iter()
+                .map(|state| state.endpoint.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["home", "remote"]
+        );
+        assert!(authoritative_directory_update_for_renderer(
+            8,
+            7,
+            &mut canonical,
+            vec![endpoint("untrusted")],
+        )
+        .is_none());
+        assert!(canonical
+            .iter()
+            .all(|state| state.endpoint.id != "untrusted"));
     }
 
     #[cfg(unix)]
