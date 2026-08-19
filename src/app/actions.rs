@@ -5408,7 +5408,7 @@ mod tests {
     }
 
     #[test]
-    fn priority_sort_keeps_recently_changed_idle_agent_above_older_idle_agent() {
+    fn priority_sort_returns_to_canonical_order_after_equal_priority() {
         let mut workspace = Workspace::test_new("one");
         let first = workspace.tabs[0].root_pane;
         let second = workspace.test_split(Direction::Horizontal);
@@ -5433,7 +5433,7 @@ mod tests {
 
         assert!(matches!(
             crate::ui::agent_panel_entries(&state)[0].target,
-            crate::ui::AgentPanelTarget::Local { pane_id, .. } if pane_id == second
+            crate::ui::AgentPanelTarget::Local { pane_id, .. } if pane_id == first
         ));
         state.assert_invariants_for_test();
     }
